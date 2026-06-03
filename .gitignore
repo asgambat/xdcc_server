@@ -7,8 +7,8 @@
 *.dll
 *.so
 *.dylib
-xdcc-server
-xdcc-browser
+/xdcc-server
+/xdcc-browser
 bin/
 
 # Test binary, built with `go test -c`
