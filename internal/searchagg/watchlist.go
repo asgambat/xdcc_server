@@ -146,6 +146,14 @@ func (a *Aggregator) RunWatchlist(ctx context.Context, w store.Watchlist) (*Watc
 	}
 
 	a.log.Infof("[WATCHLIST_RUN] ====== Run complete for %q — %d new packs ======", w.Name, len(wr.NewPacks))
+
+	// Fire external notification callback (ntfy/pushover/webhook) — called for both
+	// scheduler-triggered and API-triggered runs, so we handle it here in RunWatchlist
+	// rather than in runWatchlistSafely to avoid double-calling.
+	if a.onWatchlistResults != nil && wr.HasChanges && len(wr.NewPacks) > 0 {
+		a.onWatchlistResults(w.Name, len(wr.NewPacks), wr.Enqueued)
+	}
+
 	return wr, nil
 }
 

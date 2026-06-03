@@ -219,10 +219,9 @@ func (a *Aggregator) runWatchlistSafely(wl store.Watchlist) {
 			a.notifyWatchlistResults(wl.Name, result.NewPacks)
 		}
 
-		// External notification (webhook, etc.) only when new packs are actually found
-		if a.onWatchlistResults != nil && newPacks > 0 {
-			a.onWatchlistResults(wl.Name, newPacks, enqueued)
-		}
+		// External notification (webhook, etc.) is now handled in RunWatchlist to cover
+		// both scheduler-triggered and API-triggered runs — do NOT call it here to avoid double invocation.
+		// (Scheduler: runWatchlistSafely → RunWatchlist → callback. API: RunWatchlist → callback directly.)
 	} else {
 		a.log.Debugf("watchlist %q: no changes since last run", wl.Name)
 	}

@@ -541,7 +541,7 @@ func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 			if err := n.NotifyWatchlistResults(event); err != nil {
 				m.logger.Errorf("notifier: watchlist notification failed for %q: %v", name, err)
 			} else {
-				m.logger.Debugf("notifier: watchlist notification sent for %q (%d new packs)", name, newPacks)
+				m.logger.Infof("notifier: watchlist notification sent for %q (%d new packs)", name, newPacks)
 			}
 		}()
 	}
