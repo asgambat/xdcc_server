@@ -267,7 +267,7 @@ log.Printf("download %d completed", id) // No level context!
 **Patterns:**
 ```go
 // All access through store.SQLiteStore
-store.InsertDownload(record)
+store.EnqueueDownload(record)
 store.UpdateDownloadStatus(id, status)
 store.GetDownloadByID(id)
 store.ListDownloads(filters)
@@ -826,7 +826,7 @@ type Engine interface {
 
 1. Create `internal/search/<engine_name>.go`
 2. Implement `search.Engine` interface
-3. Register in `search.NewEngines()` call
+3. Register in the engine list (see `cmd/xdcc-server/main.go` where engines are passed to `searchagg.New()`)
 4. Add tests in `internal/search/<engine_name>_test.go`
 
 ### Adding a New API Endpoint
