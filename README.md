@@ -1539,19 +1539,25 @@ xdcc-go/
 │   ├── xdcc-search/       # Search CLI
 │   └── xdcc-browse/       # Interactive browse CLI
 ├── internal/              # Internal packages
-│   ├── api/              # REST API handlers
-│   ├── cli/              # Shared CLI utilities
-│   ├── client/           # HTTP client for delegation
-│   ├── config/           # Configuration loading
-│   ├── downloader/       # DCC transfer logic
-│   ├── entities/         # Core domain models
+│   ├── api/              # REST API handlers (chi router)
+│   ├── bridge/           # Event forwarding (IRC/queue → SSE hub)
+│   ├── cli/              # Shared CLI utilities (verbosity)
+│   ├── client/           # HTTP client for CLI → server delegation
+│   ├── config/           # Configuration loading (YAML + env + flags)
+│   ├── diskmon/          # Disk space monitoring
+│   ├── downloader/       # DCC transfer implementation
+│   ├── entities/         # Core domain models (XDCC pack parsing)
 │   ├── irc/              # IRC client + DCC protocol
-│   ├── ircmanager/       # Multi-server connection manager
-│   ├── queue/            # Download queue orchestration
+│   ├── ircmanager/       # Multi-server persistent connection manager
+│   ├── logging/          # Structured logging with SSE broadcast
+│   ├── metrics/          # Runtime metrics collection
+│   ├── notifier/         # External notifications (webhook, ntfy, pushover)
+│   ├── pubsub/           # Generic pub/sub hub (typed event fan-out)
+│   ├── queue/            # Download queue orchestration + retry
 │   ├── search/           # Search engine implementations
-│   ├── searchagg/        # Search aggregation + caching
-│   ├── sse/              # Server-Sent Events hub
-│   └── store/            # SQLite persistence layer
+│   ├── searchagg/        # Search aggregation, caching, presets, watchlists
+│   ├── sse/              # Server-Sent Events hub + event types
+│   └── store/            # SQLite persistence (focused interfaces, migrations)
 ├── web/                   # Frontend (Svelte 5)
 │   ├── src/              # Svelte components
 │   └── dist/             # Built assets (embedded in binary)

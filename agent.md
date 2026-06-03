@@ -28,11 +28,11 @@ xdcc-go is a high-performance XDCC downloader for IRC written in Go with a moder
 
 | Layer | Technology |
 |-------|------------|
-| **Backend** | Go 1.25+, SQLite (modernc.org/sqlite), girc (IRC), chi (HTTP router) |
+| **Backend** | Go 1.25+, SQLite (modernc.org/sqlite), girc (IRC), chi (HTTP router), cobra (CLI) |
 | **Frontend** | Svelte 5, Vite |
 | **Protocol** | IRC + DCC (file transfer), Server-Sent Events (real-time updates) |
-| **Storage** | SQLite (persistent queue, config, watchlists) |
-| **Deployment** | Docker, systemd, bare metal |
+| **Storage** | SQLite (persistent queue, config, watchlists, presets, provider stats) |
+| **Deployment** | Docker (multi-arch, scratch base, non-root user), systemd, bare metal |
 
 ---
 
@@ -65,21 +65,25 @@ The project is structured around four independent binaries with shared internal 
 
 ```
 internal/
-├── api/          # REST API handlers (chi router, JSON responses)
+├── api/          # REST API handlers (chi router, middleware, JSON responses)
+├── bridge/       # Forwards IRC + queue events to SSE hub (extracted from main.go)
 ├── cli/          # Shared CLI utilities (verbosity, flag parsing)
 ├── client/       # HTTP client for CLI → server delegation
-├── config/       # Configuration loading (YAML + env + flags)
-├── diskmon/      # Disk space monitoring
+├── config/       # Configuration loading (YAML + env + flags), validation
+├── diskmon/      # Disk space monitoring with platform-specific implementations
 ├── downloader/   # DCC transfer implementation
 ├── entities/     # Core domain models (XDCCPack, IrcServer, parsing logic)
 ├── irc/          # IRC protocol client (girc wrapper, DCC handling)
-├── ircmanager/   # Multi-server connection manager (daemon only)
-├── logging/      # Structured logging
-├── queue/        # Download queue orchestration (SQLite-backed)
-├── search/       # Search engine implementations
-├── searchagg/    # Search aggregation + caching + deduplication
-├── sse/          # Server-Sent Events hub for real-time browser updates
-└── store/        # SQLite persistence layer
+├── ircmanager/   # Multi-server persistent connection manager (daemon only)
+├── logging/      # Structured logging with levels, file rotation, SSE broadcast
+├── metrics/      # Runtime metrics collection (HTTP concurrency, provider timeouts, etc.)
+├── notifier/     # External notifications (webhook, ntfy, pushover)
+├── pubsub/       # Generic typed pub/sub hub for fanning out events
+├── queue/        # Download queue orchestration (SQLite-backed, retry, parallelism)
+├── search/       # Search engine implementations (nibl, xdcc-eu, subsplease)
+├── searchagg/    # Search aggregation, caching, deduplication, presets, watchlists
+├── sse/          # Server-Sent Events hub + event type constants
+└── store/        # SQLite persistence (focused interfaces, schema migrations, backup)
 ```
 
 ### Key Data Flows
@@ -99,21 +103,69 @@ xdcc-dl --command-server → client.CommandClient → HTTP POST → server API �
 Web UI → REST API → queue.Manager → ircmanager.Manager → irc.Client → DCC transfer
 ```
 
-**Real-time Updates:**
+**Real-time Updates (event pipeline):**
 ```
-Download event → sse.Hub.Broadcast() → SSE stream → web UI updates
+Download event → queue.Manager publishes to pubsub.Hub
+    → bridge.EventBridge forwards to sse.Hub.Broadcast()
+    → SSE stream → web UI updates
+
+IRC event → ircmanager.Manager publishes to pubsub.Hub
+    → bridge.EventBridge forwards to sse.Hub.Broadcast()
+    → SSE stream → web UI updates
+
+Log entry → logging.LogBroadcaster → sse.Hub.Broadcast()
+    → SSE stream → web UI log viewer
 ```
+
+**Event Types (must stay in sync with frontend `api.js`):**
+All SSE event types are defined as constants in `internal/sse/events.go`. The frontend SSEClient in `web/src/lib/api.js` must register listeners for the exact same string constants. When adding a new event type:
+1. Add constant in `sse/events.go`
+2. Add listener name in `api.js` SSEClient eventTypes array
+3. Handle the event in the appropriate Svelte component
 
 ### Core Abstractions
 
-| Type | Responsibility |
-|------|----------------|
-| `entities.XDCCPack` | Represents a downloadable pack (server, bot, pack#, filename, size) |
-| `irc.Client` | Handles IRC protocol + DCC transfers for a single connection |
-| `ircmanager.Manager` | Manages persistent IRC connections (daemon only) |
-| `queue.Manager` | Orchestrates download queue, retries, parallelism limits |
-| `store.SQLiteStore` | All persistent state (downloads, config, watchlists, servers) |
-| `searchagg.Aggregator` | Coordinates multiple search providers with caching |
+| Type | Package | Responsibility |
+|------|---------|----------------|
+| `entities.XDCCPack` | entities | Represents a downloadable pack (server, bot, pack#, filename, size) |
+| `irc.Client` | irc | Handles IRC protocol + DCC transfers for a single connection |
+| `ircmanager.Manager` | ircmanager | Manages persistent IRC connections across multiple servers |
+| `queue.Manager` | queue | Orchestrates download queue, retries, parallelism limits |
+| `queue.Event` | queue | Standardized event type for download lifecycle changes |
+| `store.Store` | store | Composite interface for all persistence (embeds focused interfaces) |
+| `store.ServerStore` | store | Focused interface for IRC server/channel persistence |
+| `store.DownloadStore` | store | Focused interface for download queue persistence |
+| `store.SearchCacheStore` | store | Focused interface for search result caching |
+| `store.SearchPresetStore` | store | Focused interface for search presets |
+| `store.WatchlistStore` | store | Focused interface for watchlist persistence |
+| `store.ProviderStatsStore` | store | Focused interface for provider metrics |
+| `search.Engine` | search | Interface for search providers (`Name()`, `Search()`) |
+| `searchagg.Aggregator` | searchagg | Coordinates multiple search providers with caching |
+| `sse.Hub` | sse | Server-Sent Events hub for broadcasting to connected clients |
+| `pubsub.Hub[T]` | pubsub | Generic typed pub/sub hub for internal event fan-out |
+| `bridge.EventBridge` | bridge | Forwards IRC + queue events to SSE hub for real-time push |
+| `notifier.Manager` | notifier | Orchestrates multiple notification providers |
+| `notifier.Notifier` | notifier | Interface for notification providers (webhook, ntfy, pushover) |
+| `metrics.Metrics` | metrics | Runtime metrics collector |
+| `diskmon.Monitor` | diskmon | Disk space monitoring with configurable thresholds |
+| `logging.Logger` | logging | Structured logger with levels (Debug/Info/Warn/Error) |
+| `config.Config` | config | Merged configuration from YAML + env + CLI flags |
+
+### Focused Interface Pattern
+
+The `store` package defines **focused interfaces** (e.g., `ServerStore`, `DownloadStore`) that expose only the methods each consumer needs. These are embedded into a composite `Store` interface for backward compatibility and convenience.
+
+**Rule:** New code should depend on the focused interface, not the composite `Store`.
+
+```go
+// ✅ Correct: depend only on what you need
+func NewAggregator(store DownloadStore, cacheStore SearchCacheStore, ...) *Aggregator
+
+// ❌ Wrong: depend on the entire Store
+func NewAggregator(store Store, ...) *Aggregator
+```
+
+This pattern is being progressively applied across the codebase. When refactoring, narrow the dependency to the smallest focused interface.
 
 ---
 
@@ -126,7 +178,7 @@ Download event → sse.Hub.Broadcast() → SSE stream → web UI updates
 2. Environment variables (e.g., `XDCC_HTTP_PORT=9090`)
 3. `config.yaml` file
 
-Implemented in `config.Load()` which merges all three sources.
+Implemented in `config.Load()` which merges all three sources. Config is validated after loading; all validation errors are collected and reported together.
 
 ### Error Handling
 
@@ -156,7 +208,7 @@ return err
 
 **HTTP Handlers:**
 ```go
-// Use api.writeError for consistent JSON responses
+// Use api.writeError for consistent JSON error responses
 api.writeError(w, http.StatusBadRequest, "invalid_input", "pack number must be positive")
 ```
 
@@ -228,9 +280,12 @@ tx.Commit()
 ```
 
 **Schema Migrations:**
-- Manual versioning in `store/schema.go`
+- Versioned migrations in `store/schema.go` (`currentSchemaVersion = 7`)
+- Each migration is a `migration` struct: `{version, description, up SQL}`
+- Before each migration, an auto-backup is created (`{dbPath}.backup.v{N}.{timestamp}`)
+- Only the 3 most recent backups are kept; older ones are auto-cleaned
 - Always test migrations with existing databases
-- Maintain backward compatibility
+- Maintain backward compatibility — never modify existing migration versions
 
 ### Concurrency
 
@@ -239,6 +294,7 @@ tx.Commit()
 2. Use channels to communicate between goroutines (especially with girc event handlers)
 3. Spawn download workers per active download (managed by `queue.Manager`)
 4. SSE broadcasts are concurrent-safe via `sse.Hub.Broadcast()`
+5. Use `pubsub.Hub[T]` for internal event fan-out (non-blocking publish)
 
 **Goroutine Lifecycle Management (CRITICAL):**
 
@@ -298,17 +354,33 @@ func (w *MyWorker) Stop() {
 - ✅ Easier to extend (multiple goroutines tracked by same WaitGroup)
 - ❌ **NEVER** use `done chan struct{}` initialized in the goroutine itself (race condition)
 
-**Example (download worker):**
+**Drain-on-Shutdown Pattern:**
+Forwarding goroutines (bridge, notifier) drain remaining events with a short timeout (100ms) after context cancellation, before returning:
+
 ```go
-func (m *Manager) processDownload(ctx context.Context, packID int64) error {
-    // Context for cancellation
-    select {
-    case <-ctx.Done():
-        return ctx.Err()
-    case result := <-downloadCh:
-        // process result
+func drainEvents(ch <-chan Event) {
+    timeout := time.After(100 * time.Millisecond)
+    for {
+        select {
+        case evt, ok := <-ch:
+            if !ok { return }
+            // process event
+        case <-timeout:
+            return
+        }
     }
 }
+```
+
+**Generic Pub/Sub Pattern:**
+Use `pubsub.Hub[T any]` for typed event fan-out. Publish is non-blocking (drops events when subscriber buffer is full). Subscribe returns a channel; the caller must drain it.
+
+```go
+hub := pubsub.New[MyEvent](64)  // bufSize=64 per subscriber
+ch := hub.Subscribe()
+hub.Publish(evt)
+hub.Unsubscribe(ch)
+hub.Close()  // closes all subscriber channels
 ```
 
 ### Naming Conventions
@@ -321,6 +393,34 @@ func (m *Manager) processDownload(ctx context.Context, packID int64) error {
 | `List*` | `ListDownloads()` | Retrieve multiple records |
 | `*Manager` | `QueueManager`, `IRCManager` | Orchestrator/coordinator types |
 | `*Client` | `irc.Client`, `client.CommandClient` | External communication |
+| `*Store` | `ServerStore`, `DownloadStore` | Focused persistence interface |
+| `New*` | `NewSQLiteStore()` | Constructor function |
+| `*Notifier` | `WebhookNotifier`, `NtfyNotifier` | Notification provider |
+| `Notifier` | (interface) | Notification provider interface |
+
+### `.gitignore` / `.dockerignore` Conventions (CRITICAL)
+
+**Rule: ALL patterns that target root-level files or directories MUST be anchored with `/`.**
+
+Without `/`, patterns match at ANY depth, which can silently exclude source directories.
+
+```dockerignore
+# ✅ CORRECT: anchored to root
+/xdcc-server
+/xdcc-dl
+/bin/
+/docs/
+/README.md
+
+# ❌ WRONG: matches anywhere in the tree
+xdcc-server    # Also matches cmd/xdcc-server/!
+bin/            # Also matches internal/foo/bin/!
+README.md       # Also matches docs/old/README.md!
+```
+
+**Exceptions (safe to leave unanchored):**
+- `*.exe`, `*.test` — file extension globs (can't match directory names)
+- `*.out` — file extension glob (typically coverage output at root)
 
 ---
 
@@ -356,6 +456,28 @@ func TestParseXDCCMessage(t *testing.T) {
 }
 ```
 
+### Template Database Pattern
+
+Integration tests that need a populated SQLite database use a **template database** pattern to avoid running migrations for every test:
+
+1. `store/main_test.go` — `TestMain` creates a template DB with all migrations applied
+2. Individual test files copy the template into a temp directory: `copyFile(templateDBPath, dbPath)`
+3. Tests use the copy with PRAGMA optimizations (`synchronous=OFF`, `journal_mode=MEMORY`)
+
+```go
+// In store/main_test.go (or api/main_test.go)
+func TestMain(m *testing.M) {
+    dir, _ := os.MkdirTemp("", "xdcc-test-*")
+    dbPath := filepath.Join(dir, "template.db")
+    s, _ := NewSQLiteStore(dbPath, testLog)
+    s.Migrate(context.Background())
+    templateDBPath = dbPath
+    code := m.Run()
+    os.RemoveAll(dir)
+    os.Exit(code)
+}
+```
+
 ### Test Commands
 
 ```bash
@@ -385,6 +507,7 @@ go test -v ./...
 | Unit | `package_test.go` | Pure functions, parsing, validation |
 | Integration | `api_integration_test.go` | API handlers with in-memory SQLite |
 | Mock | Inline interfaces | IRC connections, HTTP clients |
+| Concurrency | `pubsub_test.go` | Race detector with multiple goroutines |
 
 ### Test Practices
 
@@ -393,11 +516,13 @@ go test -v ./...
 - Keep fixtures minimal (prefer inline test data)
 - Test error paths explicitly
 - Use in-memory SQLite (`:memory:`) for database tests
+- Use template database pattern for integration tests (avoids repeated migrations)
 
 **DON'T:**
 - Rely on external services (IRC, HTTP)
 - Use shared global state
 - Skip race detector for concurrent code
+- Run full migrations in every test (use template DB pattern)
 
 ---
 
@@ -435,6 +560,74 @@ if errors.Is(err, irc.ErrBotNotFound) {
     return err
 }
 ```
+
+---
+
+## Frontend Conventions
+
+### Svelte 5 Component Architecture
+
+**State Management:**
+- All global state lives in Svelte writable/derived stores (`web/src/lib/stores.js`)
+- Components read from stores via `$storeName` syntax
+- Components write to stores via `.set()` / `.update()` calls
+- No prop drilling beyond 1 level; use stores for shared state
+
+**Component Organization:**
+```
+web/src/components/
+├── Dashboard.svelte       # Main view: overview, stats, active downloads
+├── Sidebar.svelte         # Navigation sidebar with view switching
+├── Servers.svelte         # IRC server configuration and management
+├── Downloads.svelte       # Download queue (embeds DownloadTable)
+├── DownloadTable.svelte   # Reusable download table component
+├── Search.svelte          # Search interface with filters
+├── Presets.svelte         # Saved search presets management
+├── Watchlists.svelte      # Automated watchlist management
+├── Providers.svelte       # Provider health and enable/disable
+├── Settings.svelte        # Server configuration (YAML editor + structured form)
+├── Logs.svelte            # Real-time log viewer (SSE-powered)
+├── ConnectionStatus.svelte # SSE connection status indicator
+├── Toast.svelte           # Toast notification component
+└── Modal.svelte           # Reusable modal dialog component
+```
+
+### SSE Event Handling
+
+All real-time updates flow through a singleton `SSEClient` in `web/src/lib/api.js`:
+
+1. **App.svelte** creates the SSE client and registers event listeners
+2. Each event type updates its corresponding Svelte store
+3. Components reactively update when stores change
+
+**Adding a new SSE event:**
+1. Add event type constant in `internal/sse/events.go`
+2. Emit event with `sseHub.Publish(eventType, payload)`
+3. Add event type name to `eventTypes` array in `web/src/lib/api.js` SSEClient
+4. Register listener in `App.svelte` that updates the appropriate store
+
+### API Client Pattern
+
+The `api` object in `web/src/lib/api.js` provides:
+- `api.request(method, path, body, opts)` — base request with timeout, auth, error handling
+- `api.get()`, `api.post()`, `api.put()`, `api.patch()`, `api.del()` — convenience methods
+- Domain-specific API wrappers: `ServersAPI`, `DownloadsAPI`, `SearchAPI`, `PresetsAPI`, `WatchlistsAPI`, `ProvidersAPI`, `SystemAPI`
+
+**Admin Token Pattern:**
+- Protected endpoints require `X-Admin-Token` header
+- Token stored in `localStorage` with configurable TTL (default 15 min)
+- `getAdminToken()` retrieves valid token; `setAdminToken(token, ttlMinutes)` stores it
+- On 401 response, `notifyAuthFailure()` triggers re-authentication modal
+- `SYSTEM_VIEWS` set controls which views require authentication
+
+### Utility Functions
+
+Found in `web/src/lib/utils.js`:
+- `formatBytes(n)` — human-readable byte sizes (KB, MB, GB...)
+- `formatSpeed(bps)` — transfer rate formatting
+- `formatUptime(seconds)` — server uptime display
+- `escapeHTML(str)` — XSS prevention
+- `debounce(fn, delay)` — input debouncing helper
 
 ---
 
@@ -484,7 +677,7 @@ docker buildx build --platform=linux/amd64,linux/arm64 -t xdcc-go .
 - `XDCC_LOGGING_FILE_PATH`: Log file (default: stderr)
 
 **Docker Volumes:**
-- `/data`: SQLite database
+- `/var/lib/xdcc-server/db`: SQLite database
 - `/data/downloads/tmp`: Partial files
 - `/data/downloads/complete`: Finished downloads
 - `/data/logs`: Log files
@@ -569,17 +762,19 @@ type Engine interface {
 
 **Build Process:**
 1. `npm run build` generates `web/dist/`
-2. `web/frontend.go` embeds dist via `//go:embed dist`
+2. `frontend.go` embeds dist via `//go:embed web/dist`
 3. `xdcc-server` serves embedded files via `http.FileServer`
 
 **Routing:**
-- `/api/*`: REST API endpoints
+- `/api/*`: REST API endpoints (registered first)
+- `/healthz`, `/readyz`: Health probes
+- `/debug/pprof/*`: Profiling (requires admin token)
 - All other paths: Serve `index.html` (SPA routing)
 
 **Real-time Updates:**
 - Server-Sent Events (SSE) at `/api/events`
 - `sse.Hub` broadcasts to all connected clients
-- Events: download progress, status changes, queue updates
+- Events: download progress, status changes, queue updates, IRC state, logs, disk space, watchlist results
 
 ---
 
@@ -594,9 +789,16 @@ type Engine interface {
 ✅ **Always** ask if user wants to run `go test -race ./...` before committing concurrent code  
 ✅ **Always** rebuild frontend (`npm run build`) before building server  
 ✅ **Always** use typed errors for control flow (`errors.Is()`, `errors.As()`)  
-✅ **Always** access database via `store.SQLiteStore` methods  
+✅ **Always** access database via store interface methods  
 ✅ **Always** use `t.Parallel()` for independent tests  
-✅ **Always** check configuration priority: flags > env > yaml
+✅ **Always** check configuration priority: flags > env > yaml  
+✅ **Always** anchor `.gitignore`/`.dockerignore` patterns with `/` for root-only files/directories  
+✅ **Always** use the WaitGroup pattern for goroutine lifecycle management  
+✅ **Always** depend on focused interfaces, not the composite `Store` (new code)  
+✅ **Always** use `pubsub.Hub[T]` for internal event fan-out  
+✅ **Always** add SSE event types to both `sse/events.go` AND `web/src/lib/api.js`  
+✅ **Always** use the template DB pattern for integration tests (avoid repeated migrations)  
+✅ **Always** drain events on shutdown with a short timeout (100ms pattern)
 
 ### DON'T
 
@@ -604,13 +806,17 @@ type Engine interface {
 ❌ **Never** use `log.Println`, `log.Printf`, or `*log.Logger` (use `*logging.Logger` everywhere)  
 ❌ **Never** pass a `*log.Logger` adapter to any constructor — all constructors accept `*logging.Logger`  
 ❌ **Never** swallow errors without wrapping  
-❌ **Never** access database outside `store.SQLiteStore`  
+❌ **Never** access database outside store interfaces  
 ❌ **Never** use shared global state in tests  
 ❌ **Never** skip the race detector for concurrent code  
 ❌ **Never** hardcode configuration (use flags/env/yaml)  
 ❌ **Never** block the main goroutine in girc event handlers (use channels)  
 ❌ **Never** commit without asking user if he wants to run `go test ./...`  
-❌ **Never** modify database schema without migration logic
+❌ **Never** modify database schema without migration logic  
+❌ **Never** use `done chan struct{}` initialized in a goroutine (race condition)  
+❌ **Never** leave `.gitignore`/`.dockerignore` patterns unanchored without `/` for root-only matches  
+❌ **Never** add SSE events without syncing frontend `api.js` eventTypes array  
+❌ **Never** use the composite `Store` interface in new constructors (use focused interfaces)
 
 ---
 
@@ -620,7 +826,7 @@ type Engine interface {
 
 1. Create `internal/search/<engine_name>.go`
 2. Implement `search.Engine` interface
-3. Register in `searchagg.New()` call in `cmd/xdcc-server/main.go`
+3. Register in `search.NewEngines()` call
 4. Add tests in `internal/search/<engine_name>_test.go`
 
 ### Adding a New API Endpoint
@@ -639,17 +845,33 @@ type Engine interface {
 
 ### Modifying Database Schema
 
-1. Update table definitions in `store/schema.go`
-2. Add migration logic in `store/sqlite.go` (manual versioning)
-3. Test with existing databases (backward compatibility)
-4. Document migration in commit message
+1. Add new migration entry to `migrations` slice in `store/schema.go`
+2. Increment `currentSchemaVersion` constant
+3. Write the `ALTER TABLE` / `CREATE TABLE` SQL for the `up` field
+4. Test with existing databases (backward compatibility via the auto-backup system)
+5. Document migration in commit message
 
 ### Adding Real-Time Events
 
-1. Define event type in `sse/events.go` (if new type needed)
-2. Emit via `api.SSEHub.Broadcast(sse.Event{Type: "event_name", Data: payload})`
-3. Update frontend to listen for the event type
-4. Test event delivery in integration tests
+1. Define event type constant in `sse/events.go`
+2. Emit via `sseHub.Publish(eventType, payload)` in the appropriate package
+3. Add event type to `eventTypes` array in `web/src/lib/api.js` SSEClient
+4. Register event listener in `App.svelte` that updates the corresponding store
+5. Test event delivery in integration tests
+
+### Adding a New Internal Package
+
+1. Create `internal/<package>/` with a `// Package <name> provides...` doc comment
+2. Define focused interfaces for consumers
+3. Follow existing patterns: constructor `New(...)`, `Start()/Stop()` if long-lived, WaitGroup if goroutines
+4. Wire into `cmd/xdcc-server/main.go` following the existing orchestration pattern
+
+### Adding a New Notification Provider
+
+1. Create a new type implementing `notifier.Notifier` interface
+2. Add constructor function `NewXxxNotifier(cfg config.NotificationConfig)`
+3. Register in `notifier.NewManager()` switch statement
+4. Add config example in `config.yaml` comments
 
 ---
 
@@ -662,14 +884,17 @@ type Engine interface {
 3. **Understand IRC timing**: IRC operations are inherently asynchronous. Don't assume immediate responses.
 4. **Test concurrency**: Downloads, IRC handlers, and SSE broadcasts all run concurrently. Use `-race` detector.
 5. **Preserve CGO=0**: All builds must remain pure Go. No C dependencies.
+6. **Check `.gitignore` and `.dockerignore`**: Patterns without `/` prefix match at any depth. Always anchor root-only patterns.
+7. **Keep SSE events in sync**: Changes to `sse/events.go` MUST be reflected in `web/src/lib/api.js`.
 
 ### When Adding Features
 
-1. **Search engines**: Implement `search.Engine` interface, register in aggregator
-2. **API endpoints**: Follow REST conventions, use `api.writeError()` for errors
+1. **Search engines**: Implement `search.Engine` interface, register in engine factory
+2. **API endpoints**: Follow REST conventions, use `api.writeError()` for errors, respect admin token middleware
 3. **CLI flags**: Use cobra, respect configuration priority
-4. **Database changes**: Manual migrations, test backward compatibility
-5. **Real-time updates**: Use `sse.Hub` for browser notifications
+4. **Database changes**: Add versioned migration, test backward compatibility, auto-backup is automatic
+5. **Real-time updates**: Add event type to both `sse/events.go` AND `api.js` eventTypes
+6. **New packages**: Follow focused interface pattern, wire into `cmd/xdcc-server/main.go` orchestration
 
 ### When Debugging
 
@@ -703,6 +928,17 @@ type Engine interface {
 - Auto-reconnect built into EventSource API
 - See `docs/SSE-vs-WebSocket-analysis.md` for full analysis
 
+**Why focused interfaces in store?**
+- Each consumer depends only on the methods it needs
+- Easier to mock in tests (implement only the needed interface)
+- Gradual migration from composite `Store` — backward compatible via embedding
+
+**Why pubsub.Hub over channel broadcast loops?**
+- Generic reusable pattern (`pubsub.Hub[T any]`)
+- Non-blocking publish (drops when full, no publisher blocking)
+- Thread-safe subscribe/unsubscribe during operation
+- Used by both `ircmanager` and `queue` for event fan-out
+
 ---
 
 ## Development Workflow
@@ -721,3 +957,5 @@ type Engine interface {
 - **config.yaml**: Default configuration with inline comments
 - **examples/xdcc-server.service**: Production systemd unit file
 - **docs/**: Architecture decision records and design documents
+- **.golangci.yml**: Linter configuration
+- **Taskfile.yml**: Task automation (build, test, lint, docker)

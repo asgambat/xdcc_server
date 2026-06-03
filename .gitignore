@@ -16,13 +16,13 @@
 
 # Code coverage profiles and other test artifacts
 *.out
-coverage.*
-*.coverprofile
-profile.cov
+/coverage.*
+/*.coverprofile
+/profile.cov
 
 # Dependency directories
-/web/dist
-/web/node_modules
+/web/dist/
+/web/node_modules/
 
 
 # Go workspace file
