@@ -9,7 +9,7 @@
 *.dylib
 /xdcc-server
 /xdcc-browser
-bin/
+/bin/
 
 # Test binary, built with `go test -c`
 *.test
