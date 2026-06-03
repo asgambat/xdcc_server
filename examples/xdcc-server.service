@@ -1,0 +1,46 @@
+[Unit]
+Description=xdcc-server — XDCC download daemon with REST API and web UI
+Documentation=https://github.com/asgambat/xdcc-go
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Path to the binary
+ExecStart=/usr/local/bin/xdcc-server --config /etc/xdcc-server/config.yaml
+
+# Restart on failure with delay
+Restart=on-failure
+RestartSec=10
+
+# Graceful shutdown via SIGTERM (handled by xdcc-server)
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# User to run as (create with: adduser --system --no-create-home xdcc)
+User=xdcc
+Group=xdcc
+
+# Data directories
+Environment=XDCC_DOWNLOAD_TEMP_DIR=/var/lib/xdcc-server/downloads/tmp
+Environment=XDCC_DOWNLOAD_DEST_DIR=/var/lib/xdcc-server/downloads/complete
+Environment=XDCC_LOGGING_FILE_PATH=/var/log/xdcc-server/xdcc-server.log
+Environment=XDCC_STORAGE_DB_PATH=/var/lib/xdcc-server/db
+Environment=XDCC_HTTP_PORT=8080
+
+# Create these directories with the right permissions
+RuntimeDirectory=xdcc-server
+StateDirectory=xdcc-server
+LogsDirectory=xdcc-server
+CacheDirectory=xdcc-server
+
+# Security hardening (optional)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/xdcc-server /var/log/xdcc-server
+
+[Install]
+WantedBy=multi-user.target

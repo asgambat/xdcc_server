@@ -1,0 +1,38 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Pre-built binaries & local builds
+bin/
+xdcc-server
+xdcc-browse
+xdcc-dl
+xdcc-search
+*.exe
+
+# Documentation & examples
+docs/
+examples/
+agent.md
+
+# CI
+.github/
+Taskfile.yml
+.golangci.yml
+
+# Test coverage
+coverage.html
+coverage.out
+
+# Local data
+downloads/
+
+# Frontend dependencies & build artifacts
+web/node_modules/
+web/dist/
+
+# Misc
+.task/
+README.md
+LICENSE

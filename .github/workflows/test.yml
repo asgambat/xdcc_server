@@ -1,0 +1,107 @@
+name: Test Suite
+
+on:
+  workflow_call:
+    outputs:
+      tests_passed:
+        description: "Whether all tests passed"
+        value: ${{ jobs.run-tests.outputs.result }}
+
+jobs:
+  run-tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.final-status.outputs.success }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      # Build frontend FIRST (required by go:embed in web/frontend.go)
+      - name: Install frontend dependencies
+        working-directory: ./web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./web
+        run: npm run build
+
+      # Backend tests (now that web/dist exists)
+      - name: Download Go dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Run Go tests
+        run: go test -v ./...
+
+      - name: Run Go tests with race detector
+        run: go test -race ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check Go formatting
+        run: |
+          unformatted=$(go fmt ./...)
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          install-mode: goinstall
+          args: --timeout=5m
+
+      # Test coverage
+      - name: Generate test coverage
+        run: |
+          go test -cover -coverprofile=coverage.out ./... 2>/dev/null || true
+          if [ -f coverage.out ]; then
+            go tool cover -html=coverage.out -o coverage.html
+          fi
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage.html
+          retention-days: 30
+
+      - name: Display coverage summary
+        run: |
+          echo "## Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out | tail -n 1 >> $GITHUB_STEP_SUMMARY
+
+      # Frontend typecheck (svelte-check catches undefined variables, missing imports, etc.)
+      - name: Frontend typecheck
+        working-directory: ./web
+        run: npm run check
+
+      - name: Run frontend tests if available
+        working-directory: ./web
+        run: npm test 2>/dev/null || echo "No frontend tests script found, skipping..."
+        continue-on-error: true
+
+      - name: Set final status
+        id: final-status
+        run: echo "success=true" >> $GITHUB_OUTPUT

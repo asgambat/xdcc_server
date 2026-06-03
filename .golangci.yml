@@ -1,0 +1,189 @@
+# golangci-lint configuration for xdcc-go
+# See https://golangci-lint.run/usage/configuration/
+#
+# Run with: golangci-lint run ./...
+#
+# This is a relaxed initial configuration. As code quality improves,
+# more linters should be enabled and the exclusion list reduced.
+
+run:
+  # Timeout for linting (increased for large codebases)
+  timeout: 5m
+  
+  # Allow parallel runners
+  allow-parallel-runners: false
+
+  # Go version for linters that depend on it
+  go: "1.25"
+
+# Output configuration
+output:
+  # Format: colored-line-number|line-number|json|tab|checkstyle|code-climate|junit-xml|github-actions
+  formats:
+    - format: colored-line-number
+  # Print lines of code with issue
+  print-issued-lines: true
+  # Print linter name in issue text
+  print-linter-name: true
+
+# Linter settings
+linters-settings:
+  # errcheck: check for unchecked errors
+  errcheck:
+    # Report about not checking errors in type assertions: `a := b.(MyType)`
+    check-type-assertions: true
+    # Report about assignment of errors to blank identifier: `num, _ := strconv.Atoi(numStr)`
+    check-blank: false
+
+  # staticcheck: comprehensive Go static analysis
+  staticcheck:
+    checks: ["all"]
+
+  # (gofumpt not enabled — would require formatting the entire codebase)
+
+  # revive: configurable linter (successor to golint)
+  revive:
+    confidence: 0.8
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+        arguments: ["checkPrivateReceivers"]
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+        arguments:
+          - ["ID", "URL", "HTTP", "IRC", "API", "SSE", "JSON", "SQL", "DB", "TLS", "TCP", "IP", "DNS", "UID", "GID", "FS", "PDF", "DCC", "XDCC", "YAML", "TOML", "XML", "CLI", "UI", "RSS", "CHAN", "NICK"]
+          - []
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unreachable-code
+        severity: error
+      - name: redefines-builtin-id
+      - name: useless-break
+      - name: waitgroup-by-value
+
+  # misspell: find commonly misspelled English words
+  misspell:
+    locale: US
+    ignore-words:
+      - "cancelled"
+
+  # gocritic: provides diagnostics that check for bugs, performance and style issues
+  gocritic:
+    # Use categories instead of fragile explicit check lists
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - "ifElseChain"      # Often too noisy
+      - "hugeParam"        # Many false positives
+      - "rangeValCopy"     # Style preference, not correctness
+
+# Linters to enable
+linters:
+  enable:
+    # Bugs & correctness
+    - errcheck
+    - govet
+    - staticcheck
+    - unconvert
+    - unused
+    - ineffassign
+    
+    # Style & maintainability
+    - revive           # Configurable linter (replaces golint)
+    - gocritic         # Opinionated code reviews
+    
+    # Performance
+    - prealloc
+    
+    # Security
+    - gosec
+    
+    # Other
+    - misspell
+    - noctx
+    - usestdlibvars
+
+  # No custom disable list needed — deprecated linters are auto-deactivated
+
+# Issues configuration
+issues:
+  # Make issues unique by line
+  uniq-by-line: true
+
+  # Maximum issues count per linter (0 = no limit)
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  # Exclude directories from issue reporting
+  exclude-dirs:
+    - web
+
+  # Exclude specific issues by ID
+  exclude:
+    # SA1019: Allow use of deprecated symbols (intentional in some cases)
+    - "SA1019"
+    # SA2002: Allow testing.T.Fatal in deferred functions in tests
+    - "SA2002"
+    # G103: Use of unsafe calls (gosec)
+    - "G103"
+    # G104: Errors unhandled (gosec) — covered by errcheck
+    - "G104"
+    # G204: Subprocess launched with variable (gosec)
+    - "G204"
+    # G301: Expected directory permissions to be 0750 (gosec)
+    - "G301"
+    # G302: Expected file permissions to be 0600 (gosec)
+    - "G302"
+    # G304: File path provided as taint input (gosec)
+    - "G304"
+    # G401: Use of weak crypto MD5/SHA1 (gosec)
+    - "G401"
+    # G402: TLS InsecureSkipVerify (gosec)
+    - "G402"
+    # G404: Use of weak random number generator (gosec)
+    - "G404"
+    # G501: Blocklisted import crypto/md5 (gosec)
+    - "G501"
+
+  # Exclude issues by source (file patterns and text)
+  exclude-rules:
+    # Allow unchecked errors in CLI main functions
+    - path: "cmd/"
+      linters:
+        - errcheck
+
+    # Ignore "Consider pre-allocating" suggestions globally (noisy, style-only)
+    - linters:
+        - prealloc
+      text: "Consider pre-allocating"
+
+    # Test files: relax some checks
+    - path: ".*_test\\.go$"
+      linters:
+        - errcheck
+        - gosec
+        - noctx
+        - gocritic
+        - prealloc
+
+
+severity:
+  default-severity: warning
+  case-sensitive: false

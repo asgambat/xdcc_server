@@ -1,0 +1,145 @@
+# xdcc-server configuration file
+# Priority: CLI flags > environment variables > this file
+
+irc:
+  # Base nickname (a random suffix is always appended)
+  nickname: "xdcc-user"
+  # Default IRC servers to connect to on startup
+  default_servers:
+    - address: "irc.rizon.net"
+      port: 6667
+      auto_connect: true
+      channels:
+        - name: "#news"
+          auto_join: true
+    - address: "irc.williamgattone.it"
+      port: 6667
+      auto_connect: false
+      channels:
+        - name: "#xdcc"
+          auto_join: true
+
+http:
+  # Port for the REST API and web UI
+  port: 8080
+  # Bind address (default: 127.0.0.1 — use 0.0.0.0 for Docker/external access)
+  bind_address: "127.0.0.1"
+  # Allowed CORS origins (empty = same-origin only; for dev add "http://localhost:5173")
+  cors_origins: []
+
+download:
+  # Directory for in-progress partial files
+  temp_dir: "./downloads/tmp"
+  # Directory for completed files
+  dest_dir: "./downloads/complete"
+  # Minimum free disk space in bytes before pausing new downloads
+  min_disk_space_bytes: 1073741824  # 1 GB
+  # Max retry attempts per failed download
+  max_retry_attempts: 3
+  # Delay in minutes before the queue starts processing downloads on startup
+  startup_delay_minutes: 0
+  # File conflict policy: skip | overwrite | rename
+  conflict_policy: "skip"
+  # Fallback mode on download failure: suggest_only | auto_retry_best
+  fail_fallback: "suggest_only"
+  # Global max parallel downloads across all channels
+  max_parallel_total: 5
+  # Max download rate in bytes/second (0 = unlimited)
+  max_rate_bps: 0
+  # Seconds to wait after connecting before sending WHOIS (-1 = random 5-10s, 0 = no delay, >0 = fixed seconds)
+  channel_join_delay: -1
+
+search:
+  # Timeout per provider in seconds
+  provider_timeout: 5
+  # Default page size for search results
+  page_size: 50
+  # Enabled search providers (empty = all enabled)
+  enabled_providers: []
+  cache:
+    # Enable search result caching
+    enabled: true
+    # TTL for fresh cache (results returned without contacting providers)
+    fresh_ttl: "30m"
+    # TTL for stale cache (fallback when providers are unreachable)
+    stale_ttl: "24h"
+
+security:
+  # Admin token for protected API endpoints (auto-generated with random value if empty)
+  admin_token: ""
+  # TTL in minutes for auto-generated admin tokens
+  token_ttl_minutes: 15
+
+storage:
+  # Directory for the SQLite database file (filename is always xdcc-server.db)
+  # Docker:        /var/lib/xdcc-server/db  (via XDCC_STORAGE_DB_PATH)
+  # systemd:       /var/lib/xdcc-server/db  (via XDCC_STORAGE_DB_PATH)
+  # Default:       ./db                      (relative to CWD)
+  db_path: "./db"
+  # Retention period for completed/failed downloads before auto-deletion
+  downloads_retention: "30d"
+  # Interval between periodic cleanup runs
+  cleanup_interval: "12h"
+
+logging:
+  # Log level: debug | info | warn | error
+  level: "info"
+  # Log file path (empty = stderr)
+  file_path: ""
+
+ui:
+  # Whether the first-time setup wizard has been completed
+  setup_completed: false
+  # UI theme: "dark" or "light"
+  theme: dark
+
+profiling:
+  # Runtime block profiling rate for /debug/pprof/block (0 = disabled).
+  # Rate 1 = profile every blocking event (maximum detail, measurable overhead).
+  # Higher values = profile ~1 event per N nanoseconds of blocking time.
+  block_profile_rate: 0
+  # Runtime mutex profiling fraction for /debug/pprof/mutex (0 = disabled).
+  # Rate 1 = profile every contention event (maximum detail).
+  # Higher values = profile ~1/N events.
+  mutex_profile_fraction: 0
+
+# External notifications for download and watchlist events
+# Supported providers: webhook, ntfy, pushover
+# Available events: download_completed, download_failed, watchlist_new_results
+# If events is empty or omitted, all events trigger notifications.
+#
+# Uncomment the desired providers below to enable notifications.
+#
+# notifications:
+#
+#   ─── Webhook generico ───────────────────────────────────────────
+#   Invia POST {"data":"messaggio"} a un endpoint HTTP/HTTPS qualsiasi.
+#   Supporta Bearer token opzionale per autenticazione.
+#   Esempi di utilizzo: Telegram bot, Slack webhook, IFTTT, Zapier.
+#
+#   - type: webhook
+#     webhook_endpoint: "https://hooks.example.com/notify"
+#     webhook_token: "tk_abc123"                  # opzionale, ometti se non serve
+#     events: [download_completed, download_failed, watchlist_new_results]
+#
+#   ─── ntfy.sh (o istanza self-hosted) ────────────────────────────
+#   https://ntfy.sh — notifiche push via cellulare/desktop.
+#   Richiede un topic (gratuito) o istanza self-hosted.
+#   Il token è il Bearer token per l'autenticazione (opzionale: se omesso
+#   l'endpoint deve essere pubblico/anonymous).
+#
+#   - type: ntfy
+#     ntfy_token: "tk_abc123"                     # opzionale, ometti per topic pubblico
+#     ntfy_endpoint: "https://ntfy.sh/mio_topic"
+#     events: [download_completed, download_failed, watchlist_new_results]
+#
+#   ─── Pushover ───────────────────────────────────────────────────
+#   https://pushover.net — notifiche push su iOS/Android/desktop.
+#   Servono un Application Token e un User/Group Key.
+#   pushover_endpoint è opzionale (default: https://api.pushover.net/1/messages.json).
+#
+#   - type: pushover
+#     pushover_token: "APP_TOKEN"
+#     pushover_user: "USER_KEY"
+#     pushover_endpoint: "https://api.pushover.net/1/messages.json"  # default, puoi omettere
+#     events: [download_completed, download_failed, watchlist_new_results]

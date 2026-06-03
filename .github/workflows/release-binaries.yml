@@ -1,0 +1,236 @@
+name: Build Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Run Tests
+    uses: ./.github/workflows/test.yml
+
+  build-frontend:
+    name: Build Frontend
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ./web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./web
+        run: npm run build
+
+      - name: Upload frontend artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist/
+          retention-days: 1
+
+  build-binaries:
+    name: Build ${{ matrix.binary }} for ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        binary: [xdcc-server, xdcc-dl, xdcc-search, xdcc-browse]
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Download frontend artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist
+
+      - name: Set binary name
+        id: binary_name
+        shell: bash
+        run: |
+          BINARY_NAME="${{ matrix.binary }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          echo "name=${BINARY_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o "${{ steps.binary_name.outputs.name }}" \
+            ./cmd/${{ matrix.binary }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ steps.binary_name.outputs.name }}
+          retention-days: 1
+
+  package-release:
+    name: Package ${{ matrix.binary }} for ${{ matrix.platform }}
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        binary: [xdcc-server, xdcc-dl, xdcc-search, xdcc-browse]
+        platform:
+          - os: linux
+            arch: amd64
+            archive: tar.gz
+          - os: linux
+            arch: arm64
+            archive: tar.gz
+          - os: windows
+            arch: amd64
+            archive: zip
+          - os: darwin
+            arch: amd64
+            archive: tar.gz
+          - os: darwin
+            arch: arm64
+            archive: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set platform name
+        id: platform
+        shell: bash
+        run: |
+          echo "name=${{ matrix.platform.os }}-${{ matrix.platform.arch }}" >> $GITHUB_OUTPUT
+
+      - name: Set artifact name
+        id: artifact
+        shell: bash
+        run: |
+          echo "name=${{ matrix.binary }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}" >> $GITHUB_OUTPUT
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ./package
+
+      - name: Set archive name
+        id: archive
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ARCHIVE_NAME="${{ matrix.binary }}-${VERSION}-${{ steps.platform.outputs.name }}"
+          echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Copy extra files
+        run: |
+          cp LICENSE ./package/
+          cp config.yaml ./package/
+
+      - name: Create tar.gz archive
+        if: matrix.platform.archive == 'tar.gz'
+        working-directory: ./package
+        run: |
+          tar czf "../${{ steps.archive.outputs.name }}.tar.gz" *
+
+      - name: Create zip archive
+        if: matrix.platform.archive == 'zip'
+        working-directory: ./package
+        run: |
+          zip -r "../${{ steps.archive.outputs.name }}.zip" *
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.archive.outputs.name }}
+          path: ${{ steps.archive.outputs.name }}.${{ matrix.platform.archive }}
+          retention-days: 1
+
+  create-release:
+    name: Create GitHub Release
+    needs: package-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ./release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: ./release-assets
+        run: |
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 📦 Downloads
+            
+            Download the appropriate archive for your platform:
+            
+            **Linux:**
+            - `xdcc-*-linux-amd64.tar.gz` — Intel/AMD 64-bit
+            - `xdcc-*-linux-arm64.tar.gz` — ARM 64-bit (Raspberry Pi 4, servers)
+            
+            **macOS:**
+            - `xdcc-*-darwin-amd64.tar.gz` — Intel 64-bit
+            - `xdcc-*-darwin-arm64.tar.gz` — Apple Silicon (M1/M2/M3)
+            
+            **Windows:**
+            - `xdcc-*-windows-amd64.zip` — Intel/AMD 64-bit
+            
+            ### Verification
+            
+            Verify your download with SHA256 checksums (see `checksums.txt`):
+            ```bash
+            # Linux
+            sha256sum -c checksums.txt --ignore-missing
+            
+            # Windows (PowerShell)
+            Get-FileHash .\xdcc-*.zip -Algorithm SHA256
+            ```
+            
+            ### Docker
+            
+            Multi-architecture Docker images are also available:
+            ```bash
+            docker pull ghcr.io/asgambat/xdcc-go:${{ github.ref_name }}
+            ```

@@ -1,0 +1,69 @@
+version: "3.8"
+
+services:
+  xdcc-server:
+    # Build from source, or use the pre-built image from GitHub Container Registry
+    build:
+      context: .
+      args:
+        # Keep in sync with the runtime `user:` directive below.
+        # Override via environment or .env file:  UID=1001 GID=1001 docker-compose up
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    # image: ghcr.io/asgambat/xdcc-go:latest
+
+    container_name: xdcc-server
+    restart: unless-stopped
+
+    # Run as non-root user (default 1000:1000).
+    # Override via environment or .env file:  UID=1001 GID=1001 docker-compose up
+    user: "${UID:-1000}:${GID:-1000}"
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # SQLite database (outside /data so it can be isolated)
+      - xdcc-db:/var/lib/xdcc-server/db
+      # Downloads (temp + complete) and logs
+      - xdcc-data:/data
+
+    environment:
+      - XDCC_HTTP_PORT=8080
+      - XDCC_HTTP_BIND_ADDRESS=0.0.0.0
+      - XDCC_LOGGING_LEVEL=info
+      # ── Database ──────────────────────────────────────────────
+      - XDCC_STORAGE_DB_PATH=/var/lib/xdcc-server/db
+      # ── Download paths ────────────────────────────────────────
+      - XDCC_DOWNLOAD_TEMP_DIR=/data/downloads/tmp
+      - XDCC_DOWNLOAD_DEST_DIR=/data/downloads/complete
+      # ── Logging ───────────────────────────────────────────────
+      - XDCC_LOGGING_FILE_PATH=/data/logs/xdcc-server.log
+      # ── Security ──────────────────────────────────────────────
+      # Generate a strong random token (e.g. 'openssl rand -hex 32') and uncomment:
+      # - XDCC_SECURITY_ADMIN_TOKEN=your-random-token-here
+
+    # Health check (requires curl in the image — the scratch image doesn't have it,
+    # so this is only effective if you switch to an alpine-based image)
+    # healthcheck:
+    #   test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    name: xdcc-network
+
+volumes:
+  xdcc-db:
+    driver: local
+  xdcc-data:
+    driver: local
