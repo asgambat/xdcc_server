@@ -38,4 +38,5 @@ go.work.sum
 
 #misc
 downloads/
+db
 .task/
