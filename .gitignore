@@ -38,5 +38,5 @@ profile.cov
 
 #misc
 /downloads/
-/db
+/db/
 /.task/
