@@ -5,10 +5,10 @@
 
 # Pre-built binaries & local builds
 bin/
-xdcc-server
-xdcc-browse
-xdcc-dl
-xdcc-search
+/xdcc-server
+/xdcc-browse
+/xdcc-dl
+/xdcc-search
 *.exe
 
 # Documentation & examples
