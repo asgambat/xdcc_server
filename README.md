@@ -380,13 +380,7 @@ go build -o xdcc-server ./cmd/xdcc-server
 
 Pre-compiled binaries are automatically built and published for every release.
 
-> **Automated Releases**: When a new version tag (e.g., `v1.0.0`) is pushed, GitHub Actions automatically:
-> 1. ✅ **Runs comprehensive test suite** (unit tests, race detector, linting, format checks)
-> 2. 🛠️ **Compiles binaries** for all supported platforms and architectures (only if tests pass)
-> 3. 🐳 **Builds multi-arch Docker images** (only if tests pass)
-> 4. 📦 **Publishes to [Releases page](https://github.com/asgambat/xdcc_server/releases)** and GitHub Container Registry
->
-> All releases are verified to pass the full test suite before publication.
+> **Automated Releases**: Releases are automatically built and published by GitHub Actions when a version tag (e.g., `v1.0.0`) is pushed. See [Development → CI/CD Pipeline](#cicd-pipeline) for details on the automated release workflow.
 
 ### Build from Source
 
@@ -588,18 +582,13 @@ xdcc-server
 xdcc-server --config /path/to/config.yaml
 
 # Override the database path (full file path)
-xdcc-server --db /data/xdcc/custom.db
+xdcc-server --db /data/xdcc/custom-name.db
 
 # Override specific settings
 xdcc-server --port 9090 --download-dir /downloads
 ```
 
-On startup, the server logs its configuration and database paths:
-
-```
-config: /etc/xdcc-server/config.yaml
-database: /var/lib/xdcc-server/db/xdcc-server.db
-```
+On startup, the server logs its configuration and database paths (see the [Flags section](#flags) under xdcc-server for details).
 
 Access the web UI at **http://localhost:8080**
 
@@ -759,22 +748,7 @@ See `config.yaml` in the repository for the complete configuration reference.
 
 ### CLI Configuration
 
-All CLI tools support configuration via flags. Common patterns:
-
-**Network Configuration:**
-- `--server <host:port>` — Override IRC server (bypasses auto-detection)
-- `--dns-server <host:port>` — Fallback DNS resolver (default: `8.8.8.8:53`)
-- `--fallback-channel <channel>` — Channel to join if WHOIS fails
-
-**Timing Configuration:**
-- `--connect-timeout <seconds>` — Wait time for DCC initiation (default: 120)
-- `--stall-timeout <seconds>` — Abort if no progress for N seconds (default: 60)
-- `--wait-time <seconds>` — Extra delay before sending XDCC request (default: 0)
-- `--channel-join-delay <seconds>` — Delay before WHOIS (-1 = random 5-10s)
-
-**Download Configuration:**
-- `--out <path>` — Output directory or file path
-- `--throttle <rate>` — Speed limit (e.g., `512K`, `2M`, `1G`, `-1` = unlimited)
+All CLI tools support configuration via flags. For a complete list of available flags with defaults and descriptions, see the [xdcc-dl Flags](#flags-1) section.
 
 ---
 
@@ -807,7 +781,7 @@ database: /var/lib/xdcc-server/db/xdcc-server.db
 
 The database directory is automatically created if it doesn't exist.
 
-Configuration priority: **CLI flags > environment variables > config.yaml**
+Configuration priority: see [Configuration → Configuration Priority](#configuration-priority) for details.
 
 ### Systemd (Linux)
 
@@ -973,26 +947,16 @@ xdcc-browse <search_term> [flags]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
+xdcc-browse also supports all shared flags documented in [xdcc-dl](#flags-1) (`--server`, `--out`, `--throttle`, `--connect-timeout`, `--stall-timeout`, `--fallback-channel`, `--wait-time`, `--username`, `--channel-join-delay`, `--dns-server`, `--verbose`, `--quiet`).
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
 | `--command-server` | | *(none)* | Delegate search and download to a remote xdcc-server (e.g. `http://localhost:8080`) |
 | `--search-engine` | `-e` | `xdcc-eu` | Search engine to use: `nibl`, `xdcc-eu`, `subsplease` |
 | `--ext` | `-x` | *(none)* | Filter results by file extension(s), comma-separated (e.g. `mkv,avi,mp4`) |
 | `--bot` | `-b` | *(none)* | Filter results by bot name substring, case-insensitive (e.g. `WOND`) |
 | `--prefix` | `-p` | `false` | Keep only results whose filename starts with the search term (case-insensitive) |
-| `--server` | `-s` | *(from search)* | Override IRC server for all selected packs (`host` or `host:port`) |
-| `--out` | `-o` | `.` | Output directory or file path |
-| `--throttle` | `-t` | `-1` | Speed limit in bytes/s (e.g. `512K`, `2M`, `1G`). `-1` = unlimited |
-| `--connect-timeout` | `-C` | `120` | Seconds to wait for the bot to initiate the DCC transfer |
-| `--stall-timeout` | `-S` | `60` | Seconds of no transfer progress before aborting. `0` = disabled |
-| `--fallback-channel` | `-f` | *(none)* | IRC channel to join if WHOIS returns no channels for the bot |
-| `--wait-time` | `-w` | `0` | Extra seconds to wait before sending the XDCC request |
-| `--username` | `-u` | *(random)* | IRC nickname (a random suffix is always appended) |
-| `--channel-join-delay` | `-D` | `-1` | Seconds to wait after connecting before sending WHOIS. `-1` = random 5–10 s |
-| `--dns-server` | `-d` | `8.8.8.8:53` | Fallback DNS resolver when system DNS is blocked (`host:port`) |
 | `--compact` | `-c` | `false` | Remove duplicate results with same filename, size and bot family |
-| `--verbose` | `-v` | | Increase verbosity (repeatable: `-v`, `-vv`) |
-| `--quiet` | `-q` | | Reduce output (repeatable: `-q`, `-qq`) |
-
-> If `-q` and `-v` are used together, `-q` takes precedence and `-v` is ignored.
 
 ### Selection syntax
 
@@ -1464,26 +1428,9 @@ task test:verbose
 
 #### Automated Testing & CI/CD
 
-The project uses GitHub Actions for automated testing and quality assurance:
+The project uses GitHub Actions for automated testing and quality assurance. See the [CI/CD Pipeline](#cicd-pipeline) section for a complete overview of the test suite, CI workflows, and release process.
 
-**Test Suite (`test.yml`)** - Reusable workflow that runs:
-- ✅ Go unit tests (`go test ./...`)
-- ✅ Race detector (`go test -race ./...`)
-- ✅ Go vet static analysis
-- ✅ Format checking (`go fmt`)
-- ✅ Linting with golangci-lint
-- ✅ Test coverage report (uploaded as artifact)
-- ✅ Frontend build verification
-
-**CI Workflow (`ci.yml`)** - Runs test suite on:
-- Push to `main` or `develop` branches
-- Pull requests to `main` or `develop`
-
-**Release Workflows** - Before building releases:
-- 🔒 **`docker-release.yml`** requires tests to pass before building Docker images
-- 🔒 **`release-binaries.yml`** requires tests to pass before building release binaries
-
-If any test fails, the release process is automatically blocked. View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc_server/actions).
+View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc_server/actions).
 
 ### Project Structure
 
