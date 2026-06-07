@@ -15,14 +15,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/ircmanager"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/metrics"
-	"xdcc-go/internal/queue"
-	"xdcc-go/internal/searchagg"
-	"xdcc-go/internal/sse"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/ircmanager"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/metrics"
+	"xdcc_server/internal/queue"
+	"xdcc_server/internal/searchagg"
+	"xdcc_server/internal/sse"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================

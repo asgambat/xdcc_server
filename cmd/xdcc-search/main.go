@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/search"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/search"
 )
 
 func main() {

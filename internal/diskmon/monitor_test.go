@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // TestStopMultipleCalls ensures the stop function can be called multiple times

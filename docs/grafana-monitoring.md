@@ -1,4 +1,4 @@
-# Grafana Monitoring for xdcc-go
+# Grafana Monitoring for xdcc_server
 
 How to integrate **Grafana** with the xdcc-server for real-time dashboards, alerts,
 and continuous profiling — leveraging the existing metrics and pprof infrastructure.

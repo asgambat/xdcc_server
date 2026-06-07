@@ -5,7 +5,7 @@ import (
 	"context"
 	"strings"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // Engine is an XDCC pack search engine.

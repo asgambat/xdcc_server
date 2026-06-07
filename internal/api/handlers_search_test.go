@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/ircmanager"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/ircmanager"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================

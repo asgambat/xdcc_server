@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"xdcc-go/internal/sse"
+	"xdcc_server/internal/sse"
 )
 
 // =========================================================================

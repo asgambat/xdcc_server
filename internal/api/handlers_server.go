@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================

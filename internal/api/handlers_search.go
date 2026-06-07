@@ -12,8 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/searchagg"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/searchagg"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================

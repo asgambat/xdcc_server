@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 func (c *Client) registerHandlers() {

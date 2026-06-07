@@ -1,4 +1,4 @@
-# Analisi Completa del Codebase — xdcc-go
+# Analisi Completa del Codebase — xdcc_server
 
 **Data:** 25 Maggio 2026
 **Branch:** `develop`

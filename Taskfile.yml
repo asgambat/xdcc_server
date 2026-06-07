@@ -15,7 +15,7 @@ vars:
   WEB_DIST_DIR: web/dist
 
   # Docker configuration
-  DOCKER_IMAGE: xdcc-go
+  DOCKER_IMAGE: xdcc_server
   DOCKER_TAG: latest
 
   # Platforms for cross-compilation

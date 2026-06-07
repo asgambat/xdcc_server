@@ -1,22 +1,22 @@
 <div align="center">
 
-# xdcc-go
+# xdcc_server
 
 **High-Performance XDCC Downloader for IRC**
 
 [![Go Version](https://img.shields.io/badge/Go-Required-00ADD8?logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com/)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/asgambat/xdcc-go)
-[![CI Tests](https://github.com/asgambat/xdcc-go/actions/workflows/ci.yml/badge.svg)](https://github.com/asgambat/xdcc-go/actions/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/asgambat/xdcc_server)
+[![CI Tests](https://github.com/asgambat/xdcc_server/actions/workflows/ci.yml/badge.svg)](https://github.com/asgambat/xdcc_server/actions/workflows/ci.yml)
 
 *A modern XDCC downloader with daemon server, REST API, web UI, and powerful CLI tools for IRC file transfers*
 
-[Features](#-features) •
-[Quick Start](#-quick-start) •
-[Installation](#-installation) •
-[Documentation](#-documentation) •
-[Development](#-development)
+[Features](#features) •
+[Quick Start](#quick-start) •
+[Installation](#installation) •
+[Documentation](#documentation) •
+[Development](#development)
 
 </div>
 
@@ -24,36 +24,49 @@
 
 ## 📖 Table of Contents
 
-- [Overview](#-overview)
-- [Features](#-features)
-- [Architecture](#-architecture)
-- [Quick Start](#-quick-start)
-- [Screenshots](#-screenshots)
-- [Installation](#-installation)
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+  - [Option 1: Docker](#option-1-docker-recommended)
+  - [Option 2: Pre-built Binaries](#option-2-pre-built-binaries)
+  - [Option 3: Build from Source](#option-3-build-from-source)
+- [Screenshots](#screenshots)
+- [Installation](#installation)
   - [Pre-built Binaries](#pre-built-binaries)
   - [Build from Source](#build-from-source)
   - [Docker](#docker)
-- [Usage](#-usage)
+    - [Non-Root User](#non-root-user)
+    - [Pre-built Multi-Architecture Images](#pre-built-multi-architecture-images)
+    - [Build from Source (Docker)](#build-from-source-docker)
+    - [Docker Compose](#docker-compose-production)
+    - [Building Multi-Architecture Images Locally](#building-multi-architecture-images-locally)
+- [Usage](#usage)
   - [Server Mode](#server-mode)
+  - [REST API Highlights](#rest-api-highlights)
   - [CLI Tools](#cli-tools)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Documentation](#-documentation)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
   - [xdcc-server](#xdcc-server)
-  - [xdcc-dl](#xdcc-dl)
-  - [xdcc-search](#xdcc-search)
-  - [xdcc-browse](#xdcc-browse)
-- [Troubleshooting](#-troubleshooting)
-  - [Common Issues](#common-issues--solutions)
+- [xdcc-dl](#xdcc-dl)
+- [xdcc-search](#xdcc-search)
+- [xdcc-browse](#xdcc-browse)
+- [Technical Details](#technical-details)
+  - [Retry Behavior](#retry-behavior)
+  - [Contract Notes](#searchpresetwatchlist-contract-notes)
+  - [Network Resilience](#network-resilience)
+- [Troubleshooting](#troubleshooting)
+  - [Common Issues](#common-issues-solutions)
   - [FAQ](#faq)
-- [Development](#-development)
-- [Contributing](#-contributing)
-- [License](#-license)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
 ## 🔍 Overview
 
-**xdcc-go** is a high-performance XDCC downloader for IRC written in pure Go. It provides both a persistent daemon server with a modern web interface and standalone command-line tools for searching, browsing, and downloading files from IRC XDCC bots.
+**xdcc_server** is a high-performance XDCC downloader for IRC written in pure Go. It provides both a persistent daemon server with a modern web interface and standalone command-line tools for searching, browsing, and downloading files from IRC XDCC bots.
 
 ### Key Highlights
 
@@ -113,11 +126,14 @@
 - Parallel provider queries with result aggregation
 - Two-tier caching (fresh: 30m, stale fallback: 24h)
 - Smart deduplication by filename, size, and bot family
-- Advanced filtering: extension, bot name, filename prefix
-- Web UI client-side filtering: filename, bot, server, and size range sliders
+- Advanced server-side filters: extension, bot name, filename prefix, media type (video/audio/books/archives), file size range, HQ mode (excludes low-quality packs), and prefix matching
+- Web UI client-side filtering: filename, bot, server, and dual range size sliders
 - Compact mode for cleaner results
-
-> Note: API/server-side filtering currently applies `q`, `prefix`, `bot`, `ext`, `providers`, `compact`, `page`, and `pageSize`. Query params like `min_size`/`max_size` are not currently applied server-side.
+- Sortable columns: filename, bot, channel, size, server
+- Adjustable page size (10/50/100/200/500 results)
+- Search history with dropdown autocomplete
+- Quick "Parse & Download" from raw IRC messages
+- Save search parameters as named presets for reuse
 
 </details>
 
@@ -189,7 +205,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         xdcc-go System                          │
+│                       xdcc_server System                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐     ┌───────────────┐    ┌──────────────┐     │
@@ -221,37 +237,30 @@
 
 ---
 
-## 🚀 Quick Start### Option 1: Docker (Recommended)
-The fastest way to get started. The container runs as a **non-root** user (`xdcc`, UID:GID `1000:1000`):
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
+The fastest way to get started:
 
 ```bash
-# Pull and run (when available from registry)
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:latest
-
-# Or build from source (use --user to match your host UID/GID for volume permissions)
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-docker build -t xdcc-go .
-docker run -d \
-   --name xdcc-server \
-   -p 8080:8080 \
-   -v xdcc-data:/data \
-   --user "$(id -u):$(id -g)" \
-   xdcc-go
+  ghcr.io/asgambat/xdcc_server:latest
 ```
 
 Open **http://localhost:8080** in your browser.
 
+> For building the Docker image locally, see [Build from Source (Docker)](#build-from-source-docker).
+
 ### Option 2: Pre-built Binaries
 
-Pre-compiled binaries are automatically built for every release and available on the [Releases page](https://github.com/asgambat/xdcc-go/releases).
+Pre-compiled binaries are automatically built for every release and available on the [Releases page](https://github.com/asgambat/xdcc_server/releases).
 
 **Supported Platforms:**
-- **Linux**: x86_64, ARM64, ARMv7
+- **Linux**: x86_64, ARM64
 - **macOS**: Intel (x86_64), Apple Silicon (ARM64)
 - **Windows**: x86_64, ARM64
 
@@ -270,23 +279,23 @@ Each binary is distributed as a separate archive containing:
 
 ```bash
 # Linux x86_64
-wget https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-linux-amd64.tar.gz
+wget https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-linux-amd64.tar.gz
 tar xzf xdcc-server-v1.0.0-linux-amd64.tar.gz
 chmod +x xdcc-server
 ./xdcc-server
 
 # macOS (Intel)
-curl -L https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-darwin-amd64.tar.gz | tar xz
+curl -L https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-darwin-amd64.tar.gz | tar xz
 chmod +x xdcc-server
 ./xdcc-server
 
 # macOS (Apple Silicon)
-curl -L https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-darwin-arm64.tar.gz | tar xz
+curl -L https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-darwin-arm64.tar.gz | tar xz
 chmod +x xdcc-server
 ./xdcc-server
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-windows-amd64.zip" -OutFile "xdcc-server.zip"
+Invoke-WebRequest -Uri "https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-windows-amd64.zip" -OutFile "xdcc-server.zip"
 Expand-Archive xdcc-server.zip -DestinationPath .
 .\xdcc-server.exe
 ```
@@ -297,7 +306,7 @@ Each release includes a `checksums.txt` file with SHA256 hashes:
 
 ```bash
 # Linux/macOS
-wget https://github.com/asgambat/xdcc-go/releases/latest/download/checksums.txt
+wget https://github.com/asgambat/xdcc_server/releases/latest/download/checksums.txt
 sha256sum -c checksums.txt --ignore-missing
 
 # Windows (PowerShell)
@@ -307,8 +316,8 @@ Get-FileHash .\xdcc-server-*.zip -Algorithm SHA256
 ### Option 3: Build from Source
 
 ```bash
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
+git clone https://github.com/asgambat/xdcc_server
+cd xdcc_server
 
 # Using Task (recommended for development)
 task all     # Builds frontend + all binaries
@@ -375,7 +384,7 @@ Pre-compiled binaries are automatically built and published for every release.
 > 1. ✅ **Runs comprehensive test suite** (unit tests, race detector, linting, format checks)
 > 2. 🛠️ **Compiles binaries** for all supported platforms and architectures (only if tests pass)
 > 3. 🐳 **Builds multi-arch Docker images** (only if tests pass)
-> 4. 📦 **Publishes to [Releases page](https://github.com/asgambat/xdcc-go/releases)** and GitHub Container Registry
+> 4. 📦 **Publishes to [Releases page](https://github.com/asgambat/xdcc_server/releases)** and GitHub Container Registry
 >
 > All releases are verified to pass the full test suite before publication.
 
@@ -383,53 +392,45 @@ Pre-compiled binaries are automatically built and published for every release.
 
 #### Using Task (Recommended)
 
-[Task](https://taskfile.dev) simplifies the build process:
+[Task](https://taskfile.dev) simplifies the build process (clone the repo first as shown in [Quick Start](#option-3-build-from-source)):
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-
-# 2. Install Task (if not already installed)
+# 1. Install Task (if not already installed)
 # macOS/Linux:
 sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 # Windows (Scoop):
 scoop install task
 # Or see: https://taskfile.dev/installation/
 
-# 3. Install dependencies
+# 2. Install dependencies
 task deps
 
-# 4. Build everything (frontend + all binaries)
+# 3. Build everything (frontend + all binaries)
 task all
 
-# 5. Binaries will be in the bin/ directory
+# 4. Binaries will be in the bin/ directory
 ls bin/
 # xdcc-server  xdcc-dl  xdcc-search  xdcc-browse
 ```
 
 #### Using Go Directly
 
-Manual build process:
+Manual build process (clone the repo first as shown in [Quick Start](#option-3-build-from-source)):
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-
-# 2. Build the frontend
+# 1. Build the frontend
 cd web
 npm install
 npm run build
 cd ..
 
-# 3. Build the Go binaries
+# 2. Build the Go binaries
 go build -ldflags="-s -w" -o xdcc-server ./cmd/xdcc-server
 go build -ldflags="-s -w" -o xdcc-dl ./cmd/xdcc-dl
 go build -ldflags="-s -w" -o xdcc-search ./cmd/xdcc-search
 go build -ldflags="-s -w" -o xdcc-browse ./cmd/xdcc-browse
 
-# 4. Run the server
+# 3. Run the server
 ./xdcc-server
 ```
 
@@ -440,27 +441,8 @@ go build -ldflags="-s -w" -o xdcc-browse ./cmd/xdcc-browse
 The container runs as a **non-root** user `xdcc` with UID:GID `1000:1000` by default.
 This improves security and simplifies host volume permissions.
 
-```bash
-# Override UID/GID to match your host filesystem permissions
-docker run -d \
-  --name xdcc-server \
-  -p 8080:8080 \
-  -v xdcc-data:/data \
-  --user "1001:1001" \
-  ghcr.io/asgambat/xdcc-go:latest
-```
-
-With **docker-compose**, set the `UID` and `GID` environment variables (or create a `.env` file from `.env.example`):
-
-```bash
-# Via env vars
-UID=1001 GID=1001 docker-compose up -d
-
-# Or with .env file
-cp .env.example .env
-# Edit UID and GID in the .env file
-docker-compose up -d
-```
+To override the UID/GID, pass `--user` to `docker run` or set the `UID` and `GID`
+environment variables when using docker-compose (see [Docker Compose](#docker-compose-production) for details).
 
 > **Note:** When changing UID/GID, existing volumes may have stale permissions from
 > previous runs. Fix them with:
@@ -473,32 +455,22 @@ docker-compose up -d
 
 #### Pre-built Multi-Architecture Images
 
-Official Docker images are available on GitHub Container Registry with support for multiple architectures:
+Official Docker images are available on GitHub Container Registry with support for multiple architectures.
+Pull the latest image as shown in [Quick Start](#quick-start), or use a specific version tag:
 
 ```bash
-# Pull and run the latest version
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:latest
+  ghcr.io/asgambat/xdcc_server:v1.0.0
 
-# Or use a specific version
-docker run -d \
-  --name xdcc-server \
-  -p 8080:8080 \
-  -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:v1.0.0
-
-# Access the web UI
 open http://localhost:8080
 ```
 
 **Supported Architectures:**
 - `linux/amd64` - x86_64 (Intel/AMD 64-bit)
 - `linux/arm64` - ARM 64-bit (Raspberry Pi 4, Apple Silicon, AWS Graviton)
-- `linux/arm/v7` - ARM 32-bit (Raspberry Pi 3, older ARM devices)
-
 Docker automatically pulls the correct image for your platform.
 
 **Available Tags:**
@@ -510,17 +482,17 @@ Docker automatically pulls the correct image for your platform.
 
 ```bash
 # Build the image locally (default UID:GID=1000:1000)
-docker build -t xdcc-go .
+docker build -t xdcc_server .
 
 # Build with custom UID/GID
-docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t xdcc-go .
+docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t xdcc_server .
 
 # Run the container (default non-root user)
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  xdcc-go
+  xdcc_server
 ```
 
 The `/data` volume persists:
@@ -532,6 +504,9 @@ The database lives on a separate volume at `/var/lib/xdcc-server/db`.
 
 #### Docker Compose (Production)
 
+The container runs as a **non-root** user (`xdcc`, UID:GID `1000:1000`).
+Override UID/GID via environment variables or a `.env` file.
+
 The project includes a ready-to-use `docker-compose.yml` with separate volumes for
 database and data, and a configurable non-root user.
 
@@ -540,7 +515,7 @@ version: '3.8'
 
 services:
   xdcc-server:
-    image: ghcr.io/asgambat/xdcc-go:latest
+    image: ghcr.io/asgambat/xdcc_server:latest
     # Or build locally: build: .
     container_name: xdcc-server
     restart: unless-stopped
@@ -589,8 +564,8 @@ docker buildx create --use --name multiarch-builder
 
 # Build for multiple platforms
 docker buildx build \
-  --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  -t xdcc-go:local \
+  --platform linux/amd64,linux/arm64 \
+  -t xdcc_server:local \
   --load \
   .
 ```
@@ -638,16 +613,7 @@ Access the web UI at **http://localhost:8080**
 
 **Systemd Service (Linux):**
 
-```bash
-# Install as systemd service
-sudo cp examples/xdcc-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now xdcc-server
-
-# Check status
-sudo systemctl status xdcc-server
-sudo journalctl -u xdcc-server -f
-```
+For full systemd installation instructions (including user setup, permissions, and auto-start configuration), see [Documentation → xdcc-server → Systemd](#systemd-linux).
 
 ### CLI Tools
 
@@ -681,7 +647,7 @@ xdcc-dl "/msg BotName xdcc send #1-10" -o /downloads
 xdcc-dl "/msg BotName xdcc send #42" --throttle=2M
 ```
 
-For detailed usage of each tool, see the [Documentation](#-documentation) section below.
+For detailed usage of each tool, see the [Documentation](#documentation) section below.
 
 ---
 
@@ -1084,8 +1050,9 @@ xdcc-browse "my show" --ext=mkv --server=94.23.150.97
 ### Search/Preset/Watchlist Contract Notes
 
 - Presets and watchlists are persisted with `filters_json` in storage.
-- Web UI fields like `min_size`, `max_size`, `providers`, and `notify` are currently not fully mapped to server-side execution for watchlist/preset runs.
-- Server-side aggregated search filtering currently uses `q`, `prefix`, `bot`, `ext`, `providers`, and `compact`.
+- Search API supports server-side filters: `q`, `prefix`, `bot`, `ext`, `compact`, `min_size`, `max_size`, `video_only`, `audio_only`, `books_only`, `zip_only`, `providers`, `page`, and `pageSize`.
+- Preset/watchlist `filters_json` stores providers, min/max size for reuse during watchlist execution.
+- The `notify` field is stored but is not currently mapped to notification delivery.
 
 ### Network Resilience
 
@@ -1317,15 +1284,7 @@ Use `--server` to override auto-detection or bypass blocked DNS.
 
 **Where is the database stored?**
 
-The SQLite database (`xdcc-server.db`) is stored in the directory specified by `storage.db_path` in your config (default: `./db`). The directory is created automatically on server startup.
-
-**Can I change the database location?**
-Yes! Three ways:
-1. **Config file:** Set `storage.db_path: /path/to/db` in `config.yaml`
-2. **Environment variable:** `export XDCC_STORAGE_DB_PATH=/path/to/db`
-3. **CLI flag:** `xdcc-server --db /full/path/to/custom.db`
-
-The CLI flag accepts a full file path (filename included), while the config and env var specify just the directory (filename is always `xdcc-server.db`).
+See [Configuration → Database Configuration](#database-configuration) for details on database location, configuration methods, and priority.
 
 **How do I reset the database?**
 Stop the server, remove the file, and restart:
@@ -1370,7 +1329,7 @@ xdcc-server  # Will create new database automatically
    journalctl -u xdcc-server | grep "database:"
    ```
 
-4. Reset database (⚠️ deletes all data):
+4. **Reset database** (⚠️ deletes all data): Stop the server, remove the file, and restart:
    ```bash
    # Find the database path from startup logs, then:
    mv /path/to/db/xdcc-server.db /path/to/db/xdcc-server.db.backup
@@ -1387,7 +1346,7 @@ A: Yes! Use range syntax: `xdcc-dl "/msg Bot xdcc send #1-10"` or run multiple x
 **Q: How do I resume a failed download?**  
 A: The tool automatically resumes from where it left off using DCC RESUME. Just run the same command again.
 
-**Q: Can I use xdcc-go on a headless server?**  
+**Q: Can I use xdcc_server on a headless server?**  
 A: Absolutely! Run xdcc-server in server mode and access via the web UI from any device on your network.
 
 **Q: How do I search without downloading?**  
@@ -1399,8 +1358,8 @@ xdcc-search "your query" | less
 **Q: Can I automate downloads for new releases?**  
 A: Yes! Use the server's watchlist feature in the web UI, or schedule xdcc-search + xdcc-dl with cron.
 
-**Q: Does xdcc-go work with private/password-protected channels?**  
-A: Currently, xdcc-go does not support password-protected channels. This is a planned feature.
+**Q: Does xdcc_server work with private/password-protected channels?**  
+A: Currently, xdcc_server does not support password-protected channels. This is a planned feature.
 
 **Q: How do I update to the latest version?**  
 A: 
@@ -1409,13 +1368,10 @@ A:
 git pull
 task clean
 task all
-
-# Docker
-docker-compose pull
-docker-compose up -d
 ```
+For Docker, pull the latest image and restart (see [Docker Compose](#docker-compose-production) for details).
 
-**Q: Can I run xdcc-go on Raspberry Pi?**  
+**Q: Can I run xdcc_server on Raspberry Pi?**  
 A: Yes! Build for ARM64 or use the multi-architecture Docker image. It runs great on Raspberry Pi 4/5.
 
 **Q: Where are the logs stored?**  
@@ -1438,8 +1394,8 @@ XDCC_HTTP_PORT=9090 xdcc-server
 # Edit config.yaml: http.port = 9090
 ```
 
-**Q: Can I use xdcc-go with a VPN?**  
-A: Yes, xdcc-go works fine over VPN. If you experience connection issues, try using `--dns-server` flag.
+**Q: Can I use xdcc_server with a VPN?**  
+A: Yes, xdcc_server works fine over VPN. If you experience connection issues, try using `--dns-server` flag.
 
 ---
 
@@ -1447,7 +1403,7 @@ A: Yes, xdcc-go works fine over VPN. If you experience connection issues, try us
 
 ### Prerequisites
 
-- **Go** (versione minima: vedi [Installation](#-installation) → Requirements)
+- **Go** (versione minima: vedi [Installation](#installation) → Requirements)
 - **Node.js 18+** and **npm**
 - **[Task](https://taskfile.dev)** (recommended)
 - **golangci-lint** (optional, for linting)
@@ -1527,12 +1483,12 @@ The project uses GitHub Actions for automated testing and quality assurance:
 - 🔒 **`docker-release.yml`** requires tests to pass before building Docker images
 - 🔒 **`release-binaries.yml`** requires tests to pass before building release binaries
 
-If any test fails, the release process is automatically blocked. View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc-go/actions).
+If any test fails, the release process is automatically blocked. View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc_server/actions).
 
 ### Project Structure
 
 ```
-xdcc-go/
+xdcc_server/
 ├── cmd/                    # Command-line entry points
 │   ├── xdcc-server/       # Daemon server
 │   ├── xdcc-dl/           # Download CLI

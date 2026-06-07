@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // ---------------------------------------------------------------------------

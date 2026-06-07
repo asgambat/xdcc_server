@@ -33,9 +33,9 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/queue"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/queue"
 )
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ func (n *NtfyNotifier) publish(ctx context.Context, message string) error {
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("User-Agent", "xdcc-server/1.0")
-	req.Header.Set("X-Title", "XDCC-go")
+	req.Header.Set("X-Title", "XDCC_server")
 	req.Header.Set("Priority", "4")
 	if n.token != "" {
 		req.Header.Set("Authorization", "Bearer "+n.token)

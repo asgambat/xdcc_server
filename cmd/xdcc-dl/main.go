@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"xdcc-go/internal/cli"
-	"xdcc-go/internal/client"
-	"xdcc-go/internal/downloader"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/cli"
+	"xdcc_server/internal/client"
+	"xdcc_server/internal/downloader"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/store"
 )
 
 func main() {

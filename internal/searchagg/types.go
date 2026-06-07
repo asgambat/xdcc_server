@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // ---------------------------------------------------------------------------

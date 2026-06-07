@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/entities"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/pubsub"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/entities"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/pubsub"
+	"xdcc_server/internal/store"
 )
 
 // Internal constants

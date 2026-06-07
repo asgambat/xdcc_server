@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/sse"
+	"xdcc_server/internal/sse"
 )
 
 // ---------------------------------------------------------------------------

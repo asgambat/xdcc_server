@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================

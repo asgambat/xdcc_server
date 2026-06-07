@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/metrics"
-	srch "xdcc-go/internal/search"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/metrics"
+	srch "xdcc_server/internal/search"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------

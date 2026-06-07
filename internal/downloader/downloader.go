@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"xdcc-go/internal/entities"
-	xdccirc "xdcc-go/internal/irc"
+	"xdcc_server/internal/entities"
+	xdccirc "xdcc_server/internal/irc"
 )
 
 // Options configures the download session.

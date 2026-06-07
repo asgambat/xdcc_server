@@ -17,16 +17,16 @@ Produrre una review tecnica critica e strutturata del progetto Go, basata su ana
 12. Verificare completezza output richiesto: elenco strutturato, spiegazione chiara, esempio fix/refactoring, suggerimenti architetturali. Dipende da passo precedente.
 
 **Relevant files**
-- c:/progetti/altro/xdcc-go/internal/queue/manager.go — verificare startup delay timer lifecycle, shutdown sequencing, monitor loop.
-- c:/progetti/altro/xdcc-go/internal/irc/handlers.go — verificare timeout goroutine e possibili leak legati a canali di completamento download.
-- c:/progetti/altro/xdcc-go/internal/pubsub/pubsub.go — verificare pattern publish/close e rischio panic/race su channel chiusi.
-- c:/progetti/altro/xdcc-go/internal/api/handlers_search.go — verificare waitgroup, handler WHOIS lifecycle, race su result channel, timeout behavior.
-- c:/progetti/altro/xdcc-go/internal/sse/hub.go — verificare eviction client lenti, close semantics, publish safety.
-- c:/progetti/altro/xdcc-go/internal/searchagg/aggregator.go — verificare timeout dei provider, cleanup cache concorrente, lock discipline, contention DB stats.
-- c:/progetti/altro/xdcc-go/internal/searchagg/cache.go — verificare normalizzazione cache key, promozione cache concorrente, gestione errori JSON.
-- c:/progetti/altro/xdcc-go/internal/store/sqlite.go — verificare parametri pool, metodi cancellabili e possibili colli di bottiglia.
-- c:/progetti/altro/xdcc-go/cmd/xdcc-server/main.go — verificare shutdown order e timeout helper.
-- c:/progetti/altro/xdcc-go/docs/plan_and_review/go_review_25_05_2026.md — riferimento di struttura e tono per il nuovo report.
+- c:/progetti/altro/xdcc_server/internal/queue/manager.go — verificare startup delay timer lifecycle, shutdown sequencing, monitor loop.
+- c:/progetti/altro/xdcc_server/internal/irc/handlers.go — verificare timeout goroutine e possibili leak legati a canali di completamento download.
+- c:/progetti/altro/xdcc_server/internal/pubsub/pubsub.go — verificare pattern publish/close e rischio panic/race su channel chiusi.
+- c:/progetti/altro/xdcc_server/internal/api/handlers_search.go — verificare waitgroup, handler WHOIS lifecycle, race su result channel, timeout behavior.
+- c:/progetti/altro/xdcc_server/internal/sse/hub.go — verificare eviction client lenti, close semantics, publish safety.
+- c:/progetti/altro/xdcc_server/internal/searchagg/aggregator.go — verificare timeout dei provider, cleanup cache concorrente, lock discipline, contention DB stats.
+- c:/progetti/altro/xdcc_server/internal/searchagg/cache.go — verificare normalizzazione cache key, promozione cache concorrente, gestione errori JSON.
+- c:/progetti/altro/xdcc_server/internal/store/sqlite.go — verificare parametri pool, metodi cancellabili e possibili colli di bottiglia.
+- c:/progetti/altro/xdcc_server/cmd/xdcc-server/main.go — verificare shutdown order e timeout helper.
+- c:/progetti/altro/xdcc_server/docs/plan_and_review/go_review_25_05_2026.md — riferimento di struttura e tono per il nuovo report.
 
 **Verification**
 1. Checklist di copertura: tutte le 6 aree richieste sono presenti con almeno un finding o nota esplicita di assenza criticità.

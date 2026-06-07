@@ -232,5 +232,5 @@ jobs:
             
             Multi-architecture Docker images are also available:
             ```bash
-            docker pull ghcr.io/asgambat/xdcc-go:${{ github.ref_name }}
+            docker pull ghcr.io/asgambat/xdcc_server:${{ github.ref_name }}
             ```

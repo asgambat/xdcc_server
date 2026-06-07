@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // newTestStore creates a SQLiteStore backed by a copy of the pre-migrated

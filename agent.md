@@ -1,4 +1,4 @@
-# xdcc-go AI Agent Guidelines
+# xdcc_server AI Agent Guidelines
 
 > **This file applies to ALL AI tools used in this repository.**
 >
@@ -8,7 +8,7 @@
 
 ## Project Overview
 
-xdcc-go is a high-performance XDCC downloader for IRC written in Go with a modern web interface.
+xdcc_server is a high-performance XDCC downloader for IRC written in Go with a modern web interface.
 
 **Components:**
 - **xdcc-server**: Persistent daemon with REST API + Svelte 5 web UI
@@ -581,7 +581,7 @@ web/src/components/
 ├── Servers.svelte         # IRC server configuration and management
 ├── Downloads.svelte       # Download queue (embeds DownloadTable)
 ├── DownloadTable.svelte   # Reusable download table component
-├── Search.svelte          # Search interface with filters
+├── Search.svelte          # Multi-provider search with client-side filtering, sortable columns, media type filters, HQ mode, size sliders, search history, parse & download, save as preset
 ├── Presets.svelte         # Saved search presets management
 ├── Watchlists.svelte      # Automated watchlist management
 ├── Providers.svelte       # Provider health and enable/disable
@@ -660,10 +660,10 @@ npm run dev      # Development server on :5173
 **Docker:**
 ```bash
 # Single architecture
-docker build -t xdcc-go .
+docker build -t xdcc_server .
 
 # Multi-architecture
-docker buildx build --platform=linux/amd64,linux/arm64 -t xdcc-go .
+docker buildx build --platform=linux/amd64,linux/arm64 -t xdcc_server .
 ```
 
 ### Deployment Configuration
@@ -947,7 +947,7 @@ type Engine interface {
 2. **Backend changes**: Rebuild binary and restart server
 3. **Full rebuild**: `cd web && npm run build && cd .. && go build ./cmd/xdcc-server`
 4. **Before commit**: ask user if he wants to run `go test ./...` and `go test -race ./...`
-5. **Docker test**: `docker build -t xdcc-go .` (tests multi-stage build)
+5. **Docker test**: See [Build Commands → Docker](#build-commands) (tests multi-stage build)
 
 ---
 

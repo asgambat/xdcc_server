@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/metrics"
-	"xdcc-go/internal/searchagg"
-	"xdcc-go/internal/sse"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/metrics"
+	"xdcc_server/internal/searchagg"
+	"xdcc_server/internal/sse"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================

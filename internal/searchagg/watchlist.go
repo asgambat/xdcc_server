@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------

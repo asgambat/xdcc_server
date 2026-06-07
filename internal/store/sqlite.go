@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite" // sqlite driver registration via blank import
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // nullTime implements sql.Scanner for SQLite datetime strings.

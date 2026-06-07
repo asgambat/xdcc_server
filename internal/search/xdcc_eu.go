@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // XdccEuEngine searches for XDCC packs on xdcc.eu.

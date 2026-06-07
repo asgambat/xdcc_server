@@ -3,7 +3,7 @@ package searchagg
 import (
 	"context"
 
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------

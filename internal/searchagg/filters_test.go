@@ -3,7 +3,7 @@ package searchagg
 import (
 	"testing"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // Helper to create a pack with minimal fields.

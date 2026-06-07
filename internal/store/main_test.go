@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // templateDBPath is the path to a pre-migrated SQLite database template. It is

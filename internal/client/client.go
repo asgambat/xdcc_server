@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------

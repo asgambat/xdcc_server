@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/logging"
 )
 
 // ===========================================================================

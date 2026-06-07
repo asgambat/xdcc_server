@@ -343,7 +343,7 @@ Crea `web/public/manifest.json`:
 Crea `web/public/sw.js` (service worker minimale):
 ```js
 // Minimal service worker for PWA installability
-const CACHE_NAME = 'xdcc-go-v1';
+const CACHE_NAME = 'xdcc_server-v1';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

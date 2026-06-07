@@ -17,17 +17,17 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"xdcc-go/internal/api"
-	"xdcc-go/internal/bridge"
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/ircmanager"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/metrics"
-	"xdcc-go/internal/notifier"
-	"xdcc-go/internal/queue"
-	"xdcc-go/internal/searchagg"
-	"xdcc-go/internal/sse"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/api"
+	"xdcc_server/internal/bridge"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/ircmanager"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/metrics"
+	"xdcc_server/internal/notifier"
+	"xdcc_server/internal/queue"
+	"xdcc_server/internal/searchagg"
+	"xdcc_server/internal/sse"
+	"xdcc_server/internal/store"
 )
 
 // Version is set at build time via ldflags.

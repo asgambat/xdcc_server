@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // bufPool reduces GC pressure for the 4 KB read buffer allocated on each

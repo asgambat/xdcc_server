@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"xdcc-go/internal/entities"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/entities"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------
