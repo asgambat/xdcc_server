@@ -212,7 +212,8 @@ func PreparePacks(packs []*XDCCPack, location string) {
 	}
 }
 
-// ByteStringToByteCount converts a human-readable byte string (e.g. "1.5 MB") to bytes.
+// ByteStringToByteCount converts a human-readable size string (e.g. "1.5 MB") to bytes.
+// Plain numbers without a unit suffix are interpreted as megabytes (MB).
 func ByteStringToByteCount(s string) int64 {
 	s = strings.TrimSpace(s)
 	upper := strings.ToUpper(s)
@@ -238,10 +239,11 @@ func ByteStringToByteCount(s string) int64 {
 			}
 		}
 	}
-	// Try plain number
+	// Try plain number — treat as MB (consistent with user expectation:
+	// entering "500" means 500 MB, not 500 bytes).
 	val, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err == nil {
-		return val
+		return val * 1024 * 1024
 	}
 	return 0
 }

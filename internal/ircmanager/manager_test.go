@@ -255,6 +255,10 @@ func (m *mockStore) MarkDownloadCompleted(ctx context.Context, id int64, filenam
 func (m *mockStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
 	return nil
 }
+
+func (m *mockStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	return nil
+}
 func (m *mockStore) MarkDownloadFailed(ctx context.Context, id int64, errMsg string) error {
 	return nil
 }

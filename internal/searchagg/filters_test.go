@@ -147,6 +147,98 @@ func TestFilterByExt(t *testing.T) {
 }
 
 // ===========================================================================
+// filterByQuery (inclusion + exclusion terms)
+// ===========================================================================
+
+func TestFilterByQuery_Exclusion(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Ubuntu.24.04.Server.mkv", 1000, "Bot1"),
+		mkPack("Ubuntu.24.04.Desktop.mkv", 800, "Bot2"),
+		mkPack("Debian.12.Server.mkv", 500, "Bot3"),
+	}
+
+	// "ubuntu -server" → keep packs with "ubuntu" but NOT "server"
+	result := filterByQuery(packs, "ubuntu -server")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for 'ubuntu -server', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.Filename)
+		}
+	}
+	if len(result) > 0 && result[0].Filename != "Ubuntu.24.04.Desktop.mkv" {
+		t.Errorf("expected 'Ubuntu.24.04.Desktop.mkv', got %q", result[0].Filename)
+	}
+}
+
+func TestFilterByQuery_OnlyExclusion(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("my.file.mkv", 100, "Bot1"),
+		mkPack("sample.v2.mkv", 200, "Bot2"),
+	}
+
+	// "-sample" → keep packs that do NOT contain "sample" (all pass positive check)
+	result := filterByQuery(packs, "-sample")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for '-sample', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.Filename)
+		}
+	}
+	if len(result) > 0 && result[0].Filename != "my.file.mkv" {
+		t.Errorf("expected 'my.file.mkv', got %q", result[0].Filename)
+	}
+}
+
+func TestFilterByQuery_MultipleExclusions(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Anime.Show.S01E01.1080p.mkv", 1000, "Bot1"),
+		mkPack("Anime.Show.S01E01.720p.mkv", 800, "Bot2"),
+		mkPack("Anime.Show.S01E01.480p.mkv", 500, "Bot3"),
+		mkPack("Anime.Show.S01E01.HEVC.mkv", 900, "Bot4"),
+	}
+
+	// "Anime -720p -480p" → keep packs with "Anime" but NOT "720p" or "480p"
+	result := filterByQuery(packs, "Anime -720p -480p")
+	if len(result) != 2 {
+		t.Errorf("expected 2 results for 'Anime -720p -480p', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.Filename)
+		}
+	}
+}
+
+func TestFilterByQuery_NoExclusion_BackwardCompatible(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Ubuntu.24.04.Server.mkv", 1000, "Bot1"),
+		mkPack("Ubuntu.24.04.Desktop.mkv", 800, "Bot2"),
+		mkPack("Debian.12.Server.mkv", 500, "Bot3"),
+	}
+
+	// "ubuntu" — plain query, no exclusion terms
+	result := filterByQuery(packs, "ubuntu")
+	if len(result) != 2 {
+		t.Errorf("expected 2 results for plain 'ubuntu', got %d", len(result))
+	}
+}
+
+func TestFilterByQuery_StandaloneDash(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("my-file.mkv", 100, "Bot1"),
+		mkPack("other_file.mkv", 200, "Bot2"),
+	}
+
+	// "- my" → standalone "-" is a positive term, "my" is positive
+	result := filterByQuery(packs, "- my")
+	// This requires the filename to contain both literal "-" and "my"
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for '- my' (literal hyphen), got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.Filename)
+		}
+	}
+}
+
+// ===========================================================================
 // compactPacks (deduplication)
 // ===========================================================================
 

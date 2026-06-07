@@ -132,9 +132,16 @@ func (a *Aggregator) RunWatchlist(ctx context.Context, w store.Watchlist) (*Watc
 			wr.HasChanges, w.AutoEnqueue, len(wr.NewPacks))
 	}
 
-	// Persist last run results as JSON
-	resultsJSON := serializeWatchlistResults(wr.NewPacks)
-	a.log.Infof("[WATCHLIST_RUN] Serialized %d new packs to results JSON (%d bytes)", len(wr.NewPacks), len(resultsJSON))
+	// Persist last run results as JSON — only when there are new packs.
+	// Passing an empty string preserves the previous results, preventing
+	// the UI from losing information when the fingerprint is unchanged.
+	var resultsJSON string
+	if len(wr.NewPacks) > 0 {
+		resultsJSON = serializeWatchlistResults(wr.NewPacks)
+		a.log.Infof("[WATCHLIST_RUN] Serialized %d new packs to results JSON (%d bytes)", len(wr.NewPacks), len(resultsJSON))
+	} else {
+		a.log.Infof("[WATCHLIST_RUN] No new packs — preserving previous results JSON")
+	}
 
 	// Update the watchlist in the store
 	a.log.Infof("[WATCHLIST_RUN] Updating watchlist store: SetWatchlistChecked(id=%d, fingerprint=%q)", w.ID, fingerprint)

@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import { presets, watchlists, addToast, navigateToSearch } from '../lib/stores.js';
   import { PresetsAPI, WatchlistsAPI } from '../lib/api.js';
+  import { normalizeSize } from '../lib/utils.js';
   import Modal from './Modal.svelte';
+
 
   let loading = $state(true);
   let editingId = $state(null);
@@ -38,8 +40,8 @@
       name: form.name.trim(),
       query: form.query.trim(),
       providers: form.providers,
-      min_size: form.min_size,
-      max_size: form.max_size,
+      min_size: normalizeSize(form.min_size),
+      max_size: normalizeSize(form.max_size),
     };
     try {
       if (editingId) {
@@ -60,7 +62,7 @@
   }
 
   async function applyPreset(preset) {
-    navigateToSearch(preset.query, String(preset.min_size || ''), String(preset.max_size || ''));
+    navigateToSearch(preset.query, normalizeSize(preset.min_size), normalizeSize(preset.max_size));
     addToast('Preset applied to search', 'success');
   }
 
@@ -97,8 +99,8 @@
         query: trimmedQuery,
         // @ts-ignore - svelte-check type inference conflict
         interval_minutes: parseInt(interval_minutes) || 60,
-        min_size: min_size?.trim() || '',
-        max_size: max_size?.trim() || '',
+        min_size: normalizeSize(min_size),
+        max_size: normalizeSize(max_size),
         notify_enabled,
         auto_enqueue,
         enabled,

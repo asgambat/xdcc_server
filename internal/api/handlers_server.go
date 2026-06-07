@@ -246,6 +246,12 @@ func (a *API) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 	// entries are created when IRC events use different casing.
 	body.Name = strings.ToLower(body.Name)
 
+	// Reject blacklisted channels before persisting to DB
+	if a.Config.IsChannelBlacklisted(body.Name) {
+		writeError(w, http.StatusForbidden, "CHANNEL_BLACKLISTED", fmt.Sprintf("Channel %q is blacklisted", body.Name))
+		return
+	}
+
 	chID, err := a.Store.AddChannel(r.Context(), store.ChannelRecord{
 		ServerID: serverID,
 		Name:     body.Name,

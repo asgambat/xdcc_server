@@ -80,6 +80,16 @@ export function statusBadge(status) {
   return { cls, status };
 }
 
+/**
+ * Normalize a size filter string: if it contains only digits, append "MB".
+ * This prevents filter failures when the user enters a plain number without a unit.
+ */
+export function normalizeSize(s) {
+  const trimmed = (s || '').trim();
+  if (/^\d+$/.test(trimmed)) return trimmed + 'MB';
+  return trimmed;
+}
+
 // Debounce function to limit API call frequency
 export function debounce(fn, delay = 300) {
   let timeoutId;

@@ -250,6 +250,7 @@ export class SSEClient {
     };
 
     const eventTypes = [
+      'keepalive',
       'server_connected', 'server_disconnected', 'server_reconnecting',
       'channel_joined', 'channel_left', 'channel_topic_updated',
       'download_queued', 'download_started', 'download_progress',

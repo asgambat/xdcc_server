@@ -81,9 +81,19 @@ func (c *Client) registerHandlers() {
 			if !strings.HasPrefix(ch, "#") {
 				ch = "#" + ch
 			}
-			c.infof("No channels from WHOIS, joining fallback channel: %s", ch)
-			c.ps.needsJoin.Store(true)
-			client.Cmd.Join(ch)
+			ch = strings.ToLower(ch)
+			if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+				c.infof("Fallback channel %s is blacklisted, sending XDCC request directly", ch)
+				c.sendXDCCRequest(client)
+			} else {
+				c.infof("No channels from WHOIS, joining fallback channel: %s", ch)
+				c.ps.needsJoin.Store(true)
+				// Record fallback channel on the pack for speed tracking.
+				if c.currentPack().Channel == "" {
+					c.currentPack().Channel = ch
+				}
+				client.Cmd.Join(ch)
+			}
 		} else {
 			c.infof("No channels from WHOIS and no fallback, sending XDCC request directly")
 			c.sendXDCCRequest(client)
@@ -107,20 +117,34 @@ func (c *Client) registerHandlers() {
 			}
 			ch := strings.ToLower(part)
 			c.ps.whoisFoundChannels.Store(true)
-			alreadyIn := c.conn.joinedChannels[ch]
-			if alreadyIn {
-				c.infof("Already in channel %s, skipping JOIN", part)
-			} else {
-				c.infof("Joining channel: %s", part)
-				c.ps.needsJoin.Store(true)
-				time.Sleep(time.Duration(1+randN(2)) * time.Second)
-				client.Cmd.Join(part)
+		alreadyIn := c.conn.joinedChannels[ch]
+		if alreadyIn {
+			c.infof("Already in channel %s, skipping JOIN", part)
+			// Still record the channel on the pack for speed tracking.
+			if c.currentPack().Channel == "" {
+				c.currentPack().Channel = ch
 			}
+		} else if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+				c.infof("Skipping blacklisted channel %s", part)
+		} else {
+			c.infof("Joining channel: %s", part)
+			c.ps.needsJoin.Store(true)
+			// Record the discovered channel on the pack so it can be
+			// used for per-channel statistics after download completes.
+			if c.currentPack().Channel == "" {
+				c.currentPack().Channel = ch
+			}
+			time.Sleep(time.Duration(1+randN(2)) * time.Second)
+			client.Cmd.Join(part)
+		}
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
 	// JOIN: record membership, send XDCC if pending.
+	// If this is a newly-joined channel (discovered via WHOIS), wait 5s before
+	// sending XDCC so the bot has time to register our presence.
+	// If the channel was already joined, send XDCC immediately.
 	cuid = c.conn.irc.Handlers.Add(girc.JOIN, func(client *girc.Client, e girc.Event) {
 		if e.Source == nil || !strings.EqualFold(e.Source.Name, client.GetNick()) {
 			return
@@ -129,7 +153,18 @@ func (c *Client) registerHandlers() {
 		c.conn.joinedChannels[ch] = true
 		c.infof("✓ Joined channel: %s", e.Params[0])
 		if !c.ps.messageSent.Load() {
-			c.sendXDCCRequest(client)
+			if c.ps.needsJoin.Load() {
+				// New channel: reset the fallback timer to 5s from now
+				// so XDCC is sent 5s after JOIN confirmation.
+				c.infof("New channel joined, waiting 5s before XDCC request")
+				if c.conn.whoisFallbackTimer != nil {
+					c.stopWhoisFallbackTimer()
+					c.conn.whoisFallbackTimer.Reset(5 * time.Second)
+				}
+			} else {
+				// Channel already joined: send XDCC immediately
+				c.sendXDCCRequest(client)
+			}
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)

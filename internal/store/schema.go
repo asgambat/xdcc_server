@@ -15,7 +15,7 @@ import (
 // Schema version management
 // ---------------------------------------------------------------------------
 
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8
 
 // migration represents a single schema migration step.
 type migration struct {
@@ -60,6 +60,11 @@ var migrations = []migration{
 		version:     7,
 		description: "Add dedicated retry_count column to downloads for retry policy (previously priority was used as proxy)",
 		up:          `ALTER TABLE downloads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`,
+	},
+	{
+		version:     8,
+		description: "Add avg_speed_bps column to irc_channels for per-channel average download speed",
+		up:          `ALTER TABLE irc_channels ADD COLUMN avg_speed_bps REAL NOT NULL DEFAULT 0;`,
 	},
 }
 

@@ -18,6 +18,7 @@
   import Logs from './components/Logs.svelte';
 
   let sidebarOpen = $state(false);
+  let downloadsNavKey = $state(0); // incremented on re-navigate to Downloads to force Active tab
 
   // ── Admin token prompt state ──
   let showTokenModal = $state(false);
@@ -36,6 +37,11 @@
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
 
   function navigateTo(view) {
+    // If already on Downloads and clicking Downloads again, force remount
+    // so the component switches back to the Active tab (from History).
+    if (view === 'downloads' && $currentView === 'downloads') {
+      downloadsNavKey++;
+    }
     currentView.set(view);
     window.location.hash = view;
     sidebarOpen = false;
@@ -502,7 +508,9 @@
     {:else if $currentView === 'servers'}
       <Servers on:navigate />
     {:else if $currentView === 'downloads'}
-      <Downloads />
+      {#key downloadsNavKey}
+        <Downloads />
+      {/key}
     {:else if $currentView === 'search'}
       <Search />
     {:else if $currentView === 'presets'}

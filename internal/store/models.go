@@ -28,12 +28,13 @@ type ServerRecord struct {
 
 // ChannelRecord represents an IRC channel stored in the database.
 type ChannelRecord struct {
-	ID       int64  `json:"id"`
-	ServerID int64  `json:"server_id"`
-	Name     string `json:"name"`
-	AutoJoin bool   `json:"auto_join"`
-	Topic    string `json:"topic,omitempty"`
-	Joined   bool   `json:"joined"`
+	ID          int64   `json:"id"`
+	ServerID    int64   `json:"server_id"`
+	Name        string  `json:"name"`
+	AutoJoin    bool    `json:"auto_join"`
+	Topic       string  `json:"topic,omitempty"`
+	Joined      bool    `json:"joined"`
+	AvgSpeedBPS float64 `json:"avg_speed_bps"` // running average download speed for this channel (B/s)
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,12 @@ type DownloadOptions struct {
 	// this callback provides the new client so handlers can be rebound.
 	// Return nil if the connection has not been re-established yet.
 	ReconnectCallback func() *girc.Client
+
+	// IsChannelBlacklisted is called before joining any channel discovered
+	// via WHOIS or used as a fallback. If it returns true, the channel is
+	// skipped and the download proceeds without joining it. If nil, no
+	// blacklist filtering is performed (all channels are allowed).
+	IsChannelBlacklisted func(channel string) bool
 }
 
 // PackResult holds the outcome of a single pack download.

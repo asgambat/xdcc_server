@@ -311,6 +311,10 @@ func (m *mockStore) UpdateDownloadMetadata(ctx context.Context, id int64, filena
 	return nil
 }
 
+func (m *mockStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	return nil
+}
+
 func (m *mockStore) SetSearchCache(ctx context.Context, e store.SearchCacheEntry) error { return nil }
 func (m *mockStore) GetSearchCache(ctx context.Context, query string, provider string) (*store.SearchCacheEntry, error) {
 	return nil, nil

@@ -87,6 +87,10 @@ func (m *mockDownloadStore) IncrementDownloadRetry(ctx context.Context, id int64
 func (m *mockDownloadStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
 	return nil
 }
+
+func (m *mockDownloadStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	return nil
+}
 func (m *mockDownloadStore) BulkActionDownloads(ctx context.Context, ids []int64, action string) (map[int64]string, error) {
 	return nil, nil
 }
@@ -427,6 +431,9 @@ func (m *trackedWatchlistStore) IncrementDownloadRetry(ctx context.Context, id i
 	return nil
 }
 func (m *trackedWatchlistStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
+	return nil
+}
+func (m *trackedWatchlistStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
 	return nil
 }
 func (m *trackedWatchlistStore) BulkActionDownloads(ctx context.Context, ids []int64, action string) (map[int64]string, error) {

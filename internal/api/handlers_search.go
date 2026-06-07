@@ -31,7 +31,11 @@ func (a *API) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Query:    q.Get("q"),
 		Prefix:   q.Get("prefix"),
 		Bot:      q.Get("bot"),
-		Compact:  q.Get("compact") == "true",
+		Compact:   q.Get("compact") == "true",
+		VideoOnly: q.Get("video_only") == "true",
+		AudioOnly: q.Get("audio_only") == "true",
+		BooksOnly: q.Get("books_only") == "true",
+		ZipOnly:   q.Get("zip_only") == "true",
 		MinSize:  q.Get("min_size"),
 		MaxSize:  q.Get("max_size"),
 		Page:     1,
@@ -434,6 +438,11 @@ func (a *API) handleUpdateWatchlist(w http.ResponseWriter, r *http.Request) {
 		a.logAndError(w, http.StatusInternalServerError, "UPDATE_WATCHLIST_ERROR", err.Error())
 		return
 	}
+
+	// When the user manually edits and saves a watchlist (Update button),
+	// reset the results counter to 0 so the UI reflects a fresh state.
+	// (RunWatchlist preserves results on no-changes; this is the explicit reset.)
+	_ = a.Store.SetWatchlistChecked(r.Context(), id, "", "[]")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }

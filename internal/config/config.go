@@ -102,8 +102,9 @@ type Config struct {
 }
 
 type IRCConfig struct {
-	Nickname       string         `yaml:"nickname"        env:"XDCC_IRC_NICKNAME"        json:"nickname"`
-	DefaultServers []ServerConfig `yaml:"default_servers"                          json:"default_servers"`
+	Nickname          string         `yaml:"nickname"           env:"XDCC_IRC_NICKNAME"           json:"nickname"`
+	DefaultServers    []ServerConfig `yaml:"default_servers"                               json:"default_servers"`
+	ChannelBlacklist  []string       `yaml:"channel_blacklist"                               json:"channel_blacklist"`
 }
 
 type ServerConfig struct {
@@ -727,6 +728,23 @@ func (c *Config) ParseDownloadsRetention() (int, error) {
 		return 0, fmt.Errorf("invalid downloads_retention %q: %w", s, err)
 	}
 	return int(d.Hours() / 24), nil
+}
+
+// IsChannelBlacklisted returns true if the given channel name is in the
+// channel blacklist. The check is case-insensitive and the channel name
+// is normalized (lowercase, # prefix). Blacklisted channels are never
+// joined, not even manually or via WHOIS discovery.
+func (c *Config) IsChannelBlacklisted(channel string) bool {
+	ch := strings.ToLower(strings.TrimSpace(channel))
+	if ch != "" && !strings.HasPrefix(ch, "#") {
+		ch = "#" + ch
+	}
+	for _, bl := range c.IRC.ChannelBlacklist {
+		if strings.ToLower(strings.TrimSpace(bl)) == ch {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseCleanupInterval parses the cleanup interval string into a time.Duration.

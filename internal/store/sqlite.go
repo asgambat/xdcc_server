@@ -222,7 +222,7 @@ func (s *SQLiteStore) AddChannel(ctx context.Context, ch ChannelRecord) (int64, 
 
 func (s *SQLiteStore) GetChannelsByServer(ctx context.Context, serverID int64) ([]ChannelRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, server_id, name, topic, auto_join, joined
+		`SELECT id, server_id, name, topic, auto_join, joined, avg_speed_bps
 		 FROM irc_channels WHERE server_id = ? ORDER BY name`, serverID,
 	)
 	if err != nil {
@@ -233,7 +233,7 @@ func (s *SQLiteStore) GetChannelsByServer(ctx context.Context, serverID int64) (
 	var channels []ChannelRecord
 	for rows.Next() {
 		var ch ChannelRecord
-		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined, &ch.AvgSpeedBPS); err != nil {
 			return nil, fmt.Errorf("scanning channel: %w", err)
 		}
 		channels = append(channels, ch)
@@ -246,11 +246,11 @@ func (s *SQLiteStore) GetChannelsByServer(ctx context.Context, serverID int64) (
 
 func (s *SQLiteStore) GetChannelsByServerAndName(ctx context.Context, serverID int64, name string) (*ChannelRecord, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, server_id, name, topic, auto_join, joined
+		`SELECT id, server_id, name, topic, auto_join, joined, avg_speed_bps
 		 FROM irc_channels WHERE server_id = ? AND name = ?`, serverID, name,
 	)
 	var ch ChannelRecord
-	if err := row.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined); err != nil {
+	if err := row.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined, &ch.AvgSpeedBPS); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -263,6 +263,23 @@ func (s *SQLiteStore) UpdateChannel(ctx context.Context, ch ChannelRecord) error
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE irc_channels SET name=?, topic=?, auto_join=?, joined=? WHERE id=?`,
 		ch.Name, ch.Topic, boolToInt(ch.AutoJoin), boolToInt(ch.Joined), ch.ID,
+	)
+	return err
+}
+
+// UpdateChannelAvgSpeed updates the exponential moving average of download
+// speed for a channel. The EMA formula smooths the average over time:
+//   newAvg = oldAvg * 0.7 + lastSpeed * 0.3
+// On the first update (avg_speed_bps = 0), the value is set directly to
+// avoid the EMA cold-start problem where 0 * 0.7 + speed * 0.3 = 0.3*speed.
+func (s *SQLiteStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE irc_channels SET avg_speed_bps = CASE
+		 WHEN avg_speed_bps = 0 THEN ?
+		 ELSE avg_speed_bps * 0.7 + ? * 0.3
+		 END
+		 WHERE name=? AND server_id IN (SELECT id FROM irc_servers WHERE address=?)`,
+		lastSpeedBPS, lastSpeedBPS, channelName, serverAddress,
 	)
 	return err
 }
@@ -284,7 +301,7 @@ func (s *SQLiteStore) UpdateChannelTopic(ctx context.Context, id int64, topic st
 
 func (s *SQLiteStore) GetAutoJoinChannels(ctx context.Context) ([]ChannelRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT ch.id, ch.server_id, ch.name, ch.topic, ch.auto_join, ch.joined
+		`SELECT ch.id, ch.server_id, ch.name, ch.topic, ch.auto_join, ch.joined, ch.avg_speed_bps
 		 FROM irc_channels ch
 		 JOIN irc_servers srv ON srv.id = ch.server_id
 		 WHERE ch.auto_join = 1 AND srv.auto_connect = 1
@@ -298,7 +315,7 @@ func (s *SQLiteStore) GetAutoJoinChannels(ctx context.Context) ([]ChannelRecord,
 	var channels []ChannelRecord
 	for rows.Next() {
 		var ch ChannelRecord
-		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Topic, &ch.AutoJoin, &ch.Joined, &ch.AvgSpeedBPS); err != nil {
 			return nil, fmt.Errorf("scanning channel: %w", err)
 		}
 		channels = append(channels, ch)
@@ -977,9 +994,19 @@ func (s *SQLiteStore) DeleteWatchlist(ctx context.Context, id int64) error {
 }
 
 func (s *SQLiteStore) SetWatchlistChecked(ctx context.Context, id int64, fingerprint, resultsJSON string) error {
+	// When resultsJSON is empty, preserve the existing last_results_json.
+	// This prevents overwriting previous results with an empty array when
+	// a watchlist run finds no new packs (e.g. fingerprint unchanged).
+	if resultsJSON != "" {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE watchlists SET last_checked_at=datetime('now'), last_match_fingerprint=?, last_results_json=? WHERE id=?`,
+			fingerprint, resultsJSON, id,
+		)
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE watchlists SET last_checked_at=datetime('now'), last_match_fingerprint=?, last_results_json=? WHERE id=?`,
-		fingerprint, resultsJSON, id,
+		`UPDATE watchlists SET last_checked_at=datetime('now'), last_match_fingerprint=? WHERE id=?`,
+		fingerprint, id,
 	)
 	return err
 }

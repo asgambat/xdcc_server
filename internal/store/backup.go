@@ -132,9 +132,9 @@ func (s *SQLiteStore) ImportData(ctx context.Context, data *ExportData) error {
 		for _, ch := range data.Channels {
 			if ch.ServerID == srv.ID {
 				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO irc_channels (server_id, name, topic, auto_join, joined)
-					 VALUES (?, ?, ?, ?, ?)`,
-					newID, ch.Name, ch.Topic, boolToInt(ch.AutoJoin), boolToInt(ch.Joined),
+					`INSERT INTO irc_channels (server_id, name, topic, auto_join, joined, avg_speed_bps)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					newID, ch.Name, ch.Topic, boolToInt(ch.AutoJoin), boolToInt(ch.Joined), ch.AvgSpeedBPS,
 				); err != nil {
 					return fmt.Errorf("importing channel %s for server %s: %w", ch.Name, srv.Address, err)
 				}

@@ -20,6 +20,10 @@ type SearchOptions struct {
 	Bot       string   `json:"bot,omitempty"`       // -b: bot name substring filter
 	Ext       []string `json:"ext,omitempty"`       // -x: allowed extensions
 	Compact   bool     `json:"compact,omitempty"`   // -c: deduplicate by bot family
+	VideoOnly bool     `json:"video_only,omitempty"` // keep only video file extensions
+	AudioOnly bool     `json:"audio_only,omitempty"` // keep only audio file extensions
+	BooksOnly bool     `json:"books_only,omitempty"` // keep only book file extensions
+	ZipOnly   bool     `json:"zip_only,omitempty"`   // keep only zip/archive file extensions
 	Providers []string `json:"providers,omitempty"` // restrict search to these providers
 	MinSize   string   `json:"min_size,omitempty"`  // minimum file size filter (e.g. "100MB")
 	MaxSize   string   `json:"max_size,omitempty"`  // maximum file size filter (e.g. "4GB")

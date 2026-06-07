@@ -667,6 +667,11 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 	// This prevents redundant store writes and SSE events after the first discovery.
 	metadataEmitted := false
 
+	// Record download start time for computing actual average speed.
+	// Set on the first progress callback with bytesReceived > 0 so only
+	// the DCC data transfer time is measured (excluding WHOIS/JOIN/XDCC).
+	var startTime time.Time
+
 	// Prepare worker config
 	wCfg := DownloadConfig{
 		TempDir:          qm.cfg.Download.TempDir,
@@ -689,6 +694,12 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 		// (e.g. by PauseDownload or RemoveDownload) to avoid racing with
 		// store status changes.
 		progressFn := func(bytesReceived, totalBytes int64, speedBPS float64) {
+			// Capture DCC transfer start on first data received. This
+			// excludes WHOIS/JOIN/XDCC overhead from the speed calculation.
+			if bytesReceived > 0 && startTime.IsZero() {
+				startTime = time.Now()
+			}
+
 			select {
 			case <-ctx.Done():
 				return
@@ -813,6 +824,24 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 
 				qm.log.Infof("download %d COMPLETED — bot=%s server=%s file=%s -> %s",
 					d.ID, d.Bot, d.ServerAddress, finalFilename, result.FilePath)
+
+			// Update channel average download speed using EMA.
+			// Use the channel from the DownloadRecord, but if it was
+			// discovered via WHOIS during the download, fall back to
+			// the channel stored on the pack object.
+			ch := d.Channel
+			if ch == "" {
+				ch = pack.Channel
+			}
+			// Compute actual average speed: file_size / elapsed_seconds.
+			// This is more accurate than the last instantaneous speedBPS.
+			if ch != "" && result.FileSize > 0 && !startTime.IsZero() {
+				elapsed := time.Since(startTime).Seconds()
+				if elapsed > 0 {
+					avgSpeedBPS := float64(result.FileSize) / elapsed
+					_ = qm.store.UpdateChannelAvgSpeed(qm.ctx, d.ServerAddress, ch, avgSpeedBPS)
+				}
+			}
 
 				// Emit completion event with discovered filename
 				qm.emitEvent(Event{

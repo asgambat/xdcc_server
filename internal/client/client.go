@@ -121,9 +121,10 @@ type SearchOptions struct {
 	Prefix   string
 	Bot      string
 	Ext      []string
-	Compact  bool
-	Page     int
-	PageSize int
+	Compact   bool
+	VideoOnly bool
+	Page      int
+	PageSize  int
 }
 
 // Search performs an aggregated search via the server.
@@ -146,6 +147,9 @@ func (c *Client) Search(opts *SearchOptions) (*SearchResult, error) {
 	}
 	if opts.Compact {
 		v.Set("compact", "true")
+	}
+	if opts.VideoOnly {
+		v.Set("video_only", "true")
 	}
 	if opts.Page > 0 {
 		v.Set("page", strconv.Itoa(opts.Page))

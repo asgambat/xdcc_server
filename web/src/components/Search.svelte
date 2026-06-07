@@ -1,12 +1,14 @@
 <script>
   import { onMount } from 'svelte';
   import { searchResults, pendingSearchQuery } from '../lib/stores.js';
-  import { SearchAPI, DownloadsAPI, ProvidersAPI } from '../lib/api.js';
-  import { formatBytes, statusBadge, escapeHtml } from '../lib/utils.js';
+  import { SearchAPI, DownloadsAPI, ProvidersAPI, PresetsAPI } from '../lib/api.js';
+  import { formatBytes, statusBadge, escapeHtml, normalizeSize } from '../lib/utils.js';
   import { addToast } from '../lib/stores.js';
+  import Modal from './Modal.svelte';
 
   // --- Query history ---
   const HISTORY_KEY = 'xdcc-search-history';
+  const PAGE_SIZE_KEY = 'xdcc-search-page-size';
   const MAX_HISTORY = 10;
   let queryHistory = $state([]);
 
@@ -49,6 +51,30 @@
   let filterMinMB = $state(0);
   let filterMaxMB = $state(0);
   let compactMode = $state(false);
+  let mediaFilter = $state('all'); // 'all' | 'video' | 'audio' | 'books' | 'zip'
+  let hqMode = $state(false);
+  let prefixMode = $state(false);
+  let pageSize = $state(50);
+
+  // --- Save as preset modal ---
+  let showSavePresetModal = $state(false);
+  let presetName = $state('');
+
+  // Load saved page size from localStorage on init
+  function loadPageSize() {
+    try {
+      const saved = parseInt(localStorage.getItem(PAGE_SIZE_KEY), 10);
+      if ([10, 50, 100, 200, 500].includes(saved)) pageSize = saved;
+    } catch {}
+  }
+  loadPageSize();
+
+  // Persist page size to localStorage on change
+  $effect(() => {
+    // read pageSize to track it
+    const val = pageSize;
+    try { localStorage.setItem(PAGE_SIZE_KEY, String(val)); } catch {}
+  });
 
   // --- Slider range (min/max MB from current results) ---
   let sliderRange = $derived.by(() => {
@@ -270,9 +296,18 @@
     saveQueryToHistory(query);
     try {
       const params = { q: query.trim(), providers: selectedProviders };
-      if (minSize) params.min_size = minSize;
-      if (maxSize) params.max_size = maxSize;
+      if (minSize) { minSize = normalizeSize(minSize); params.min_size = minSize; }
+      if (maxSize) { maxSize = normalizeSize(maxSize); params.max_size = maxSize; }
       if (compactMode) params.compact = 'true';
+      if (mediaFilter === 'video') params.video_only = 'true';
+      if (mediaFilter === 'audio') params.audio_only = 'true';
+      if (mediaFilter === 'books') params.books_only = 'true';
+      if (mediaFilter === 'zip') params.zip_only = 'true';
+      // HQ mode: append exclusion terms to filter out low-quality packs
+      if (hqMode) params.q += ' -MD -TS';
+      // Prefix mode: keep only packs whose filename starts with the query
+      if (prefixMode) params.prefix = query.trim();
+      params.pageSize = pageSize;
       const data = await SearchAPI.search(params);
       searchResults.set(data);
       // Initialize both size sliders to full range so all results are included at start
@@ -345,6 +380,23 @@
         server_address: pack.server?.address || 'unknown',
       });
       addToast(`Download queued: ${escapeHtml(pack.filename)}`, 'success');
+    } catch (e) { addToast(e.message, 'error'); }
+  }
+
+  async function saveAsPreset() {
+    const name = presetName.trim();
+    if (!name) return addToast('Enter a preset name', 'warning');
+    try {
+      await PresetsAPI.create({
+        name,
+        query: query.trim(),
+        providers: selectedProviders,
+        min_size: normalizeSize(minSize),
+        max_size: normalizeSize(maxSize),
+      });
+      addToast(`Preset "${name}" created`, 'success');
+      showSavePresetModal = false;
+      presetName = '';
     } catch (e) { addToast(e.message, 'error'); }
   }
 
@@ -462,7 +514,7 @@
   </div>
 
   <div class="flex gap-1" style="flex-wrap:wrap;align-items:center">
-    {#if providers.length > 0}
+    {#if providers.length > 1}
       <span class="text-sm text-muted">Providers:</span>
       {#each providers as p}
         <button class="btn btn-sm" class:btn-primary={selectedProviders.includes(p.name)} class:btn-ghost={!selectedProviders.includes(p.name)} onclick={() => toggleProvider(p.name)}>
@@ -474,6 +526,33 @@
     <label class="toggle-label" title="Collapse duplicate results sharing the same filename, size, and bot family">
       <input type="checkbox" bind:checked={compactMode} />
       <span class="toggle-text">Compact</span>
+    </label>
+    <span class="text-sm text-muted">Media:</span>
+    <div class="media-filter-group" role="radiogroup" aria-label="Media type filter">
+      <button class="media-filter-btn" class:active={mediaFilter === 'all'} onclick={() => mediaFilter = 'all'} title="Show all file types">All</button>
+      <button class="media-filter-btn" class:active={mediaFilter === 'video'} onclick={() => mediaFilter = 'video'} title="🎬 Video (avi, mpeg, mkv, mp4, mpg, mov)">🎬</button>
+      <button class="media-filter-btn" class:active={mediaFilter === 'audio'} onclick={() => mediaFilter = 'audio'} title="🎵 Audio (mp3, m4a, ogg, flac, aac)">🎵</button>
+      <button class="media-filter-btn" class:active={mediaFilter === 'books'} onclick={() => mediaFilter = 'books'} title="📚 Books (epub, mobi, pdf)">📚</button>
+      <button class="media-filter-btn" class:active={mediaFilter === 'zip'} onclick={() => mediaFilter = 'zip'} title="📦 Archives (zip, rar, 7z, tar, gz, bz2, xz)">📦</button>
+    </div>
+    <label class="toggle-label" title="Exclude low-quality packs containing MD or TS in the filename">
+      <input type="checkbox" bind:checked={hqMode} />
+      <span class="toggle-text">HQ</span>
+    </label>
+    <label class="toggle-label" title="Keep only packs whose filename starts with the search query">
+      <input type="checkbox" bind:checked={prefixMode} />
+      <span class="toggle-text">Prefix</span>
+    </label>
+    <span class="separator-dot">·</span>
+    <label class="page-size-label">
+      <span class="page-size-text">Results:</span>
+      <select class="page-size-select" bind:value={pageSize}>
+        <option value={10}>10</option>
+        <option value={50}>50</option>
+        <option value={100}>100</option>
+        <option value={200}>200</option>
+        <option value={500}>500</option>
+      </select>
     </label>
   </div>
 </div>
@@ -495,6 +574,7 @@
     <div class="card-header">
       <span class="card-title">Results</span>
       <span class="text-sm text-muted">{results.total_results || results.packs?.length || 0} packs found</span>
+      <button class="btn btn-sm btn-primary" onclick={() => { presetName = query.trim(); showSavePresetModal = true; }}>💾 Save as preset</button>
     </div>
     {#if results.packs?.length > 0}
       <!-- Client-side filter bar — always visible when results exist, even if all filtered out -->
@@ -568,9 +648,9 @@
           </tbody>
         </table>
       </div>
-      {#if results.packs.length >= 50}
+      {#if results.packs.length >= pageSize}
         <div class="pagination">
-          <span class="page-info">Showing first 50 results. Refine your search for more specific results.</span>
+          <span class="page-info">Showing first {pageSize} results. Refine your search for more specific results.</span>
         </div>
       {/if}
       {:else if results.packs?.length > 0}
@@ -599,6 +679,20 @@
     <div class="empty-state-sub">Search across multiple providers (NIBL, SubSplease, XDCC.eu)</div>
   </div>
 {/if}
+
+<Modal title="Save Search as Preset" visible={showSavePresetModal} on:close={() => showSavePresetModal = false}>
+  <div class="form-group">
+    <label class="form-label" for="save-preset-name">Preset Name</label>
+    <input id="save-preset-name" class="form-input" bind:value={presetName} placeholder="e.g. Ubuntu ISOs" />
+  </div>
+  <div class="text-sm text-muted mb-1">
+    Query: <code>{query.trim()}</code>
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-ghost" onclick={() => showSavePresetModal = false}>Cancel</button>
+    <button class="btn btn-primary" onclick={saveAsPreset}>Save Preset</button>
+  </div>
+</Modal>
 
 <style>
   th.sortable {
@@ -764,6 +858,38 @@
     pointer-events: none;
   }
 
+  /* --- Media filter button group --- */
+  .media-filter-group {
+    display: inline-flex;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+  }
+  .media-filter-btn {
+    padding: 0.25rem 0.55rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    border: none;
+    border-right: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .media-filter-btn:last-child {
+    border-right: none;
+  }
+  .media-filter-btn:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+  .media-filter-btn.active {
+    color: var(--bg-card);
+    background: var(--accent);
+  }
+
   /* --- Compact toggle --- */
   .toggle-label {
     display: flex;
@@ -792,6 +918,43 @@
   }
   .toggle-text {
     font-weight: 500;
+  }
+
+  /* --- Page size selector --- */
+  .page-size-label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    padding: 0.25rem 0.4rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    transition: all 0.15s ease;
+  }
+  .page-size-label:hover {
+    color: var(--text);
+    border-color: var(--border-color);
+  }
+  .page-size-text {
+    font-weight: 500;
+  }
+  .page-size-select {
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 0.2rem 0.35rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  .page-size-select:focus {
+    border-color: var(--accent);
   }
 
   /* --- Custom history dropdown --- */

@@ -367,6 +367,9 @@ func (m *Manager) GetClient(serverID int64) *girc.Client {
 
 // JoinChannel joins a channel on a specific server.
 func (m *Manager) JoinChannel(serverID int64, channel string) error {
+	if m.cfg.IsChannelBlacklisted(channel) {
+		return fmt.Errorf("channel %q is blacklisted", channel)
+	}
 	m.mu.RLock()
 	conn, ok := m.conns[serverID]
 	m.mu.RUnlock()
@@ -507,6 +510,7 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 		ProgressCallback: progressFn,
 		// When the persistent connection drops and reconnects, the xdccirc.Client
 		// calls this to get the new girc.Client and re-bind its handlers.
+		IsChannelBlacklisted: m.cfg.IsChannelBlacklisted,
 		ReconnectCallback: func() *girc.Client {
 			conn.mu.RLock()
 			irc := conn.irc
@@ -854,8 +858,12 @@ func (mc *managedConnection) connect() connectResult {
 			ServerAddr: mc.address,
 		})
 
-		// Auto-join channels
+		// Auto-join channels (skip blacklisted)
 		for _, ch := range mc.autoJoinChs {
+			if mc.manager.cfg.IsChannelBlacklisted(ch) {
+				mc.manager.logger.Infof("skipping auto-join of blacklisted channel %q on %s", ch, mc.address)
+				continue
+			}
 			cl.Cmd.Join(ch)
 		}
 
@@ -1121,6 +1129,10 @@ func (mc *managedConnection) waitConnected(timeout time.Duration) bool {
 
 // joinChannel sends a JOIN command for the given channel.
 func (mc *managedConnection) joinChannel(channel string) error {
+	if mc.manager.cfg.IsChannelBlacklisted(channel) {
+		return fmt.Errorf("channel %q is blacklisted", channel)
+	}
+
 	mc.mu.RLock()
 	client := mc.irc
 	mc.mu.RUnlock()
