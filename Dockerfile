@@ -103,7 +103,7 @@ EXPOSE 8080
 # to copy permissions on first mount — see COPY --chown above)
 VOLUME ["/data", "/var/lib/xdcc-server/db"]
 
-# Default config: use /data for all persistent files
+# Default config: use /data for all persistent files and var/lib for db files
 ENV XDCC_HTTP_PORT=8080 \
     XDCC_DOWNLOAD_TEMP_DIR=/data/downloads/tmp \
     XDCC_DOWNLOAD_DEST_DIR=/data/downloads/complete \
