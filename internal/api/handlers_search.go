@@ -28,18 +28,18 @@ func (a *API) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	opts := searchagg.SearchOptions{
-		Query:    q.Get("q"),
-		Prefix:   q.Get("prefix"),
-		Bot:      q.Get("bot"),
+		Query:     q.Get("q"),
+		Prefix:    q.Get("prefix"),
+		Bot:       q.Get("bot"),
 		Compact:   q.Get("compact") == "true",
 		VideoOnly: q.Get("video_only") == "true",
 		AudioOnly: q.Get("audio_only") == "true",
 		BooksOnly: q.Get("books_only") == "true",
 		ZipOnly:   q.Get("zip_only") == "true",
-		MinSize:  q.Get("min_size"),
-		MaxSize:  q.Get("max_size"),
-		Page:     1,
-		PageSize: 50,
+		MinSize:   q.Get("min_size"),
+		MaxSize:   q.Get("max_size"),
+		Page:      1,
+		PageSize:  50,
 	}
 	if ext := q.Get("ext"); ext != "" {
 		opts.Ext = strings.Split(ext, ",")

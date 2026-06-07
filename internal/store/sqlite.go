@@ -269,7 +269,9 @@ func (s *SQLiteStore) UpdateChannel(ctx context.Context, ch ChannelRecord) error
 
 // UpdateChannelAvgSpeed updates the exponential moving average of download
 // speed for a channel. The EMA formula smooths the average over time:
-//   newAvg = oldAvg * 0.7 + lastSpeed * 0.3
+//
+//	newAvg = oldAvg * 0.7 + lastSpeed * 0.3
+//
 // On the first update (avg_speed_bps = 0), the value is set directly to
 // avoid the EMA cold-start problem where 0 * 0.7 + speed * 0.3 = 0.3*speed.
 func (s *SQLiteStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {

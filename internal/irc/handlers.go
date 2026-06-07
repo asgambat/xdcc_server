@@ -117,26 +117,26 @@ func (c *Client) registerHandlers() {
 			}
 			ch := strings.ToLower(part)
 			c.ps.whoisFoundChannels.Store(true)
-		alreadyIn := c.conn.joinedChannels[ch]
-		if alreadyIn {
-			c.infof("Already in channel %s, skipping JOIN", part)
-			// Still record the channel on the pack for speed tracking.
-			if c.currentPack().Channel == "" {
-				c.currentPack().Channel = ch
-			}
-		} else if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+			alreadyIn := c.conn.joinedChannels[ch]
+			if alreadyIn {
+				c.infof("Already in channel %s, skipping JOIN", part)
+				// Still record the channel on the pack for speed tracking.
+				if c.currentPack().Channel == "" {
+					c.currentPack().Channel = ch
+				}
+			} else if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
 				c.infof("Skipping blacklisted channel %s", part)
-		} else {
-			c.infof("Joining channel: %s", part)
-			c.ps.needsJoin.Store(true)
-			// Record the discovered channel on the pack so it can be
-			// used for per-channel statistics after download completes.
-			if c.currentPack().Channel == "" {
-				c.currentPack().Channel = ch
+			} else {
+				c.infof("Joining channel: %s", part)
+				c.ps.needsJoin.Store(true)
+				// Record the discovered channel on the pack so it can be
+				// used for per-channel statistics after download completes.
+				if c.currentPack().Channel == "" {
+					c.currentPack().Channel = ch
+				}
+				time.Sleep(time.Duration(1+randN(2)) * time.Second)
+				client.Cmd.Join(part)
 			}
-			time.Sleep(time.Duration(1+randN(2)) * time.Second)
-			client.Cmd.Join(part)
-		}
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)

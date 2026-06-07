@@ -825,23 +825,23 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 				qm.log.Infof("download %d COMPLETED — bot=%s server=%s file=%s -> %s",
 					d.ID, d.Bot, d.ServerAddress, finalFilename, result.FilePath)
 
-			// Update channel average download speed using EMA.
-			// Use the channel from the DownloadRecord, but if it was
-			// discovered via WHOIS during the download, fall back to
-			// the channel stored on the pack object.
-			ch := d.Channel
-			if ch == "" {
-				ch = pack.Channel
-			}
-			// Compute actual average speed: file_size / elapsed_seconds.
-			// This is more accurate than the last instantaneous speedBPS.
-			if ch != "" && result.FileSize > 0 && !startTime.IsZero() {
-				elapsed := time.Since(startTime).Seconds()
-				if elapsed > 0 {
-					avgSpeedBPS := float64(result.FileSize) / elapsed
-					_ = qm.store.UpdateChannelAvgSpeed(qm.ctx, d.ServerAddress, ch, avgSpeedBPS)
+				// Update channel average download speed using EMA.
+				// Use the channel from the DownloadRecord, but if it was
+				// discovered via WHOIS during the download, fall back to
+				// the channel stored on the pack object.
+				ch := d.Channel
+				if ch == "" {
+					ch = pack.Channel
 				}
-			}
+				// Compute actual average speed: file_size / elapsed_seconds.
+				// This is more accurate than the last instantaneous speedBPS.
+				if ch != "" && result.FileSize > 0 && !startTime.IsZero() {
+					elapsed := time.Since(startTime).Seconds()
+					if elapsed > 0 {
+						avgSpeedBPS := float64(result.FileSize) / elapsed
+						_ = qm.store.UpdateChannelAvgSpeed(qm.ctx, d.ServerAddress, ch, avgSpeedBPS)
+					}
+				}
 
 				// Emit completion event with discovered filename
 				qm.emitEvent(Event{

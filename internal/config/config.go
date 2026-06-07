@@ -102,9 +102,9 @@ type Config struct {
 }
 
 type IRCConfig struct {
-	Nickname          string         `yaml:"nickname"           env:"XDCC_IRC_NICKNAME"           json:"nickname"`
-	DefaultServers    []ServerConfig `yaml:"default_servers"                               json:"default_servers"`
-	ChannelBlacklist  []string       `yaml:"channel_blacklist"                               json:"channel_blacklist"`
+	Nickname         string         `yaml:"nickname"           env:"XDCC_IRC_NICKNAME"           json:"nickname"`
+	DefaultServers   []ServerConfig `yaml:"default_servers"                               json:"default_servers"`
+	ChannelBlacklist []string       `yaml:"channel_blacklist"                               json:"channel_blacklist"`
 }
 
 type ServerConfig struct {

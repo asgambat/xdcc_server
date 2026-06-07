@@ -117,10 +117,10 @@ type PackResult struct {
 
 // SearchOptions are the query parameters for a search request.
 type SearchOptions struct {
-	Query    string
-	Prefix   string
-	Bot      string
-	Ext      []string
+	Query     string
+	Prefix    string
+	Bot       string
+	Ext       []string
 	Compact   bool
 	VideoOnly bool
 	Page      int
