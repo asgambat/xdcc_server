@@ -789,12 +789,13 @@ func whoisBotOnServer(ctx context.Context, ircMgr IRCManager, serverID int64, bo
 	}
 
 	// Handler for RPL_WHOISUSER — bot exists on this server
+	// IRC format: :server 311 ourNick targetNick user host * :realname
+	// girc includes the recipient (ourNick) as Params[0]; the bot is Params[1].
 	cuid := client.Handlers.Add(girc.RPL_WHOISUSER, func(cl *girc.Client, e girc.Event) {
 		if len(e.Params) < 2 {
 			return
 		}
-		// Params: [nick, user, host, real name]
-		whoisNick := e.Params[0]
+		whoisNick := e.Params[1]
 		if strings.EqualFold(whoisNick, bot) {
 			sendReply(whoisNick)
 		}
@@ -802,12 +803,13 @@ func whoisBotOnServer(ctx context.Context, ircMgr IRCManager, serverID int64, bo
 	defer client.Handlers.Remove(cuid)
 
 	// Handler for ERR_NOSUCHNICK — bot not found on this server (no such nick)
+	// IRC format: :server 401 ourNick targetNick :No such nick/channel
+	// girc includes the recipient (ourNick) as Params[0]; the target is Params[1].
 	cuid2 := client.Handlers.Add(girc.ERR_NOSUCHNICK, func(cl *girc.Client, e girc.Event) {
 		if len(e.Params) < 2 {
 			return
 		}
-		// Params: [nick, "No such nick"]
-		if strings.EqualFold(e.Params[0], bot) {
+		if strings.EqualFold(e.Params[1], bot) {
 			sendReply("")
 		}
 	})

@@ -442,22 +442,22 @@ type EmailNotifier struct {
 // NewEmailNotifier creates an EmailNotifier from a notification config entry.
 // Returns nil if the config type is not "email" or required fields are missing.
 func NewEmailNotifier(cfg config.NotificationConfig) *EmailNotifier {
-	if cfg.Type != "email" || cfg.SmtpHost == "" || cfg.SmtpFrom == "" || cfg.SmtpTo == "" {
+	if cfg.Type != "email" || cfg.SMTPHost == "" || cfg.SMTPFrom == "" || cfg.SMTPTo == "" {
 		return nil
 	}
 
-	port := cfg.SmtpPort
+	port := cfg.SMTPPort
 	if port == 0 {
 		port = 587 // default STARTTLS
 	}
 
-	tlsMode := cfg.SmtpTLS
+	tlsMode := cfg.SMTPTLS
 	if tlsMode == "" {
 		tlsMode = "starttls"
 	}
 
 	// Parse and normalize recipients
-	recipients := strings.Split(cfg.SmtpTo, ",")
+	recipients := strings.Split(cfg.SMTPTo, ",")
 	parsed := make([]string, 0, len(recipients))
 	for _, r := range recipients {
 		r = strings.TrimSpace(r)
@@ -467,14 +467,14 @@ func NewEmailNotifier(cfg config.NotificationConfig) *EmailNotifier {
 	}
 
 	return &EmailNotifier{
-		host:       cfg.SmtpHost,
+		host:       cfg.SMTPHost,
 		port:       port,
-		username:   cfg.SmtpUsername,
-		password:   cfg.SmtpPassword,
-		from:       cfg.SmtpFrom,
+		username:   cfg.SMTPUsername,
+		password:   cfg.SMTPPassword,
+		from:       cfg.SMTPFrom,
 		to:         parsed,
 		tlsMode:    tlsMode,
-		skipVerify: cfg.SmtpSkipVerify,
+		skipVerify: cfg.SMTPSkipVerify,
 		events:     eventsFilter(cfg.Events),
 	}
 }
@@ -578,8 +578,8 @@ type allowAnyTLS struct {
 	user, pass, host string
 }
 
-func (a *allowAnyTLS) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	resp := []byte(a.user + "\x00" + a.user + "\x00" + a.pass)
+func (a *allowAnyTLS) Start(server *smtp.ServerInfo) (mech string, resp []byte, err error) {
+	resp = []byte(a.user + "\x00" + a.user + "\x00" + a.pass)
 	return "PLAIN", resp, nil
 }
 
@@ -744,7 +744,7 @@ func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manag
 			n := NewEmailNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
-				logger.Infof("notifier: added email (%d events) → %s", len(cfg.Events), cfg.SmtpFrom)
+				logger.Infof("notifier: added email (%d events) → %s", len(cfg.Events), cfg.SMTPFrom)
 			}
 		default:
 			logger.Warnf("notifier: unknown type %q, skipping", cfg.Type)

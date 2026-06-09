@@ -82,18 +82,20 @@ func TestWhoisBotOnServerRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Simulate RPL_WHOISUSER (311) — bot found
+		// girc includes the recipient as Params[0]; Params[1] is the target.
 		client.RunHandlers(&girc.Event{
 			Command: "311",
-			Params:  []string{bot, "user", "host", "Test User"},
+			Params:  []string{"ourNick", bot, "user", "host", "*"},
 		})
 	}()
 
 	go func() {
 		defer wg.Done()
 		// Simulate ERR_NOSUCHNICK (401) — bot not found
+		// girc includes the recipient as Params[0]; Params[1] is the target.
 		client.RunHandlers(&girc.Event{
 			Command: "401",
-			Params:  []string{bot, "No such nick"},
+			Params:  []string{"ourNick", bot},
 		})
 	}()
 
@@ -144,9 +146,10 @@ func TestWhoisBotOnServerConcurrentCallbacks(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// girc includes the recipient as Params[0]; Params[1] is the target.
 			client.RunHandlers(&girc.Event{
 				Command: "311",
-				Params:  []string{bot, "user", "host", "Test User"},
+				Params:  []string{"ourNick", bot, "user", "host", "*"},
 			})
 		}()
 	}

@@ -253,7 +253,15 @@ func (c *Client) registerHandlers() {
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
+	// IRC format: :server 401 ourNick targetNick :No such nick/channel
+	// girc includes the recipient (ourNick) as Params[0]; the target is Params[1].
 	cuid = c.conn.irc.Handlers.Add(girc.ERR_NOSUCHNICK, func(client *girc.Client, e girc.Event) {
+		if len(e.Params) < 2 {
+			return
+		}
+		if !strings.EqualFold(e.Params[1], c.currentPack().Bot) {
+			return // 401 for a different nick, not our bot
+		}
 		c.noticef("Bot '%s' not found on server", c.currentPack().Bot)
 		c.finishWithError(ErrBotNotFound)
 	})
