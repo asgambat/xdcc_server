@@ -106,7 +106,7 @@
               {#if showSelect}
                 <input type="checkbox" checked={selectedDownloads?.has(item.id)} onchange={() => toggleDownload(item.id)} />
               {/if}
-              <strong class="truncate">{item.filename || 'Unknown'}</strong>
+              <strong class="truncate" style="min-width:0">{item.filename || 'Unknown'}</strong>
             </div>
             <button class="btn btn-sm btn-ghost" onclick={() => handleRemove(item.id)}>🗑️</button>
           </div>

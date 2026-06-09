@@ -109,9 +109,10 @@ profiling:
   mutex_profile_fraction: 0
 
 # External notifications for download and watchlist events
-# Supported providers: webhook, ntfy, pushover
+# Supported providers: webhook, ntfy, pushover, email
 # Available events: download_completed, download_failed, watchlist_new_results
 # If events is empty or omitted, all events trigger notifications.
+# Each provider can be disabled by setting enabled: false (default: true).
 #
 # Uncomment the desired providers below to enable notifications.
 #
@@ -121,8 +122,10 @@ profiling:
 #   Invia POST {"data":"messaggio"} a un endpoint HTTP/HTTPS qualsiasi.
 #   Supporta Bearer token opzionale per autenticazione.
 #   Esempi di utilizzo: Telegram bot, Slack webhook, IFTTT, Zapier.
+#   Per disabilitare: enabled: false
 #
 #   - type: webhook
+#     enabled: true                                  # default: true
 #     webhook_endpoint: "https://hooks.example.com/notify"
 #     webhook_token: "tk_abc123"                  # opzionale, ometti se non serve
 #     events: [download_completed, download_failed, watchlist_new_results]
@@ -132,8 +135,10 @@ profiling:
 #   Richiede un topic (gratuito) o istanza self-hosted.
 #   Il token è il Bearer token per l'autenticazione (opzionale: se omesso
 #   l'endpoint deve essere pubblico/anonymous).
+#   Per disabilitare: enabled: false
 #
 #   - type: ntfy
+#     enabled: true                                  # default: true
 #     ntfy_token: "tk_abc123"                     # opzionale, ometti per topic pubblico
 #     ntfy_endpoint: "https://ntfy.sh/mio_topic"
 #     events: [download_completed, download_failed, watchlist_new_results]
@@ -142,9 +147,30 @@ profiling:
 #   https://pushover.net — notifiche push su iOS/Android/desktop.
 #   Servono un Application Token e un User/Group Key.
 #   pushover_endpoint è opzionale (default: https://api.pushover.net/1/messages.json).
+#   Per disabilitare: enabled: false
 #
 #   - type: pushover
+#     enabled: true                                  # default: true
 #     pushover_token: "APP_TOKEN"
 #     pushover_user: "USER_KEY"
 #     pushover_endpoint: "https://api.pushover.net/1/messages.json"  # default, puoi omettere
+#     events: [download_completed, download_failed, watchlist_new_results]
+#
+#   ─── Email (SMTP) ──────────────────────────────────────────────
+#   Invia email via server SMTP. Supporta STARTTLS (default, porta 587),
+#   SSL/TLS diretto (porta 465 con smtp_tls: ssl) e connessione senza TLS
+#   (smtp_tls: none). Se le credenziali sono vuote, invia senza autenticazione.
+#   smtp_skip_verify: true permette certificati self-signed.
+#   Per disabilitare: enabled: false
+#
+#   - type: email
+#     enabled: true                                  # default: true
+#     smtp_host: "smtp.gmail.com"
+#     smtp_port: 587                                 # default: 587
+#     smtp_username: "tua@email.com"
+#     smtp_password: "la_tua_password"
+#     smtp_from: "tua@email.com"
+#     smtp_to: "destinatario@example.com"           # multipli separati da virgola
+#     smtp_tls: "starttls"                          # starttls | ssl | none
+#     smtp_skip_verify: false                       # true per certificati self-signed
 #     events: [download_completed, download_failed, watchlist_new_results]

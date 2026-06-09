@@ -1,8 +1,9 @@
 // Package notifier provides external notification support for download and
-// watchlist events. It supports three notification providers:
+// watchlist events. It supports four notification providers:
 //   - webhook: generic HTTP POST with JSON payload
 //   - ntfy: push notifications via ntfy.sh (or self-hosted)
 //   - pushover: push notifications via Pushover.net
+//   - email: SMTP email notifications
 //
 // Configuration is loaded from config.yaml:
 //
@@ -20,16 +21,29 @@
 //	    pushover_token: "abc123"
 //	    pushover_user: "userkey"
 //	    events: [download_completed, download_failed, watchlist_new_results]
+//
+//	  - type: email
+//	    smtp_host: "smtp.example.com"
+//	    smtp_port: 587
+//	    smtp_username: "user"
+//	    smtp_password: "pass"
+//	    smtp_from: "sender@example.com"
+//	    smtp_to: "recipient@example.com"
+//	    events: [download_completed, download_failed, watchlist_new_results]
 package notifier
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -409,6 +423,244 @@ func (p *PushoverNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 }
 
 // ---------------------------------------------------------------------------
+// EmailNotifier (SMTP)
+// ---------------------------------------------------------------------------
+
+// EmailNotifier sends notifications via SMTP email.
+type EmailNotifier struct {
+	host       string
+	port       int
+	username   string
+	password   string
+	from       string
+	to         []string // parsed recipients
+	tlsMode    string   // "starttls", "ssl", "none"
+	skipVerify bool
+	events     map[EventType]bool
+}
+
+// NewEmailNotifier creates an EmailNotifier from a notification config entry.
+// Returns nil if the config type is not "email" or required fields are missing.
+func NewEmailNotifier(cfg config.NotificationConfig) *EmailNotifier {
+	if cfg.Type != "email" || cfg.SmtpHost == "" || cfg.SmtpFrom == "" || cfg.SmtpTo == "" {
+		return nil
+	}
+
+	port := cfg.SmtpPort
+	if port == 0 {
+		port = 587 // default STARTTLS
+	}
+
+	tlsMode := cfg.SmtpTLS
+	if tlsMode == "" {
+		tlsMode = "starttls"
+	}
+
+	// Parse and normalize recipients
+	recipients := strings.Split(cfg.SmtpTo, ",")
+	parsed := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			parsed = append(parsed, r)
+		}
+	}
+
+	return &EmailNotifier{
+		host:       cfg.SmtpHost,
+		port:       port,
+		username:   cfg.SmtpUsername,
+		password:   cfg.SmtpPassword,
+		from:       cfg.SmtpFrom,
+		to:         parsed,
+		tlsMode:    tlsMode,
+		skipVerify: cfg.SmtpSkipVerify,
+		events:     eventsFilter(cfg.Events),
+	}
+}
+
+// send delivers an email notification.
+func (e *EmailNotifier) send(ctx context.Context, nm notifyMessage) error {
+	if len(e.to) == 0 {
+		return fmt.Errorf("email: no recipients configured")
+	}
+
+	// Build the MIME email
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("From: %s\r\n", e.from))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(e.to, ", ")))
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", nm.Title))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	buf.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
+	buf.WriteString("\r\n")
+	buf.WriteString(nm.Message)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+
+	done := make(chan error, 1)
+
+	go func() {
+		switch e.tlsMode {
+		case "ssl":
+			done <- e.sendSSL(addr, buf.Bytes())
+		case "none":
+			done <- e.sendNoTLS(addr, buf.Bytes())
+		default: // "starttls"
+			done <- e.sendSTARTTLS(addr, buf.Bytes())
+		}
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("email: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// sendSTARTTLS uses net/smtp.SendMail which automatically negotiates STARTTLS.
+func (e *EmailNotifier) sendSTARTTLS(addr string, msg []byte) error {
+	var auth smtp.Auth
+	if e.username != "" {
+		auth = smtp.PlainAuth("", e.username, e.password, e.host)
+	}
+	return smtp.SendMail(addr, auth, e.from, e.to, msg)
+}
+
+// sendSSL connects over an explicit TLS tunnel (SMTPS, typically port 465).
+func (e *EmailNotifier) sendSSL(addr string, msg []byte) error {
+	tlsCfg := &tls.Config{
+		ServerName:         e.host,
+		InsecureSkipVerify: e.skipVerify,
+	}
+
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, e.host)
+	if err != nil {
+		return fmt.Errorf("new client: %w", err)
+	}
+	defer client.Close()
+
+	return e.sendViaClient(client, msg)
+}
+
+// sendNoTLS connects over a plain TCP connection without TLS.
+func (e *EmailNotifier) sendNoTLS(addr string, msg []byte) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, e.host)
+	if err != nil {
+		return fmt.Errorf("new client: %w", err)
+	}
+	defer client.Close()
+
+	return e.sendViaClient(client, msg)
+}
+
+// allowAnyTLS implements smtp.Auth, wrapping PlainAuth but skipping the TLS
+// check. This is needed because smtp.PlainAuth refuses to authenticate on
+// connections that did NOT negotiate STARTTLS — but our sendSSL path
+// connects via tls.Dial before smtp.NewClient, so ServerInfo.TLS is false
+// even though the connection is encrypted.
+type allowAnyTLS struct {
+	user, pass, host string
+}
+
+func (a *allowAnyTLS) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	resp := []byte(a.user + "\x00" + a.user + "\x00" + a.pass)
+	return "PLAIN", resp, nil
+}
+
+func (a *allowAnyTLS) Next(fromServer []byte, more bool) ([]byte, error) {
+	return nil, nil
+}
+
+// smtpAuth returns the appropriate smtp.Auth for the current TLS mode.
+func (e *EmailNotifier) smtpAuth() smtp.Auth {
+	if e.username == "" {
+		return nil
+	}
+	if e.tlsMode == "starttls" {
+		return smtp.PlainAuth("", e.username, e.password, e.host)
+	}
+	return &allowAnyTLS{user: e.username, pass: e.password, host: e.host}
+}
+
+// sendViaClient performs SMTP MAIL, RCPT, DATA, and QUIT on an established client.
+func (e *EmailNotifier) sendViaClient(client *smtp.Client, msg []byte) error {
+	// Authenticate if credentials are provided
+	if auth := e.smtpAuth(); auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("auth: %w", err)
+		}
+	}
+
+	// MAIL FROM
+	if err := client.Mail(e.from); err != nil {
+		return fmt.Errorf("mail from: %w", err)
+	}
+
+	// RCPT TO for each recipient
+	for _, r := range e.to {
+		if err := client.Rcpt(r); err != nil {
+			return fmt.Errorf("rcpt %s: %w", r, err)
+		}
+	}
+
+	// DATA (message body)
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("data: %w", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		w.Close()
+		return fmt.Errorf("write body: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close body: %w", err)
+	}
+
+	return client.Quit()
+}
+
+// Notify sends an email notification for a download event.
+func (e *EmailNotifier) Notify(evt queue.Event) error {
+	notifType := mapQueueEvent(evt.Type)
+	if notifType == "" || !interested(e.events, notifType) {
+		return nil
+	}
+
+	nm := formatDownloadMessage(evt)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return e.send(ctx, nm)
+}
+
+// NotifyWatchlistResults sends an email notification for a watchlist event.
+func (e *EmailNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
+	if !interested(e.events, EventWatchlistNewResults) {
+		return nil
+	}
+
+	nm := formatWatchlistMessage(event)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return e.send(ctx, nm)
+}
+
+// ---------------------------------------------------------------------------
 // Queue event mapping
 // ---------------------------------------------------------------------------
 
@@ -436,12 +688,39 @@ type Manager struct {
 	logger    *logging.Logger
 }
 
+// isEnabled returns true if the notification config is enabled.
+// nil (unset) defaults to enabled = true.
+func isEnabled(cfg *config.NotificationConfig) bool {
+	return cfg.Enabled == nil || *cfg.Enabled
+}
+
+// validEvents lists the known event types for validation.
+var validEvents = map[string]bool{
+	string(EventDownloadCompleted):   true,
+	string(EventDownloadFailed):      true,
+	string(EventWatchlistNewResults): true,
+}
+
 // NewManager creates a Manager from notification configs.
 // Config entries with unsupported types are silently skipped.
+// Config entries with enabled=false are skipped.
 func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manager {
 	var notifiers []Notifier
 
 	for _, cfg := range cfgs {
+		// Skip if explicitly disabled
+		if !isEnabled(&cfg) {
+			logger.Warnf("notifier: provider %q is disabled via enabled: false, skipping", cfg.Type)
+			continue
+		}
+
+		// Warn about unknown events in the config
+		for _, e := range cfg.Events {
+			if !validEvents[e] {
+				logger.Warnf("notifier: %q provider has unknown event %q, will be ignored", cfg.Type, e)
+			}
+		}
+
 		switch cfg.Type {
 		case "webhook":
 			n := NewWebhookNotifier(cfg)
@@ -460,6 +739,12 @@ func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manag
 			if n != nil {
 				notifiers = append(notifiers, n)
 				logger.Infof("notifier: added pushover (%d events) → user=%s", len(cfg.Events), cfg.PushoverUser)
+			}
+		case "email":
+			n := NewEmailNotifier(cfg)
+			if n != nil {
+				notifiers = append(notifiers, n)
+				logger.Infof("notifier: added email (%d events) → %s", len(cfg.Events), cfg.SmtpFrom)
 			}
 		default:
 			logger.Warnf("notifier: unknown type %q, skipping", cfg.Type)

@@ -185,6 +185,8 @@ type SecurityConfig struct {
 // NotificationConfig configures a single external notification target.
 type NotificationConfig struct {
 	Type string `yaml:"type" json:"type"`
+	// Enabled controls whether this provider is active. Default: true (nil = enabled).
+	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// Webhook
 	WebhookEndpoint string `yaml:"webhook_endpoint" json:"webhook_endpoint"`
 	WebhookToken    string `yaml:"webhook_token"    json:"webhook_token"`
@@ -195,6 +197,15 @@ type NotificationConfig struct {
 	PushoverToken    string `yaml:"pushover_token"    json:"pushover_token"`
 	PushoverUser     string `yaml:"pushover_user"     json:"pushover_user"`
 	PushoverEndpoint string `yaml:"pushover_endpoint" json:"pushover_endpoint"`
+	// Email / SMTP
+	SmtpHost       string `yaml:"smtp_host"       json:"smtp_host"`
+	SmtpPort       int    `yaml:"smtp_port"       json:"smtp_port"`
+	SmtpUsername   string `yaml:"smtp_username"   json:"smtp_username"`
+	SmtpPassword   string `yaml:"smtp_password"   json:"smtp_password"`
+	SmtpFrom       string `yaml:"smtp_from"       json:"smtp_from"`
+	SmtpTo         string `yaml:"smtp_to"         json:"smtp_to"`
+	SmtpTLS        string `yaml:"smtp_tls"        json:"smtp_tls"`
+	SmtpSkipVerify bool   `yaml:"smtp_skip_verify" json:"smtp_skip_verify"`
 	// Event filter (empty = all events)
 	Events []string `yaml:"events" json:"events"`
 }
