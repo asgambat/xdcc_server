@@ -304,6 +304,16 @@ func (c *Client) LastBotNotice() string {
 	return c.ps.lastBotNotice
 }
 
+// Cleanup removes all handlers registered by this Client from the girc.Client.
+// Must be called after DownloadAll() when using a persistent connection
+// (SetExistingClient), to prevent handler accumulation across multiple
+// downloads on the same girc.Client. Each call to registerHandlers() adds
+// new handlers without removing old ones; Cleanup removes them so the next
+// download starts with a clean handler slate.
+func (c *Client) Cleanup() {
+	c.removeHandlers()
+}
+
 // ---------------------------------------------------------------------------
 // Connection management
 // ---------------------------------------------------------------------------

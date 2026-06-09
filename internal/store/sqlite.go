@@ -54,7 +54,7 @@ type SQLiteStore struct {
 // NewSQLiteStore creates a new SQLiteStore and runs migrations.
 // The log parameter is used for warning messages (e.g. corrupted rows).
 // A nil logger is tolerated and falls back to a silent discard.
-func NewSQLiteStore(dbPath string, log *logging.Logger) (*SQLiteStore, error) {
+func NewSQLiteStore(dbPath string, busyTimeoutMs int, log *logging.Logger) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening SQLite database: %w", err)
@@ -69,6 +69,18 @@ func NewSQLiteStore(dbPath string, log *logging.Logger) (*SQLiteStore, error) {
 	// Enable WAL mode for better concurrent read performance
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
+	}
+
+	// Busy timeout: SQLite retries internally for up to busyTimeoutMs
+	// when the database is locked by another connection, instead of failing
+	// immediately with SQLITE_BUSY. This handles transient lock contention
+	// (e.g. a download completing while another is being enqueued).
+	if busyTimeoutMs <= 0 {
+		busyTimeoutMs = 2000
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMs)); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("setting busy_timeout: %w", err)
 	}
 
 	// Enable foreign keys

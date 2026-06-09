@@ -80,6 +80,11 @@ storage:
   downloads_retention: "30d"
   # Interval between periodic cleanup runs
   cleanup_interval: "12h"
+  # SQLite busy timeout (ms): how long SQLite retries internally when the
+  # database is locked by another connection before returning SQLITE_BUSY.
+  # Handles transient lock contention (e.g. download completing while
+  # another is being enqueued). Set to 0 to disable.
+  busy_timeout_ms: 2000
 
 logging:
   # Log level: debug | info | warn | error

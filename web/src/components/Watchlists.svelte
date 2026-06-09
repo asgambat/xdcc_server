@@ -8,6 +8,9 @@
   let loading = $state(true);
   let editingId = $state(null);
   let form = $state({ name: '', query: '', interval_minutes: 60, providers: [], min_size: '', max_size: '', notify_enabled: true, auto_enqueue: false, enabled: true });
+  let formCard = $state(null);
+  let formHighlight = $state(false);
+  let highlightTimer = $state(null);
 
   // --- Results modal state ---
   let showResultsModal = $state(false);
@@ -40,6 +43,11 @@
 
   function startEdit(w) {
     editingId = w.id;
+    // Scroll to the edit form at the top of the page and highlight it briefly
+    if (formCard) formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    formHighlight = true;
+    if (highlightTimer) clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => { formHighlight = false; highlightTimer = null; }, 1200);
     form = {
       name: w.name || '',
       query: w.query || '',
@@ -164,7 +172,7 @@
 {#if loading}
   <div class="spinner"></div>
 {:else}
-  <div class="card mb-2">
+  <div class="card mb-2" class:card-highlight={formHighlight} bind:this={formCard}>
     <div class="card-header">
       <span class="card-title">{editingId ? 'Edit Watchlist' : 'Create Watchlist'}</span>
     </div>

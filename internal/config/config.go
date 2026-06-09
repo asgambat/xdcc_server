@@ -155,6 +155,7 @@ type StorageConfig struct {
 	DBPath             string `yaml:"db_path"              env:"XDCC_STORAGE_DB_PATH"              json:"db_path"`
 	DownloadsRetention string `yaml:"downloads_retention"  env:"XDCC_STORAGE_DOWNLOADS_RETENTION" json:"downloads_retention"`
 	CleanupInterval    string `yaml:"cleanup_interval"     env:"XDCC_STORAGE_CLEANUP_INTERVAL"    json:"cleanup_interval"`
+	BusyTimeoutMs      int    `yaml:"busy_timeout_ms"      env:"XDCC_STORAGE_BUSY_TIMEOUT_MS"     json:"busy_timeout_ms"`
 }
 
 type LoggingConfig struct {
@@ -263,6 +264,7 @@ func DefaultConfig() *Config {
 			DBPath:             "./db",
 			DownloadsRetention: "30d",
 			CleanupInterval:    "12h",
+			BusyTimeoutMs:      2000,
 		},
 		Logging: LoggingConfig{
 			Level:    "info",
@@ -459,6 +461,11 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("XDCC_STORAGE_CLEANUP_INTERVAL"); v != "" {
 		c.Storage.CleanupInterval = v
 	}
+	if v := os.Getenv("XDCC_STORAGE_BUSY_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Storage.BusyTimeoutMs = n
+		}
+	}
 	if v := os.Getenv("XDCC_LOGGING_LEVEL"); v != "" {
 		c.Logging.Level = v
 	}
@@ -624,6 +631,9 @@ func (c *Config) Validate() error {
 	}
 
 	// Duration validation
+	if c.Storage.BusyTimeoutMs < 0 {
+		return fmt.Errorf("storage.busy_timeout_ms must be >= 0, got %d", c.Storage.BusyTimeoutMs)
+	}
 	if _, err := parseDurationString(c.Storage.DownloadsRetention); err != nil {
 		return fmt.Errorf("storage.downloads_retention: %w", err)
 	}

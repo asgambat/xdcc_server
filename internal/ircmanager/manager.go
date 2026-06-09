@@ -523,6 +523,9 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 	packSlice := []*entities.XDCCPack{pack}
 	client := xdccirc.NewClient(ctx, packSlice, opts, 1) // verbosity=1 so WHOIS/JOIN logs appear
 	client.SetExistingClient(gircClient)
+	// Remove download handlers when done to prevent accumulation on the
+	// shared girc.Client across multiple downloads on the same connection.
+	defer client.Cleanup()
 
 	// Tell the client about channels the managed connection is already in
 	// so it doesn't try to re-join them (which the server would silently

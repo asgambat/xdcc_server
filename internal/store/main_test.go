@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 
 	dbPath := filepath.Join(dir, "template.db")
 	testLog := logging.New(logging.LevelDebug, "", 0)
-	s, err := NewSQLiteStore(dbPath, testLog)
+	s, err := NewSQLiteStore(dbPath, 2000, testLog)
 	if err != nil {
 		panic("cannot create template store: " + err.Error())
 	}

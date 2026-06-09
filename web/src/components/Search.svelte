@@ -44,6 +44,15 @@
   let dropdownIndex = $state(-1);
   let inputRef = $state(null);
 
+  // Auto-focus search input when arriving via CTRL+K shortcut
+  let searchMounted = $state(false);
+  $effect(() => {
+    if (inputRef && !searchMounted) {
+      inputRef.focus();
+      searchMounted = true;
+    }
+  });
+
   // --- Client-side filters ---
   let filterName = $state('');
   let filterBot = $state('');
@@ -68,6 +77,15 @@
     } catch {}
   }
   loadPageSize();
+
+  // React to hash changes when navigating from other pages (e.g., watchlists, presets)
+  // This is needed because the Search component is not remounted on navigation
+  $effect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.startsWith('#search')) {
+      loadFromHash();
+    }
+  });
 
   // Persist page size to localStorage on change
   $effect(() => {

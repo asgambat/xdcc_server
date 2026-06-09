@@ -294,6 +294,17 @@ tr:hover td { background: var(--bg-hover); }
 @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes cardPulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent-glow); border-color: var(--border-color); }
+  15%  { box-shadow: 0 0 24px 6px rgba(124, 58, 237, 0.45); border-color: var(--accent); }
+  30%  { box-shadow: 0 0 8px 2px var(--accent-glow); border-color: var(--border-color); }
+  50%  { box-shadow: 0 0 24px 6px rgba(124, 58, 237, 0.35); border-color: var(--accent); }
+  70%  { box-shadow: 0 0 4px 1px var(--accent-glow); border-color: var(--border-color); }
+  100% { box-shadow: 0 0 0 0 transparent; border-color: var(--border-color); }
+}
+.card-highlight {
+  animation: cardPulse 1.2s ease-out;
+}
 
 /* --- Toasts --- */
 .toast-container { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 300; display: flex; flex-direction: column; gap: 0.5rem; max-width: 380px; }

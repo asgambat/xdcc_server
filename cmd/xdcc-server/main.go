@@ -91,7 +91,7 @@ func runServer(configPath, dbPath string, pprof bool) error {
 	srvLogger.Infof("database: %s", dbPath)
 
 	// ── Initialize store and run migrations ─────────────────────────────
-	st, err := store.NewSQLiteStore(dbPath, srvLogger)
+	st, err := store.NewSQLiteStore(dbPath, cfg.Storage.BusyTimeoutMs, srvLogger)
 	if err != nil {
 		return fmt.Errorf("initializing database: %w", err)
 	}
@@ -216,7 +216,9 @@ func runServer(configPath, dbPath string, pprof bool) error {
 	// ── SSE debug logger (separate from srvLogger to avoid feedback loop) ─
 	// This logger does NOT have logBroadcaster as a writer, so logging here
 	// won't trigger SSE events that create infinite loops.
-	sseDebugLogger := logging.New(logging.LevelDebug, "", 0)
+	// It respects the configured log level — SSE event debugging is only
+	// logged when the user configures logging.level: debug.
+	sseDebugLogger := logging.New(logLevel, "", 0)
 
 	// ── HTTP API ─────────────────────────────────────────────────────────
 	apiHandler := api.New(st, ircMgr, queueMgr, searchAgg, sseHub,

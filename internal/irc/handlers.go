@@ -116,6 +116,14 @@ func (c *Client) registerHandlers() {
 				continue
 			}
 			ch := strings.ToLower(part)
+			// Filter blacklisted channels immediately: they must never be
+			// joined, counted as "found" via WHOIS, or recorded on the
+			// pack for speed tracking — not even if already joined from
+			// before the blacklist entry was added.
+			if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+				c.infof("Skipping blacklisted channel %s", part)
+				continue
+			}
 			c.ps.whoisFoundChannels.Store(true)
 			alreadyIn := c.conn.joinedChannels[ch]
 			if alreadyIn {
@@ -124,8 +132,6 @@ func (c *Client) registerHandlers() {
 				if c.currentPack().Channel == "" {
 					c.currentPack().Channel = ch
 				}
-			} else if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
-				c.infof("Skipping blacklisted channel %s", part)
 			} else {
 				c.infof("Joining channel: %s", part)
 				c.ps.needsJoin.Store(true)
