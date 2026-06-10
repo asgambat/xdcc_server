@@ -30,6 +30,9 @@ func (m *mockIRCManager) GetChannels(serverID int64) []store.ChannelRecord  { re
 func (m *mockIRCManager) GetChannelTopic(serverID int64, channel string) (string, error) {
 	return "", nil
 }
+func (m *mockIRCManager) SendChannelMessage(serverID int64, channel, message string) error {
+	return nil
+}
 func (m *mockIRCManager) Subscribe() chan ircmanager.Event     { return nil }
 func (m *mockIRCManager) Unsubscribe(ch chan ircmanager.Event) {}
 

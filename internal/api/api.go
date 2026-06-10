@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -43,6 +44,7 @@ type API struct {
 	SseDebugLogger   *logging.Logger // separate logger for SSE debug (avoids feedback loop with LogBroadcaster)
 	Metrics          *metrics.Collector
 	StartTime        time.Time
+	MsgRateLimiter   atomic.Pointer[RateLimiter] // per-IP rate limiter for send-message (atomic for concurrent access)
 }
 
 // IRCManager defines the subset of ircmanager.Manager methods used by handlers.
@@ -55,6 +57,7 @@ type IRCManager interface {
 	LeaveChannel(serverID int64, channel string) error
 	GetChannels(serverID int64) []store.ChannelRecord
 	GetChannelTopic(serverID int64, channel string) (string, error)
+	SendChannelMessage(serverID int64, channel, message string) error
 	// Subscribe returns a channel that receives IRC state change events.
 	Subscribe() chan ircmanager.Event
 	// Unsubscribe removes a previously subscribed channel.
@@ -83,7 +86,9 @@ func New(st *store.SQLiteStore, ircMgr IRCManager, queueMgr QueueManager,
 	logBroadcaster *logging.LogBroadcaster,
 	cfg *config.Config, configPath string, logger *logging.Logger, met *metrics.Collector,
 	sseDebugLogger *logging.Logger) *API {
-	return &API{
+	// Build the rate limiter from config defaults. It is lazily re-created
+	// when config reloads via the handler (the API struct is replaced).
+	api := &API{
 		Store:            st,
 		IRCManager:       ircMgr,
 		QueueManager:     queueMgr,
@@ -97,6 +102,11 @@ func New(st *store.SQLiteStore, ircMgr IRCManager, queueMgr QueueManager,
 		Metrics:          met,
 		StartTime:        time.Now(),
 	}
+	// Build the rate limiter from config defaults.
+	if cfg.IRC.MessageRateLimit > 0 && cfg.IRC.MessageRateWindowSec > 0 {
+		api.MsgRateLimiter.Store(NewRateLimiter(cfg.IRC.MessageRateLimit, time.Duration(cfg.IRC.MessageRateWindowSec)*time.Second))
+	}
+	return api
 }
 
 // =========================================================================
@@ -357,4 +367,32 @@ func parseInt64(s string) (int64, error) {
 func (a *API) logAndError(w http.ResponseWriter, status int, code, msg string) {
 	a.Logger.Errorf("ERROR: %s: %s", code, msg)
 	writeError(w, status, code, msg)
+}
+
+// extractClientIP extracts the client IP address from the request.
+// When trustProxy is true, it checks the X-Forwarded-For header first for
+// proxied deployments. When false (default, recommended), it uses only
+// r.RemoteAddr. Port numbers in RemoteAddr are stripped.
+//
+// WARNING: Only enable trustProxy when behind a trusted reverse proxy that
+// strips/overwrites X-Forwarded-For from external clients. Otherwise any
+// client can spoof their IP to bypass rate limiting.
+func extractClientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		xff := r.Header.Get("X-Forwarded-For")
+		if xff != "" {
+			// Take the first IP in the chain (original client).
+			if idx := strings.IndexByte(xff, ','); idx > 0 {
+				return strings.TrimSpace(xff[:idx])
+			}
+			return strings.TrimSpace(xff)
+		}
+	}
+
+	// Strip port number from RemoteAddr (format "ip:port").
+	addr := r.RemoteAddr
+	if idx := strings.LastIndexByte(addr, ':'); idx > 0 {
+		return addr[:idx]
+	}
+	return addr
 }

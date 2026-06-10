@@ -98,3 +98,75 @@ export function debounce(fn, delay = 300) {
     timeoutId = setTimeout(() => fn.apply(this, args), delay);
   };
 }
+
+/* ---------------------------------------------------------------------------
+ * disabledReason — central helper for disabled-state tooltips and a11y labels
+ * ---------------------------------------------------------------------------
+ * Each button/input in the UI repeats the same pattern:
+ *   - `disabled={!condition}`
+ *   - `title={condition ? enabledLabel : disabledReasonText}`
+ *   - `aria-label={...}` reflecting both states for screen readers
+ *
+ * This helper returns a single object with `{ disabled, title, ariaLabel }`
+ * derived from the state, so every button stays consistent and any wording
+ * change only has to be made in one place. Pair it with the global CSS
+ * tooltip helper in app.css (`.btn[disabled][title]:hover::after`) for a
+ * uniform hover experience across the app.
+ *
+ * Usage:
+ *   const r = disabledReason(srv.status === 'connected', {
+ *     enabled:  'Join channel',
+ *     disabled: 'Connect to the server first to join channels',
+ *   });
+ *   <button disabled={r.disabled} title={r.title} aria-label={r.ariaLabel}>…</button>
+ *
+ * Convenience wrappers for the two most common cases are also exported
+ * (`serverConnectionReason`, `channelJoinedReason`).
+ * ------------------------------------------------------------------------- */
+export function disabledReason(isDisabled, labels) {
+  const { enabled, disabled } = labels || {};
+  if (isDisabled) {
+    return {
+      disabled: true,
+      title: disabled ?? '',
+      ariaLabel: `${enabled ?? ''} (disabled${disabled ? ': ' + disabled : ''})`,
+    };
+  }
+  return {
+    disabled: false,
+    title: enabled ?? '',
+    ariaLabel: enabled ?? '',
+  };
+}
+
+/**
+ * Convenience wrapper for the common "server must be connected" pattern.
+ * Returns null when the server is connected (no reason to disable), or a
+ * reason object describing why the control is disabled otherwise.
+ *
+ *   {#if !serverConnectionReason(srv.status)}
+ *     …render enabled control…
+ *   {:else}
+ *     <button disabled={true} title={reason.title} …>…</button>
+ *   {/if}
+ */
+export function serverConnectionReason(status, actionLabel = 'this action') {
+  if (status === 'connected') return null;
+  return disabledReason(true, {
+    enabled: actionLabel,
+    disabled: `Connect to the server first to ${actionLabel.toLowerCase()}`,
+  });
+}
+
+/**
+ * Convenience wrapper for the "must be joined to channel" pattern.
+ * Returns null when the channel is joined, or a reason object otherwise.
+ */
+export function channelJoinedReason(joined, channelName, actionLabel = 'perform this action') {
+  if (joined) return null;
+  const ch = channelName ? ` ${channelName}` : ' the channel';
+  return disabledReason(true, {
+    enabled: actionLabel,
+    disabled: `Join${ch} first to ${actionLabel.toLowerCase()}`,
+  });
+}

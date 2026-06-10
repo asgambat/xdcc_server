@@ -72,6 +72,8 @@ export const ServersAPI = {
   leaveChannel(sid, ch) { return api.del(`/servers/${sid}/channels/${encodeURIComponent(ch)}`); },
   topic(sid, ch)  { return api.get(`/servers/${sid}/channels/${encodeURIComponent(ch)}/topic`); },
   setChannelAutoJoin(sid, ch, autoJoin) { return api.patch(`/servers/${sid}/channels/${encodeURIComponent(ch)}`, { auto_join: autoJoin }); },
+  /** Send a message (PRIVMSG) to a channel. Multi-line messages are accepted. */
+  sendMessage(sid, ch, message) { return api.post(`/servers/${sid}/channels/${encodeURIComponent(ch)}/messages`, { message }); },
 };
 
 // ---- Download API ----

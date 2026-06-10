@@ -36,33 +36,22 @@ func newTestStore(tb testing.TB) *SQLiteStore {
 	db.SetMaxOpenConns(3)
 	db.SetMaxIdleConns(3)
 
-	// Foreign keys are a connection-level setting; re-enable on the new connection.
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+	// Batch all PRAGMAs into a single Exec to reduce round-trips.
+	// foreign_keys is a connection-level setting; synchronous=OFF and
+	// journal_mode=MEMORY disable durability guarantees (not needed in tests).
+	if _, err := db.Exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=OFF; PRAGMA journal_mode=MEMORY"); err != nil {
 		db.Close()
-		tb.Fatalf("PRAGMA foreign_keys: %v", err)
-	}
-
-	// Speed up tests by disabling durability guarantees (not needed in tests).
-	// synchronous=OFF avoids fsync on every write; journal_mode=MEMORY avoids
-	// flushing the WAL/journal file to disk.
-	if _, err := db.Exec("PRAGMA synchronous=OFF"); err != nil {
-		db.Close()
-		tb.Fatalf("PRAGMA synchronous: %v", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode=MEMORY"); err != nil {
-		db.Close()
-		tb.Fatalf("PRAGMA journal_mode: %v", err)
+		tb.Fatalf("setting PRAGMAs: %v", err)
 	}
 
 	testLog := logging.New(logging.LevelDebug, "", 0)
-	return &SQLiteStore{db: db, dbPath: dbPath, log: testLog}
-}
-
-func closeStore(tb testing.TB, s *SQLiteStore) {
-	tb.Helper()
-	if err := s.Close(); err != nil {
-		tb.Errorf("Close: %v", err)
-	}
+	s := &SQLiteStore{db: db, dbPath: dbPath, log: testLog}
+	tb.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			tb.Errorf("Close: %v", err)
+		}
+	})
+	return s
 }
 
 // ===========================================================================
@@ -70,8 +59,8 @@ func closeStore(tb testing.TB, s *SQLiteStore) {
 // ===========================================================================
 
 func TestAddServer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, err := s.AddServer(context.Background(), ServerRecord{
 		Address:     "irc.test.net",
@@ -88,8 +77,8 @@ func TestAddServer(t *testing.T) {
 }
 
 func TestGetServer_NotFound(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srv, err := s.GetServer(context.Background(), 999)
 	if err != nil {
@@ -101,8 +90,8 @@ func TestGetServer_NotFound(t *testing.T) {
 }
 
 func TestGetServer_Found(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.example.com", Port: 6667, Status: "disconnected"})
 	srv, err := s.GetServer(context.Background(), id)
@@ -124,8 +113,8 @@ func TestGetServer_Found(t *testing.T) {
 }
 
 func TestIncrementServerRetry(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.retry.net", Port: 6667, Status: "connected"})
 	err := s.IncrementServerRetry(context.Background(), id)
@@ -147,8 +136,8 @@ func TestIncrementServerRetry(t *testing.T) {
 // ===========================================================================
 
 func TestAddChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.chan.net", Port: 6667})
 	chID, err := s.AddChannel(context.Background(), ChannelRecord{
@@ -165,8 +154,8 @@ func TestAddChannel(t *testing.T) {
 }
 
 func TestGetChannelsByServer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.chan2.net", Port: 6667})
 	_, _ = s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#alpha"})
@@ -188,8 +177,8 @@ func TestGetChannelsByServer(t *testing.T) {
 }
 
 func TestGetChannelsByServerAndName(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.channelookup.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#lookup"})
@@ -213,8 +202,8 @@ func TestGetChannelsByServerAndName(t *testing.T) {
 }
 
 func TestUpdateChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.updchan.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#old", AutoJoin: true})
@@ -234,8 +223,8 @@ func TestUpdateChannel(t *testing.T) {
 }
 
 func TestSetChannelJoined(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.joined.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#joinedtest"})
@@ -248,8 +237,8 @@ func TestSetChannelJoined(t *testing.T) {
 }
 
 func TestDeleteChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.delchan.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#delme"})
@@ -262,8 +251,8 @@ func TestDeleteChannel(t *testing.T) {
 }
 
 func TestGetAutoJoinChannels(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Add a server with auto_connect=true
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{
@@ -295,8 +284,8 @@ func TestGetAutoJoinChannels(t *testing.T) {
 // ===========================================================================
 
 func TestEnqueueAndGetDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, err := s.EnqueueDownload(context.Background(), DownloadRecord{
 		PackMessage:   "xdcc send #1",
@@ -326,8 +315,8 @@ func TestEnqueueAndGetDownload(t *testing.T) {
 }
 
 func TestGetQueue(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Enqueue 3 downloads
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot1", ServerAddress: "irc.t.net", Channel: "#a", Filename: "a.mkv", FileSize: 100})
@@ -344,8 +333,8 @@ func TestGetQueue(t *testing.T) {
 }
 
 func TestGetQueueByChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot1", ServerAddress: "irc.t.net", Channel: "#xdcc", Filename: "a.mkv", FileSize: 100})
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot2", ServerAddress: "irc.t.net", Channel: "#other", Filename: "b.mkv", FileSize: 100})
@@ -363,8 +352,8 @@ func TestGetQueueByChannel(t *testing.T) {
 }
 
 func TestMarkDownloadStarted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 100,
@@ -384,8 +373,8 @@ func TestMarkDownloadStarted(t *testing.T) {
 }
 
 func TestUpdateDownloadProgress(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -402,8 +391,8 @@ func TestUpdateDownloadProgress(t *testing.T) {
 }
 
 func TestMarkDownloadCompleted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -426,8 +415,8 @@ func TestMarkDownloadCompleted(t *testing.T) {
 }
 
 func TestMarkDownloadFailed(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -447,8 +436,8 @@ func TestMarkDownloadFailed(t *testing.T) {
 }
 
 func TestMarkDownloadSkipped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -467,8 +456,8 @@ func TestMarkDownloadSkipped(t *testing.T) {
 }
 
 func TestMarkDownloadPaused(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -487,8 +476,8 @@ func TestMarkDownloadPaused(t *testing.T) {
 }
 
 func TestMarkDownloadPaused_OnlyQueuedOrDownloading(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -508,8 +497,8 @@ func TestMarkDownloadPaused_OnlyQueuedOrDownloading(t *testing.T) {
 }
 
 func TestRetryDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -534,8 +523,8 @@ func TestRetryDownload(t *testing.T) {
 }
 
 func TestDeleteDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -549,8 +538,8 @@ func TestDeleteDownload(t *testing.T) {
 }
 
 func TestSetDownloadPriority(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -568,8 +557,8 @@ func TestSetDownloadPriority(t *testing.T) {
 }
 
 func TestBulkActionDownloads(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id1, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "a.mkv", FileSize: 100,
@@ -603,8 +592,8 @@ func TestBulkActionDownloads(t *testing.T) {
 }
 
 func TestBulkActionUnknownAction(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 100,
@@ -620,8 +609,8 @@ func TestBulkActionUnknownAction(t *testing.T) {
 // ===========================================================================
 
 func TestSetAndGetSearchCache(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	entry := SearchCacheEntry{
@@ -651,8 +640,8 @@ func TestSetAndGetSearchCache(t *testing.T) {
 }
 
 func TestGetSearchCache_Missing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	entry, err := s.GetSearchCache(context.Background(), "nonexistent", "nibl")
 	if err != nil {
@@ -664,8 +653,8 @@ func TestGetSearchCache_Missing(t *testing.T) {
 }
 
 func TestDeleteExpiredSearchCache(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	entry := SearchCacheEntry{
@@ -690,8 +679,8 @@ func TestDeleteExpiredSearchCache(t *testing.T) {
 }
 
 func TestGetSearchCacheByQuery(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	// Insert entries from multiple providers for same query
@@ -743,8 +732,8 @@ func TestGetSearchCacheByQuery(t *testing.T) {
 }
 
 func TestGetSearchCacheByQuery_Empty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	entries, err := s.GetSearchCacheByQuery(context.Background(), "nonexistent")
 	if err != nil {
@@ -759,8 +748,8 @@ func TestGetSearchCacheByQuery_Empty(t *testing.T) {
 // does not deadlock even with limited connections. This is the regression test
 // for the critical bug where getFresh() used nested queries.
 func TestGetSearchCacheByQuery_NoDeadlock(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	// Populate cache
@@ -804,8 +793,8 @@ func TestGetSearchCacheByQuery_NoDeadlock(t *testing.T) {
 // ===========================================================================
 
 func TestAddAndGetSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	p := SearchPreset{
 		Name:        "Anime Weekly",
@@ -835,8 +824,8 @@ func TestAddAndGetSearchPreset(t *testing.T) {
 }
 
 func TestListSearchPresets(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddSearchPreset(context.Background(), SearchPreset{Name: "Preset A", Query: "query a"})
 	_, _ = s.AddSearchPreset(context.Background(), SearchPreset{Name: "Preset B", Query: "query b"})
@@ -851,8 +840,8 @@ func TestListSearchPresets(t *testing.T) {
 }
 
 func TestUpdateSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "Old Name", Query: "old query"})
 	err := s.UpdateSearchPreset(context.Background(), SearchPreset{ID: id, Name: "New Name", Query: "new query", FiltersJSON: "{}"})
@@ -867,8 +856,8 @@ func TestUpdateSearchPreset(t *testing.T) {
 }
 
 func TestDeleteSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "Del Me", Query: "delete me"})
 	_ = s.DeleteSearchPreset(context.Background(), id)
@@ -880,8 +869,8 @@ func TestDeleteSearchPreset(t *testing.T) {
 }
 
 func TestSetDefaultSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id1, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "A", Query: "a", IsDefault: true})
 	id2, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "B", Query: "b"})
@@ -906,8 +895,8 @@ func TestSetDefaultSearchPreset(t *testing.T) {
 // ===========================================================================
 
 func TestAddAndGetWatchlist(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	w := Watchlist{
 		Name:        "My Watchlist",
@@ -938,8 +927,8 @@ func TestAddAndGetWatchlist(t *testing.T) {
 }
 
 func TestListWatchlists(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "WL1", Query: "query1"})
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "WL2", Query: "query2"})
@@ -954,8 +943,8 @@ func TestListWatchlists(t *testing.T) {
 }
 
 func TestDeleteWatchlist(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddWatchlist(context.Background(), Watchlist{Name: "Del", Query: "delete"})
 	_ = s.DeleteWatchlist(context.Background(), id)
@@ -967,8 +956,8 @@ func TestDeleteWatchlist(t *testing.T) {
 }
 
 func TestSetWatchlistChecked(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddWatchlist(context.Background(), Watchlist{Name: "Check", Query: "check"})
 	err := s.SetWatchlistChecked(context.Background(), id, "abc123", `[{"filename":"test.mkv","size":1000}]`)
@@ -989,8 +978,8 @@ func TestSetWatchlistChecked(t *testing.T) {
 }
 
 func TestGetEnabledWatchlists(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "Enabled1", Query: "q1", Enabled: true})
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "Disabled", Query: "q2", Enabled: false})
@@ -1010,8 +999,8 @@ func TestGetEnabledWatchlists(t *testing.T) {
 // ===========================================================================
 
 func TestRecordAndGetProviderStats(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	stats := ProviderStats{
@@ -1047,8 +1036,8 @@ func TestRecordAndGetProviderStats(t *testing.T) {
 }
 
 func TestGetAllProviderStats(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	_ = s.RecordProviderStats(context.Background(), ProviderStats{
@@ -1074,8 +1063,8 @@ func TestGetAllProviderStats(t *testing.T) {
 // ===========================================================================
 
 func TestCurrentSchemaVersion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	v, err := s.CurrentSchemaVersion(context.Background())
 	if err != nil {
@@ -1091,8 +1080,8 @@ func TestCurrentSchemaVersion(t *testing.T) {
 // ===========================================================================
 
 func TestExportData_Empty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	exp, err := s.ExportData(context.Background())
 	if err != nil {
@@ -1107,8 +1096,8 @@ func TestExportData_Empty(t *testing.T) {
 }
 
 func TestExportImportData(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Add some data
 	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.export.net", Port: 6667, Status: "connected"})
@@ -1128,7 +1117,6 @@ func TestExportImportData(t *testing.T) {
 
 	// Import into fresh store
 	s2 := newTestStore(t)
-	defer closeStore(t, s2)
 
 	err = s2.ImportData(context.Background(), exp)
 	if err != nil {
@@ -1155,8 +1143,8 @@ func TestExportImportData(t *testing.T) {
 // ===========================================================================
 
 func TestGetDownloadByBotMessage(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "MyBot", ServerAddress: "irc.t.net", Channel: "#x",
@@ -1186,8 +1174,8 @@ func TestGetDownloadByBotMessage(t *testing.T) {
 // ===========================================================================
 
 func TestRequeueDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,

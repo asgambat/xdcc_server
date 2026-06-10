@@ -2,13 +2,14 @@
   import { onMount, onDestroy } from 'svelte';
   import { servers, channels } from '../lib/stores.js';
   import { ServersAPI, sseClient } from '../lib/api.js';
-  import { statusBadge } from '../lib/utils.js';
+  import { statusBadge, serverConnectionReason, channelJoinedReason } from '../lib/utils.js';
   import { addToast } from '../lib/stores.js';
   import Modal from './Modal.svelte';
 
   let newAddress = $state('irc.rizon.net');
   let newPort = $state(6667);
   let loading = $state(true);
+  let messagesEnabled = $state(false);
 
   // Track which servers are currently being connected to prevent double-clicks
   let connectingServers = $state(new Set());
@@ -82,6 +83,18 @@
       const serverId = data.server_id;
       if (serverId) loadChannels(serverId);
     });
+
+    // Fetch messages_enabled flag from public /api/status endpoint.
+    // This controls whether the send-message button is visible/enabled.
+    try {
+      const res = await fetch('/api/status');
+      if (res.ok) {
+        const statusData = await res.json();
+        if (statusData.messages_enabled !== undefined) {
+          messagesEnabled = statusData.messages_enabled;
+        }
+      }
+    } catch { /* default to disabled */ }
 
     // Now load initial data — SSE handlers are ready to receive events
     await loadServers();
@@ -238,6 +251,55 @@
     topicModalContent = topic || 'No topic set';
     showTopicModal = true;
   }
+
+  // Send-message modal state
+  let showMessageModal = $state(false);
+  let messageModalChannel = $state('');
+  let messageModalServerId = $state(null);
+  let messageText = $state('');
+  let messageSending = $state(false);
+
+  function openMessageModal(serverId, channelName) {
+    if (!channelName) return;
+    messageModalServerId = serverId;
+    messageModalChannel = channelName;
+    messageText = '';
+    showMessageModal = true;
+  }
+
+  function closeMessageModal() {
+    showMessageModal = false;
+    messageText = '';
+    messageModalServerId = null;
+    messageModalChannel = '';
+  }
+
+  async function sendChannelMessage() {
+    if (!messageModalServerId || !messageModalChannel) return;
+    const text = messageText.trim();
+    if (!text) return addToast('Enter a message to send', 'warning');
+    if (text.length > 4000) return addToast('Message is too long (max 4000 characters)', 'warning');
+
+    messageSending = true;
+    try {
+      await ServersAPI.sendMessage(messageModalServerId, messageModalChannel, text);
+      addToast(`Message sent to ${messageModalChannel}`, 'success');
+      closeMessageModal();
+    } catch (e) {
+      addToast(e.message, 'error');
+    } finally {
+      messageSending = false;
+    }
+  }
+
+  function onMessageKeydown(e) {
+    // Submit on Enter (without Shift) so users can still type multi-line
+    // messages using Shift+Enter.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChannelMessage();
+    }
+  }
 </script>
 
 <!-- Connect to Server — always visible at the top -->
@@ -265,6 +327,32 @@
 
 <Modal title={topicModalTitle} visible={showTopicModal} on:close={() => showTopicModal = false}>
   <div style="white-space:pre-wrap;word-wrap:break-word;max-height:400px;overflow-y:auto">{topicModalContent}</div>
+</Modal>
+
+<Modal title={`Send message to ${messageModalChannel}`} visible={showMessageModal} on:close={closeMessageModal}>
+  <div class="form-group">
+    <label class="form-label" for="channel-message-input">Message</label>
+    <textarea
+      id="channel-message-input"
+      class="form-input"
+      rows="4"
+      maxlength="4000"
+      placeholder="Type your message here… (Enter to send, Shift+Enter for newline)"
+      bind:value={messageText}
+      onkeydown={onMessageKeydown}
+      style="resize:vertical;font-family:inherit;min-height:90px"
+    ></textarea>
+    <div class="text-sm text-muted mt-1" style="display:flex;justify-content:space-between">
+      <span>Channel: <strong>{messageModalChannel}</strong></span>
+      <span>{messageText.length} / 4000</span>
+    </div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-ghost" onclick={closeMessageModal} disabled={messageSending}>Cancel</button>
+    <button class="btn btn-primary" onclick={sendChannelMessage} disabled={messageSending || !messageText.trim()}>
+      {messageSending ? 'Sending…' : 'SEND'}
+    </button>
+  </div>
 </Modal>
 
 {#if loading}
@@ -333,6 +421,14 @@
                         {:else}
                           <button class="btn btn-sm btn-ghost" onclick={() => toggleAutoJoin(srv.id, ch.name, true)} title="Add to auto-join">+</button>
                         {/if}
+                        <!-- svelte-ignore a11y_aria_attributes -->
+                        <button
+                          class="btn btn-sm btn-ghost"
+                          onclick={() => openMessageModal(srv.id, ch.name)}
+                          disabled={messagesEnabled ? (channelJoinedReason(ch.joined, ch.name, `Send a message to ${ch.name}`)?.disabled ?? false) : true}
+                          title={messagesEnabled ? (channelJoinedReason(ch.joined, ch.name, `Send a message to ${ch.name}`)?.title ?? 'Send a message') : 'Message sending is disabled in server configuration'}
+                          aria-label={messagesEnabled ? (channelJoinedReason(ch.joined, ch.name, `Send a message to ${ch.name}`)?.ariaLabel ?? `Send a message to ${ch.name}`) : `Send a message to ${ch.name} (disabled: message sending disabled in config)`}
+                        >✏️</button>
                         <button class="btn btn-sm btn-ghost" onclick={() => leaveChannel(srv.id, ch.name)} title="Leave">✕</button>
                       </div>
                     </td>
@@ -349,10 +445,23 @@
       {/if}
 
       <div class="flex gap-1 mt-1" style="align-items:center">
-        <input class="form-input" id="channel-input-{srv.id}" placeholder="#channel" style="width:200px"
-          disabled={srv.status !== 'connected'}
-          onkeydown={(e) => e.key === 'Enter' && srv.status === 'connected' && joinChannel(srv.id)} />
-        <button class="btn btn-sm btn-primary" disabled={srv.status !== 'connected'} onclick={() => joinChannel(srv.id)}>Join</button>
+        <input
+          class="form-input"
+          id="channel-input-{srv.id}"
+          placeholder="#channel"
+          style="width:200px"
+          disabled={serverConnectionReason(srv.status, 'Type a channel name to join')?.disabled ?? false}
+          title={serverConnectionReason(srv.status, 'Type a channel name to join')?.title ?? 'Type a channel name to join'}
+          aria-label={serverConnectionReason(srv.status, 'Type a channel name to join')?.ariaLabel ?? 'Type a channel name to join'}
+          onkeydown={(e) => e.key === 'Enter' && !serverConnectionReason(srv.status, 'Type a channel name to join')?.disabled && joinChannel(srv.id)}
+        />
+        <button
+          class="btn btn-sm btn-primary"
+          disabled={serverConnectionReason(srv.status, 'Join channel')?.disabled ?? false}
+          title={serverConnectionReason(srv.status, 'Join channel')?.title ?? 'Join channel'}
+          aria-label={serverConnectionReason(srv.status, 'Join channel')?.ariaLabel ?? 'Join channel'}
+          onclick={() => joinChannel(srv.id)}
+        >Join</button>
       </div>
     </div>
   {/each}

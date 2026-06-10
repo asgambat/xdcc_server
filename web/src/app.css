@@ -128,7 +128,79 @@ a:hover { text-decoration: underline; }
 .btn-lg { padding: 0.65rem 1.25rem; font-size: 0.95rem; }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-ghost:hover { background: var(--bg-hover); border-color: var(--border-color); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  /* Keep pointer events enabled so :hover still fires on disabled buttons —
+     this lets the global tooltip helper below show the `title` reason.
+     Click prevention is still enforced by the native `disabled` attribute. */
+  pointer-events: auto;
+}
+
+/* Same treatment for disabled form inputs (e.g. the channel-name field when
+   the server is offline) so they can also surface a tooltip on hover. */
+.form-input:disabled {
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+/* -------------------------------------------------------------------------
+   Global tooltip helper for disabled controls
+   -------------------------------------------------------------------------
+   The browser's native `title` tooltip has a slow activation delay (~1s)
+   and is not stylable. This helper renders a custom tooltip from the
+   `title` attribute on any disabled element that has one. It works for
+   both buttons and inputs because we re-enable pointer events above.
+   ------------------------------------------------------------------------- */
+.btn { position: relative; }
+.form-input { position: relative; }
+
+.btn[disabled][title]:hover::after,
+.form-input[disabled][title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  z-index: 1000;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  max-width: 280px;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+  animation: fadeIn 0.12s ease-out;
+}
+
+/* Tooltip arrow (optional, but makes it look more polished) */
+.btn[disabled][title]:hover::before,
+.form-input[disabled][title]:hover::before {
+  content: "";
+  position: absolute;
+  z-index: 1000;
+  left: 50%;
+  bottom: calc(100% + 1px);
+  transform: translateX(-50%) rotate(45deg);
+  width: 8px;
+  height: 8px;
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
+  pointer-events: none;
+}
+
+/* Allow long tooltips to wrap on small elements */
+.btn-group .btn[disabled][title]:hover::after {
+  white-space: normal;
+  width: max-content;
+  max-width: 240px;
+}
 .btn-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
 /* --- Forms --- */

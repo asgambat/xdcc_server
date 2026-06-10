@@ -61,7 +61,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// copyFile copies a file from src to dst.
+// copyFile copies a file from src to dst. It skips fsync — tests do not need
+// crash-safe durability, only speed. io.Copy allocates its own 32 KiB buffer
+// per call, which is safe under concurrent t.Parallel() usage.
 func copyFile(src, dst string) error {
 	s, err := os.Open(src)
 	if err != nil {
@@ -75,8 +77,6 @@ func copyFile(src, dst string) error {
 	}
 	defer d.Close()
 
-	if _, err := io.Copy(d, s); err != nil {
-		return err
-	}
-	return d.Sync()
+	_, err = io.Copy(d, s)
+	return err
 }

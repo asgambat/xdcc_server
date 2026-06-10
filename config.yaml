@@ -4,6 +4,28 @@
 irc:
   # Base nickname (a random suffix is always appended)
   nickname: "xdcc-user"
+  # Channels that must never be joined (case-insensitive, # prefix optional)
+  channel_blacklist: []
+  # Greeting messages sent to a channel after joining it. A random message
+  # is picked from the list; if the list is empty, the default greeting
+  # "hello everybody" is used instead. A random delay between 2 and 4
+  # seconds is applied before sending, to look more natural and to avoid
+  # triggering IRC anti-flood protections.
+  greetings: []
+  # Whether the send-message REST endpoint and UI are enabled.
+  # Default: false (disabled). Set to true to allow sending PRIVMSG
+  # to IRC channels via the web UI.
+  enable_message_send: false
+  # Whether private PRIVMSG messages sent directly to the bot's nickname
+  # are logged to private.log in the log directory. Format:
+  #   <datetime> [server] <sender> message
+  # Default: false (disabled).
+  log_private_messages: false
+  # Per-IP rate limiting: max messages per sliding window.
+  # Set message_rate_limit to 0 to disable rate limiting entirely.
+  # Default: 5 messages every 60 seconds per client IP.
+  message_rate_limit: 5
+  message_rate_window_sec: 60
   # Default IRC servers to connect to on startup
   default_servers:
     - address: "irc.rizon.net"
@@ -26,6 +48,12 @@ http:
   bind_address: "127.0.0.1"
   # Allowed CORS origins (empty = same-origin only; for dev add "http://localhost:5173")
   cors_origins: []
+  # Whether to trust X-Forwarded-For header for client IP extraction.
+  # Default: false. Only enable when behind a trusted reverse proxy that
+  # strips/overwrites X-Forwarded-For from external clients.
+  # WARNING: enabling this on a publicly exposed instance allows clients
+  # to spoof their IP and bypass per-IP rate limiting.
+  trust_proxy: false
 
 download:
   # Directory for in-progress partial files

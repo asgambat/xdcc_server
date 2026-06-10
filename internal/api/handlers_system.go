@@ -175,6 +175,26 @@ func findKeyInYAML(s, key string, start int) int {
 	return -1
 }
 
+// syncMsgRateLimiter reconfigures the send-message rate limiter to match
+// the current config values. This is called after runtime config updates
+// so changes to message_rate_limit / message_rate_window_sec take effect
+// without a server restart.
+func (a *API) syncMsgRateLimiter() {
+	limit := a.Config.IRC.MessageRateLimit
+	windowSec := a.Config.IRC.MessageRateWindowSec
+	if limit > 0 && windowSec > 0 {
+		if rl := a.MsgRateLimiter.Load(); rl != nil {
+			// Reconfigure existing limiter (method is mutex-protected).
+			rl.Reconfigure(limit, time.Duration(windowSec)*time.Second)
+		} else {
+			a.MsgRateLimiter.Store(NewRateLimiter(limit, time.Duration(windowSec)*time.Second))
+		}
+	} else {
+		// Rate limiting disabled — nil out the limiter.
+		a.MsgRateLimiter.Store(nil)
+	}
+}
+
 // =========================================================================
 // PUT /api/config
 // =========================================================================
@@ -218,6 +238,9 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		// Update in-memory config to reflect the saved YAML changes.
 		*a.Config = newCfg
 
+		// Sync rate limiter with new config values.
+		a.syncMsgRateLimiter()
+
 		// Save raw YAML bytes directly, preserving comments and formatting.
 		if a.ConfigPath != "" {
 			if err := a.Config.SaveRaw(a.ConfigPath, bodyBytes); err != nil {
@@ -259,6 +282,9 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply to live config.
 	*a.Config = newCfg
+
+	// Sync rate limiter with new config values.
+	a.syncMsgRateLimiter()
 
 	// Persist using partial update to preserve comments & formatting.
 	if a.ConfigPath != "" {
@@ -423,7 +449,8 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"disk_free_bytes":   diskFreeBytes,
 		"disk_total_bytes":  diskTotalBytes,
 		"token_ttl_minutes": a.Config.Security.TokenTTLMinutes,
-		"ui_theme":          a.Config.UI.Theme, // public — used by frontend for initial theme
+		"ui_theme":          a.Config.UI.Theme,              // public — used by frontend for initial theme
+		"messages_enabled":  a.Config.IRC.EnableMessageSend, // public — used by frontend to show/hide send button
 	})
 }
 

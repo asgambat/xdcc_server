@@ -41,9 +41,10 @@ func (a *API) Router() http.Handler {
 			r.Get("/channels", a.handleListChannels)  // GET  /api/servers/:id/channels
 			r.Post("/channels", a.handleJoinChannel)  // POST /api/servers/:id/channels
 			r.Route("/channels/{channelName}", func(r chi.Router) {
-				r.Delete("/", a.handleLeaveChannel)      // DELETE /api/servers/:id/channels/:name
-				r.Get("/topic", a.handleGetChannelTopic) // GET  /api/servers/:id/channels/:name/topic
-				r.Patch("/", a.handleUpdateChannel)      // PATCH /api/servers/:id/channels/:name
+				r.Delete("/", a.handleLeaveChannel)             // DELETE /api/servers/:id/channels/:name
+				r.Get("/topic", a.handleGetChannelTopic)        // GET  /api/servers/:id/channels/:name/topic
+				r.Patch("/", a.handleUpdateChannel)             // PATCH /api/servers/:id/channels/:name
+				r.Post("/messages", a.handleSendChannelMessage) // POST /api/servers/:id/channels/:name/messages
 			})
 		})
 	})

@@ -13,8 +13,8 @@ import (
 // ===========================================================================
 
 func TestRecoverDownloadsOnStartup_RequeuesDownloading(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
@@ -43,8 +43,8 @@ func TestRecoverDownloadsOnStartup_RequeuesDownloading(t *testing.T) {
 }
 
 func TestRecoverDownloadsOnStartup_OnlyDownloading(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Completed download should NOT be recovered
 	idCompleted, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
@@ -80,8 +80,8 @@ func TestRecoverDownloadsOnStartup_OnlyDownloading(t *testing.T) {
 // ===========================================================================
 
 func TestReconcileFileSystem_OrphanedFileDelete(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Create an orphaned temp file
 	tempDir := t.TempDir()
@@ -111,8 +111,8 @@ func TestReconcileFileSystem_OrphanedFileDelete(t *testing.T) {
 }
 
 func TestReconcileFileSystem_OrphanedFileMove(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	tempDir := t.TempDir()
 	orphanedDir := filepath.Join(tempDir, "orphaned_backup")
@@ -147,8 +147,8 @@ func TestReconcileFileSystem_OrphanedFileMove(t *testing.T) {
 }
 
 func TestReconcileFileSystem_NonOrphanedFileSkipped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	tempDir := t.TempDir()
 
@@ -177,8 +177,8 @@ func TestReconcileFileSystem_NonOrphanedFileSkipped(t *testing.T) {
 }
 
 func TestReconcileFileSystem_OrphanedFileSkip(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	tempDir := t.TempDir()
 	orphanedFile := filepath.Join(tempDir, "skip_orphan.mkv")
@@ -212,8 +212,8 @@ func TestReconcileFileSystem_OrphanedFileSkip(t *testing.T) {
 // ===========================================================================
 
 func TestCleanupOldDownloads(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 
@@ -251,8 +251,8 @@ func TestCleanupOldDownloads(t *testing.T) {
 // ===========================================================================
 
 func TestRunCleanup_StopChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	stopCh, doneCh, err := s.RunCleanup(context.Background(), 30, 100*time.Millisecond)
 	if err != nil {

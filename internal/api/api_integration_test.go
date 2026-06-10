@@ -54,13 +54,10 @@ func newTestAPI(t *testing.T) *testAPI {
 
 	// Speed up tests: disable fsync and WAL flushing (no durability needed).
 	// These are per-connection settings, not persisted in the file copy.
-	if _, err := st.DB().Exec("PRAGMA synchronous=OFF"); err != nil {
+	// Batched into a single Exec to reduce round-trips.
+	if _, err := st.DB().Exec("PRAGMA synchronous=OFF; PRAGMA journal_mode=MEMORY"); err != nil {
 		st.Close()
-		t.Fatalf("PRAGMA synchronous: %v", err)
-	}
-	if _, err := st.DB().Exec("PRAGMA journal_mode=MEMORY"); err != nil {
-		st.Close()
-		t.Fatalf("PRAGMA journal_mode: %v", err)
+		t.Fatalf("setting speed PRAGMAs: %v", err)
 	}
 
 	cfg := config.DefaultConfig()
@@ -126,6 +123,7 @@ func (ta *testAPI) request(t *testing.T, method, path string, body interface{}) 
 // ===========================================================================
 
 func TestHealthz(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/healthz", nil)
@@ -141,6 +139,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/version", nil)
@@ -156,6 +155,7 @@ func TestVersion(t *testing.T) {
 }
 
 func TestReadyz(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/readyz", nil)
@@ -169,6 +169,7 @@ func TestReadyz(t *testing.T) {
 // ===========================================================================
 
 func TestEnqueueDownload_Success(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	body := map[string]interface{}{
@@ -192,6 +193,7 @@ func TestEnqueueDownload_Success(t *testing.T) {
 }
 
 func TestEnqueueDownload_TLTBotServerOverride(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	body := map[string]interface{}{
@@ -221,6 +223,7 @@ func TestEnqueueDownload_TLTBotServerOverride(t *testing.T) {
 }
 
 func TestEnqueueDownload_WeCBotServerOverride(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	body := map[string]interface{}{
@@ -250,6 +253,7 @@ func TestEnqueueDownload_WeCBotServerOverride(t *testing.T) {
 }
 
 func TestEnqueueDownload_MissingFields(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	tests := []struct {
@@ -272,6 +276,7 @@ func TestEnqueueDownload_MissingFields(t *testing.T) {
 }
 
 func TestEnqueueDownload_OptionalChannel(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -287,6 +292,7 @@ func TestEnqueueDownload_OptionalChannel(t *testing.T) {
 }
 
 func TestListServers_IncludesChannelCount(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Add a server with some channels
@@ -323,6 +329,7 @@ func TestListServers_IncludesChannelCount(t *testing.T) {
 }
 
 func TestListDownloads_Empty(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/downloads", nil)
@@ -343,6 +350,7 @@ func TestListDownloads_Empty(t *testing.T) {
 }
 
 func TestListDownloads_WithItems(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Enqueue two downloads
@@ -370,6 +378,7 @@ func TestListDownloads_WithItems(t *testing.T) {
 }
 
 func TestListDownloads_IncludesRecentCompleted(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Enqueue a download, then complete it
@@ -408,6 +417,7 @@ func TestListDownloads_IncludesRecentCompleted(t *testing.T) {
 }
 
 func TestGetDownload_Found(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Enqueue
@@ -436,6 +446,7 @@ func TestGetDownload_Found(t *testing.T) {
 }
 
 func TestGetDownload_NotFound(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/downloads/999", nil)
@@ -445,6 +456,7 @@ func TestGetDownload_NotFound(t *testing.T) {
 }
 
 func TestPauseAndResumeDownload(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	createResp := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -469,6 +481,7 @@ func TestPauseAndResumeDownload(t *testing.T) {
 }
 
 func TestRetryDownload(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	createResp := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -498,6 +511,7 @@ func TestRetryDownload(t *testing.T) {
 }
 
 func TestRetryDownload_Completed(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	createResp := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -528,6 +542,7 @@ func TestRetryDownload_Completed(t *testing.T) {
 }
 
 func TestRemoveDownload(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	createResp := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -545,6 +560,7 @@ func TestRemoveDownload(t *testing.T) {
 }
 
 func TestBulkDownloads(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Create two downloads
@@ -579,6 +595,7 @@ func TestBulkDownloads(t *testing.T) {
 }
 
 func TestBulkDownloads_InvalidAction(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "POST", "/api/downloads/bulk", map[string]interface{}{
@@ -591,6 +608,7 @@ func TestBulkDownloads_InvalidAction(t *testing.T) {
 }
 
 func TestSetDownloadPosition(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	createResp := ta.request(t, "POST", "/api/downloads", map[string]interface{}{
@@ -622,6 +640,7 @@ func TestSetDownloadPosition(t *testing.T) {
 // ===========================================================================
 
 func TestDownloadHistory_Empty(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/downloads/history", nil)
@@ -637,6 +656,7 @@ func TestDownloadHistory_Empty(t *testing.T) {
 }
 
 func TestDownloadHistory_WithItems(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Enqueue and complete a download
@@ -668,6 +688,7 @@ func TestDownloadHistory_WithItems(t *testing.T) {
 // ===========================================================================
 
 func TestStats(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/stats", nil)
@@ -686,6 +707,7 @@ func TestStats(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/status", nil)
@@ -699,6 +721,7 @@ func TestStatus(t *testing.T) {
 // ===========================================================================
 
 func TestParseXDCC(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	tests := []struct {
@@ -733,6 +756,7 @@ func TestParseXDCC(t *testing.T) {
 }
 
 func TestParseXDCC_EmptyCommand(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "POST", "/api/xdcc/parse", map[string]interface{}{
@@ -748,6 +772,7 @@ func TestParseXDCC_EmptyCommand(t *testing.T) {
 // ===========================================================================
 
 func TestPresetsCRUD(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Create
@@ -797,6 +822,7 @@ func TestPresetsCRUD(t *testing.T) {
 // ===========================================================================
 
 func TestWatchlistsCRUD(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Create
@@ -843,6 +869,7 @@ func TestWatchlistsCRUD(t *testing.T) {
 }
 
 func TestCreateWatchlist_MissingFields(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Missing name
@@ -863,6 +890,7 @@ func TestCreateWatchlist_MissingFields(t *testing.T) {
 }
 
 func TestCreatePreset_MissingFields(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Missing name
@@ -887,6 +915,7 @@ func TestCreatePreset_MissingFields(t *testing.T) {
 // ===========================================================================
 
 func TestAdminExport_Empty(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "POST", "/api/admin/export", nil)
@@ -906,6 +935,7 @@ func TestAdminExport_Empty(t *testing.T) {
 // ===========================================================================
 
 func TestGetConfig(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/config", nil)
@@ -915,6 +945,7 @@ func TestGetConfig(t *testing.T) {
 }
 
 func TestUpdateConfig(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// The backend unmarshals the body into a blank Config and validates
@@ -941,6 +972,7 @@ func TestUpdateConfig(t *testing.T) {
 // ===========================================================================
 
 func TestSSEEndpoint(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	// Create a request with cancellable context
@@ -983,6 +1015,7 @@ func TestSSEEndpoint(t *testing.T) {
 // ===========================================================================
 
 func TestCORSPreflight(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	req := httptest.NewRequest(http.MethodOptions, "/healthz", nil)
@@ -1004,6 +1037,7 @@ func TestCORSPreflight(t *testing.T) {
 // ===========================================================================
 
 func TestSetupStatus(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	w := ta.request(t, "GET", "/api/setup/status", nil)
@@ -1019,6 +1053,7 @@ func TestSetupStatus(t *testing.T) {
 }
 
 func TestSetupBootstrap(t *testing.T) {
+	t.Parallel()
 	ta := newTestAPI(t)
 
 	tempDir := t.TempDir()

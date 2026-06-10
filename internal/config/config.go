@@ -6,8 +6,10 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -102,9 +104,42 @@ type Config struct {
 }
 
 type IRCConfig struct {
-	Nickname         string         `yaml:"nickname"           env:"XDCC_IRC_NICKNAME"           json:"nickname"`
-	DefaultServers   []ServerConfig `yaml:"default_servers"                               json:"default_servers"`
-	ChannelBlacklist []string       `yaml:"channel_blacklist"                               json:"channel_blacklist"`
+	Nickname         string         `yaml:"nickname"              env:"XDCC_IRC_NICKNAME"              json:"nickname"`
+	DefaultServers   []ServerConfig `yaml:"default_servers"                                  json:"default_servers"`
+	ChannelBlacklist []string       `yaml:"channel_blacklist"                                  json:"channel_blacklist"`
+	// Greetings is the list of messages randomly sent to a channel right after
+	// it is joined. A random message is picked from the list; if the list is
+	// empty, the default greeting "hello everybody" is used instead. A random
+	// delay between 2 and 4 seconds is applied before sending the greeting, to
+	// look more natural and avoid triggering anti-flood protections.
+	Greetings []string `yaml:"greetings"                                      env:"XDCC_IRC_GREETINGS"        json:"greetings"`
+	// EnableMessageSend controls whether the REST endpoint for sending
+	// PRIVMSG to IRC channels is active. When false (default), the API
+	// returns 403 Forbidden and the frontend disables the send button.
+	// This is a safety measure to prevent the web UI from being used as
+	// an IRC message relay when exposed to untrusted networks.
+	EnableMessageSend bool `yaml:"enable_message_send" env:"XDCC_IRC_ENABLE_MESSAGE_SEND" json:"enable_message_send"`
+	// MessageRateLimit is the maximum number of messages a single client
+	// IP can send within MessageRateWindow. Set to 0 to disable rate
+	// limiting entirely. Default: 5 messages per MessageRateWindow.
+	MessageRateLimit int `yaml:"message_rate_limit" env:"XDCC_IRC_MESSAGE_RATE_LIMIT" json:"message_rate_limit"`
+	// MessageRateWindowSec is the sliding window duration in seconds for
+	// the rate limit. Default: 60 (one minute).
+	MessageRateWindowSec int `yaml:"message_rate_window_sec" env:"XDCC_IRC_MESSAGE_RATE_WINDOW_SEC" json:"message_rate_window_sec"`
+	// LogPrivateMessages enables logging of private PRIVMSG messages sent
+	// directly to the bot's nickname. When true, each incoming private message
+	// is appended to private.log in the log directory with the format:
+	//   <datetime> [server] <sender> message
+	// Default: false (disabled).
+	LogPrivateMessages bool `yaml:"log_private_messages" env:"XDCC_IRC_LOG_PRIVATE_MESSAGES" json:"log_private_messages"`
+	// ChannelLog is an UNDOCUMENTED, hidden toggle: when a channel name appears
+	// in this list, every PRIVMSG and NOTICE sent to that channel is appended
+	// to a per-channel log file in the logging directory. The field is
+	// intentionally not exposed in config.yaml, has no env-var override, and
+	// no API endpoint to manage it. It exists for the operator who needs to
+	// record conversations from specific channels and is opt-in per-channel
+	// (case-insensitive match). Leave empty to disable the feature entirely.
+	ChannelLog []string `yaml:"channel_log,omitempty" json:"channel_log,omitempty"`
 }
 
 type ServerConfig struct {
@@ -123,6 +158,12 @@ type HTTPConfig struct {
 	Port        int      `yaml:"port"          env:"XDCC_HTTP_PORT"          json:"port"`
 	BindAddress string   `yaml:"bind_address"  env:"XDCC_HTTP_BIND_ADDRESS"  json:"bind_address"`
 	CORSOrigins []string `yaml:"cors_origins"                            json:"cors_origins"`
+	// TrustProxy controls whether X-Forwarded-For is trusted for client IP
+	// extraction. Default: false. Only enable when behind a trusted reverse
+	// proxy that strips/overwrites X-Forwarded-For from external clients.
+	// WARNING: enabling this on a publicly exposed instance allows clients
+	// to spoof their IP and bypass per-IP rate limiting.
+	TrustProxy bool `yaml:"trust_proxy"   env:"XDCC_HTTP_TRUST_PROXY"   json:"trust_proxy"`
 }
 
 type DownloadConfig struct {
@@ -225,6 +266,13 @@ func DefaultConfig() *Config {
 	return &Config{
 		IRC: IRCConfig{
 			Nickname: "xdcc-user",
+			// Empty greetings list → default "hello everybody" is used.
+			// Add custom phrases here (one per list entry) to randomize greetings.
+			Greetings:            []string{},
+			EnableMessageSend:    false, // safety: require explicit opt-in
+			LogPrivateMessages:   false, // safety: require explicit opt-in
+			MessageRateLimit:     5,     // 5 messages per window per IP
+			MessageRateWindowSec: 60,    // 60-second sliding window
 			DefaultServers: []ServerConfig{
 				{
 					Address:     "irc.rizon.net",
@@ -365,8 +413,14 @@ func (c *Config) loadFile(path string) error {
 // Supported env vars:
 //
 //	XDCC_IRC_NICKNAME
+//	XDCC_IRC_GREETINGS
+//	XDCC_IRC_ENABLE_MESSAGE_SEND
+//	XDCC_IRC_LOG_PRIVATE_MESSAGES
+//	XDCC_IRC_MESSAGE_RATE_LIMIT
+//	XDCC_IRC_MESSAGE_RATE_WINDOW_SEC
 //	XDCC_HTTP_PORT
 //	XDCC_HTTP_BIND_ADDRESS
+//	XDCC_HTTP_TRUST_PROXY
 //	XDCC_SECURITY_ADMIN_TOKEN
 //	XDCC_SECURITY_TOKEN_TTL_MINUTES
 //	XDCC_DOWNLOAD_TEMP_DIR
@@ -392,6 +446,24 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("XDCC_IRC_NICKNAME"); v != "" {
 		c.IRC.Nickname = v
 	}
+	// XDCC_IRC_GREETINGS: comma-separated list of greeting phrases. Empty
+	// (or unset) means the built-in default "hello everybody" will be used.
+	if v := os.Getenv("XDCC_IRC_GREETINGS"); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+		c.IRC.Greetings = out
+	}
+	if v := os.Getenv("XDCC_IRC_ENABLE_MESSAGE_SEND"); v != "" {
+		c.IRC.EnableMessageSend = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("XDCC_IRC_LOG_PRIVATE_MESSAGES"); v != "" {
+		c.IRC.LogPrivateMessages = strings.EqualFold(v, "true") || v == "1"
+	}
 	if v := os.Getenv("XDCC_HTTP_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
 			c.HTTP.Port = port
@@ -399,6 +471,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("XDCC_HTTP_BIND_ADDRESS"); v != "" {
 		c.HTTP.BindAddress = v
+	}
+	if v := os.Getenv("XDCC_HTTP_TRUST_PROXY"); v != "" {
+		c.HTTP.TrustProxy = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("XDCC_SECURITY_ADMIN_TOKEN"); v != "" {
 		c.Security.AdminToken = v
@@ -751,17 +826,69 @@ func (c *Config) ParseDownloadsRetention() (int, error) {
 	return int(d.Hours() / 24), nil
 }
 
+// normalizeChannelName normalizes an IRC channel name: trims, lowercases,
+// and ensures a leading '#' prefix. Returns the empty string unchanged.
+func normalizeChannelName(channel string) string {
+	ch := strings.ToLower(strings.TrimSpace(channel))
+	if ch != "" && !strings.HasPrefix(ch, "#") && !strings.HasPrefix(ch, "&") {
+		ch = "#" + ch
+	}
+	return ch
+}
+
+// DefaultGreeting is sent to a channel right after JOIN when the configured
+// greetings list is empty.
+const DefaultGreeting = "hello everybody"
+
+// PickGreeting returns a pseudo-random greeting message. If the configured
+// list is empty, the default "hello everybody" greeting is returned. The
+// selection uses crypto/rand to be safe even when called concurrently from
+// many goroutines (e.g. when multiple channels are joined simultaneously).
+func (c *Config) PickGreeting() string {
+	if len(c.IRC.Greetings) == 0 {
+		return DefaultGreeting
+	}
+	idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(c.IRC.Greetings))))
+	if err != nil {
+		// Fall back to a deterministic index on the (extremely rare) rand
+		// failure so we never return an empty string.
+		return c.IRC.Greetings[0]
+	}
+	return c.IRC.Greetings[idx.Int64()]
+}
+
 // IsChannelBlacklisted returns true if the given channel name is in the
 // channel blacklist. The check is case-insensitive and the channel name
 // is normalized (lowercase, # prefix). Blacklisted channels are never
 // joined, not even manually or via WHOIS discovery.
 func (c *Config) IsChannelBlacklisted(channel string) bool {
-	ch := strings.ToLower(strings.TrimSpace(channel))
-	if ch != "" && !strings.HasPrefix(ch, "#") {
-		ch = "#" + ch
+	ch := normalizeChannelName(channel)
+	if ch == "" {
+		return false
 	}
 	for _, bl := range c.IRC.ChannelBlacklist {
-		if strings.ToLower(strings.TrimSpace(bl)) == ch {
+		if normalizeChannelName(bl) == ch {
+			return true
+		}
+	}
+	return false
+}
+
+// IsChannelLogged returns true if PRIVMSG/NOTICE traffic to the given channel
+// should be recorded to a per-channel log file. Hidden/undocumented feature:
+// there is no UI or API to manage it, only the YAML irc.channel_log field.
+// The check is case-insensitive and normalizes the channel name (lowercase,
+// leading '#'). Returns false when the list is empty (default — no logging).
+func (c *Config) IsChannelLogged(channel string) bool {
+	if len(c.IRC.ChannelLog) == 0 {
+		return false
+	}
+	ch := normalizeChannelName(channel)
+	if ch == "" {
+		return false
+	}
+	for _, name := range c.IRC.ChannelLog {
+		if normalizeChannelName(name) == ch {
 			return true
 		}
 	}

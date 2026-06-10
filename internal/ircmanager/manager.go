@@ -2,12 +2,17 @@ package ircmanager
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lrstanley/girc"
+	"xdcc_server/internal/channellog"
 	"xdcc_server/internal/config"
 	"xdcc_server/internal/entities"
 	xdccirc "xdcc_server/internal/irc"
@@ -40,6 +45,13 @@ type Manager struct {
 	connecting map[int64]struct{} // servers currently being connected
 	subscriber *pubsub.Hub[Event]
 
+	// chlog writes per-channel PRIVMSG/NOTICE traffic to disk when the
+	// operator has enabled the hidden irc.channel_log feature in YAML.
+	// May be nil if initialization failed (logged at New()); in that case
+	// channel logging is silently skipped — better than blocking the
+	// whole manager on a filesystem hiccup.
+	chlog *channellog.Logger
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -47,7 +59,7 @@ type Manager struct {
 // New creates a new IRC connection manager.
 func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{
+	m := &Manager{
 		store:      st,
 		cfg:        cfg,
 		logger:     logger,
@@ -57,6 +69,32 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+
+	// Initialize the channel logger if the hidden irc.channel_log list is
+	// non-empty, or if log_private_messages is enabled. The log directory is
+	// taken from logging.file_path's directory when available, otherwise it
+	// defaults to ./logs/ to keep the per-channel files alongside the main
+	// server log.
+	if len(cfg.IRC.ChannelLog) > 0 || cfg.IRC.LogPrivateMessages {
+		logDir := "./logs"
+		if cfg.Logging.FilePath != "" {
+			logDir = filepath.Dir(cfg.Logging.FilePath)
+		}
+		cl, err := channellog.New(logDir)
+		if err != nil {
+			logger.Warnf("channellog: init failed (dir=%s): %v — channel logging disabled", logDir, err)
+		} else {
+			m.chlog = cl
+			if len(cfg.IRC.ChannelLog) > 0 {
+				logger.Infof("channellog: enabled for %d channel(s), writing to %s", len(cfg.IRC.ChannelLog), logDir)
+			}
+			if cfg.IRC.LogPrivateMessages {
+				logger.Infof("channellog: private message logging enabled, writing to %s", logDir)
+			}
+		}
+	}
+
+	return m
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +203,13 @@ func (m *Manager) Stop() {
 		}(id)
 	}
 	wg.Wait()
+
+	// Flush per-channel log files to disk before tearing down the manager.
+	if m.chlog != nil {
+		if err := m.chlog.Close(); err != nil {
+			m.logger.Warnf("channellog: close error: %v", err)
+		}
+	}
 
 	m.cancel()
 }
@@ -460,6 +505,50 @@ func (m *Manager) GetChannelTopic(serverID int64, channel string) (string, error
 		return "", fmt.Errorf("not joined to channel %s", channel)
 	}
 	return topic, nil
+}
+
+// SendChannelMessage sends a message to an IRC channel on the given server.
+// The message is sent via PRIVMSG to the channel. The server must be
+// connected and the client must currently be joined to the channel, otherwise
+// an error is returned. Multi-line messages (containing \n or \r) are split
+// into separate PRIVMSG commands so each line is delivered atomically.
+func (m *Manager) SendChannelMessage(serverID int64, channel, message string) error {
+	if message == "" {
+		return fmt.Errorf("message must not be empty")
+	}
+	channel = xdccirc.NormalizeChannel(channel)
+
+	m.mu.RLock()
+	conn, ok := m.conns[serverID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("server %d is not connected", serverID)
+	}
+
+	conn.mu.RLock()
+	ircClient := conn.irc
+	_, joined := conn.joinedChs[channel]
+	conn.mu.RUnlock()
+	if ircClient == nil {
+		return fmt.Errorf("server %d is not connected", serverID)
+	}
+	if !joined {
+		return fmt.Errorf("not joined to channel %s", channel)
+	}
+
+	// Split on newlines (CR/LF) so each line is its own PRIVMSG. This avoids
+	// embedding line breaks into a single command, which most IRC servers
+	// would reject or truncate. Empty messages are already rejected by the
+	// `if message == ""` check above, so we just skip intermediate blank lines.
+	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		m.logger.Infof("sending message to %s on %s: %q", channel, conn.address, line)
+		ircClient.Cmd.Message(channel, line)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +997,13 @@ func (mc *managedConnection) connect() connectResult {
 			ServerAddr: mc.address,
 			Channel:    ch,
 		})
+
+		// Send a greeting to the channel after a small random delay (2-4s).
+		// This makes the bot look more human and avoids triggering IRC
+		// anti-flood protections when many channels are joined in a burst.
+		// Runs in its own goroutine so the JOIN handler returns immediately
+		// and the IRC event loop is not blocked.
+		mc.sendChannelGreeting(cl, ch)
 	})
 
 	client.Handlers.Add(girc.KICK, func(cl *girc.Client, e girc.Event) {
@@ -997,6 +1093,12 @@ func (mc *managedConnection) connect() connectResult {
 	client.Handlers.Add(girc.ERROR, func(cl *girc.Client, e girc.Event) {
 		mc.manager.logger.Warnf("IRC error on %s: %s", mc.address, e.Last())
 	})
+
+	// Per-channel PRIVMSG / NOTICE logger (hidden, opt-in via irc.channel_log).
+	// Only records traffic addressed to a channel we are joined to and that
+	// appears in the configured log list. Private messages (target = our own
+	// nick) are intentionally skipped to avoid leaking direct queries.
+	mc.registerChannelLogHandlers(client)
 
 	// Start connection in a goroutine; when irc.Connect() returns,
 	// the connection has been lost (either due to error or explicit Close).
@@ -1128,6 +1230,155 @@ func (mc *managedConnection) waitConnected(timeout time.Duration) bool {
 		time.Sleep(waitConnectedPollInterval)
 	}
 	return false
+}
+
+// sendChannelGreeting sends a random greeting message to the given channel
+// after a random delay between 2 and 4 seconds. The greeting is picked from
+// the configured greetings list (config.IRC.Greetings); when the list is empty
+// the built-in default "hello everybody" is used.
+//
+// Runs in its own goroutine so the caller (JOIN handler) returns immediately
+// and the IRC event loop is never blocked. The goroutine is also cancelled
+// when the connection is torn down, so it cannot outlive the IRC client it
+// would otherwise send a message through.
+func (mc *managedConnection) sendChannelGreeting(cl *girc.Client, channel string) {
+	if cl == nil {
+		return
+	}
+	go func() {
+		// Random delay between 2 and 4 seconds, inclusive.
+		// crypto/rand is used (instead of math/rand) to be safe under
+		// concurrent calls from multiple goroutines.
+		delaySec, err := randIntRange(2, 4)
+		if err != nil {
+			// Fall back to a fixed 3s delay on the (extremely rare) rand
+			// failure so we never skip the greeting entirely.
+			delaySec = 3
+		}
+		timer := time.NewTimer(time.Duration(delaySec) * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-mc.ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		// Pick the greeting. We do this after the delay so changes to the
+		// configured list take effect for the next channel joined.
+		greeting := mc.manager.cfg.PickGreeting()
+
+		// Re-check context cancellation right before sending, since the
+		// connection could have been torn down while the timer was ticking.
+		select {
+		case <-mc.ctx.Done():
+			return
+		default:
+		}
+
+		mc.manager.logger.Infof("sending greeting to %s on %s: %q", channel, mc.address, greeting)
+		cl.Cmd.Message(channel, greeting)
+	}()
+}
+
+// registerChannelLogHandlers installs PRIVMSG, NOTICE, and private message
+// handlers that write message traffic to per-channel or private log files.
+//
+// All handlers are registered when chlog is non-nil (i.e. channel logging was
+// possible at startup). Each handler reads the *current* config on every event
+// invocation, so runtime config changes via /api/config (e.g. adding channels
+// to channel_log, toggling log_private_messages) take effect immediately
+// without requiring reconnection.
+func (mc *managedConnection) registerChannelLogHandlers(cl *girc.Client) {
+	if mc.manager.chlog == nil || mc.manager.cfg == nil {
+		return
+	}
+
+	// Channel PRIVMSG handler — logs messages to per-channel files.
+	// Reads cfg.IRC.ChannelLog dynamically on each event.
+	privHandler := func(_ *girc.Client, e girc.Event) {
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" || (target[0] != '#' && target[0] != '&') {
+			return
+		}
+		target = xdccirc.NormalizeChannel(target)
+		if !mc.manager.cfg.IsChannelLogged(target) {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.Log(target, sender, channellog.KindMessage, e.Last())
+	}
+
+	// Channel NOTICE handler — logs notices to per-channel files.
+	noticeHandler := func(_ *girc.Client, e girc.Event) {
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" || (target[0] != '#' && target[0] != '&') {
+			return
+		}
+		target = xdccirc.NormalizeChannel(target)
+		if !mc.manager.cfg.IsChannelLogged(target) {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.Log(target, sender, channellog.KindNotice, e.Last())
+	}
+
+	// Private message handler — logs DMs to private.log.
+	// Reads cfg.IRC.LogPrivateMessages dynamically on each event.
+	privMsgHandler := func(_ *girc.Client, e girc.Event) {
+		if !mc.manager.cfg.IRC.LogPrivateMessages {
+			return
+		}
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" {
+			return
+		}
+		// Skip channel messages — those are handled by privHandler above.
+		if target[0] == '#' || target[0] == '&' {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.LogPrivate(mc.address, sender, e.Last())
+	}
+
+	privCUID := cl.Handlers.Add(girc.PRIVMSG, privHandler)
+	mc.manager.logger.Debugf("channellog: registered PRIVMSG handler (CUID=%s) for %s", privCUID, mc.address)
+	noticeCUID := cl.Handlers.Add(girc.NOTICE, noticeHandler)
+	mc.manager.logger.Debugf("channellog: registered NOTICE handler (CUID=%s) for %s", noticeCUID, mc.address)
+	privMsgCUID := cl.Handlers.Add(girc.PRIVMSG, privMsgHandler)
+	mc.manager.logger.Debugf("channellog: registered private message handler (CUID=%s) for %s", privMsgCUID, mc.address)
+}
+
+// randIntRange returns a pseudo-random integer in the inclusive range [lo, hi].
+// Uses crypto/rand so it is safe under concurrent invocation.
+func randIntRange(lo, hi int) (int, error) {
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	span := int64(hi - lo + 1)
+	n, err := rand.Int(rand.Reader, big.NewInt(span))
+	if err != nil {
+		return 0, err
+	}
+	return int(n.Int64()) + lo, nil
 }
 
 // joinChannel sends a JOIN command for the given channel.
