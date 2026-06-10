@@ -55,7 +55,7 @@ func TestHandleSendChannelMessage_MessagesDisabled(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"hello"}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -81,7 +81,7 @@ func TestHandleSendChannelMessage_NilIRCManager(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"hello"}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -105,7 +105,7 @@ func TestHandleSendChannelMessage_EmptyMessage(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"   "}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -133,7 +133,7 @@ func TestHandleSendChannelMessage_TooLong(t *testing.T) {
 		longMsg[i] = 'a'
 	}
 	body, _ := json.Marshal(map[string]string{"message": string(longMsg)})
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBuffer(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -156,7 +156,7 @@ func TestHandleSendChannelMessage_InvalidJSON(t *testing.T) {
 	api := newHandlerTestAPI(cfg, &mockIRCManager{})
 	r := sendChannelMessageRouter(api)
 
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString("not json"))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString("not json"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -176,7 +176,7 @@ func TestHandleSendChannelMessage_HappyPath(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"hello world"}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -203,7 +203,7 @@ func TestHandleSendChannelMessage_Multiline(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"line1\nline2\nline3"}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -229,7 +229,7 @@ func TestHandleSendChannelMessage_RateLimited(t *testing.T) {
 
 	body := `{"message":"hello"}`
 	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 		r.ServeHTTP(rr, req)
@@ -239,7 +239,7 @@ func TestHandleSendChannelMessage_RateLimited(t *testing.T) {
 	}
 
 	// Third request should be rate-limited.
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -283,7 +283,7 @@ func TestHandleSendChannelMessage_ConcurrentWithReconfigure(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+			req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			r.ServeHTTP(rr, req)
@@ -315,7 +315,7 @@ func TestHandleSendChannelMessage_SendError(t *testing.T) {
 	r := sendChannelMessageRouter(api)
 
 	body := `{"message":"hello"}`
-	req := httptest.NewRequest("POST", "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/servers/1/channels/%23test/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
