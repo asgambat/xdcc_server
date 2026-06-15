@@ -91,11 +91,11 @@ func runDownload(
 	}
 
 	// Capture filename and size from pack if discovered during download
-	if pack.Filename != "" && result.Filename == "" {
-		result.Filename = pack.Filename
+	if pack.GetFilename() != "" && result.Filename == "" {
+		result.Filename = pack.GetFilename()
 	}
-	if pack.Size > 0 {
-		result.FileSize = pack.Size
+	if pack.GetSize() > 0 {
+		result.FileSize = pack.GetSize()
 	}
 
 	if downloadErr != nil {
@@ -121,8 +121,8 @@ func runDownload(
 	// Use discovered filename from pack if the record's filename is still empty
 	// (happens for manual downloads where filename is unknown until bot notice).
 	destFilename := rec.Filename
-	if destFilename == "" && pack.Filename != "" {
-		destFilename = pack.Filename
+	if destFilename == "" && pack.GetFilename() != "" {
+		destFilename = pack.GetFilename()
 	}
 	var destPath string
 	if destFilename != "" {
@@ -203,11 +203,11 @@ func runDownload(
 
 	// If filename was discovered during download (e.g. from bot notice or DCC),
 	// propagate it to the result so the queue manager can update the store.
-	if pack.Filename != "" {
-		result.Filename = pack.Filename
+	if pack.GetFilename() != "" {
+		result.Filename = pack.GetFilename()
 	}
-	if pack.Size > 0 {
-		result.FileSize = pack.Size
+	if pack.GetSize() > 0 {
+		result.FileSize = pack.GetSize()
 	}
 
 	completeFn(result)

@@ -27,8 +27,8 @@ func CompactPacks(packs []*XDCCPack) []*XDCCPack {
 	var out []*XDCCPack
 	for _, p := range packs {
 		k := key{
-			filename:  p.Filename,
-			size:      p.Size,
+			filename:  p.GetFilename(),
+			size:      p.GetSize(),
 			botFamily: BotFamily(p.Bot),
 		}
 		if !seen[k] {

@@ -80,7 +80,7 @@ func filterByQuery(packs []*entities.XDCCPack, query string) []*entities.XDCCPac
 
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		filenameLower := strings.ToLower(p.Filename)
+		filenameLower := strings.ToLower(p.GetFilename())
 
 		// All positive terms must be present in the filename.
 		allFound := true
@@ -128,7 +128,7 @@ func filterByPrefix(packs []*entities.XDCCPack, prefix string) []*entities.XDCCP
 	prefixNorm := normalizeWords(prefix)
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		fnNorm := normalizeWords(p.Filename)
+		fnNorm := normalizeWords(p.GetFilename())
 		if strings.HasPrefix(fnNorm, prefixNorm) {
 			out = append(out, p)
 		}
@@ -157,7 +157,7 @@ func filterByMinSize(packs []*entities.XDCCPack, minSize string) []*entities.XDC
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if p.Size <= 0 || p.Size >= minBytes {
+		if p.GetSize() <= 0 || p.GetSize() >= minBytes {
 			out = append(out, p)
 		}
 	}
@@ -173,7 +173,7 @@ func filterByMaxSize(packs []*entities.XDCCPack, maxSize string) []*entities.XDC
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if p.Size <= 0 || p.Size <= maxBytes {
+		if p.GetSize() <= 0 || p.GetSize() <= maxBytes {
 			out = append(out, p)
 		}
 	}
@@ -192,7 +192,7 @@ func filterByExt(packs []*entities.XDCCPack, exts []string) []*entities.XDCCPack
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		ext := strings.ToLower(filepath.Ext(p.Filename))
+		ext := strings.ToLower(filepath.Ext(p.GetFilename()))
 		if extSet[ext] {
 			out = append(out, p)
 		}

@@ -162,11 +162,11 @@ func TestFilterByQuery_Exclusion(t *testing.T) {
 	if len(result) != 1 {
 		t.Errorf("expected 1 result for 'ubuntu -server', got %d", len(result))
 		for _, p := range result {
-			t.Logf("  got: %s", p.Filename)
+			t.Logf("  got: %s", p.GetFilename())
 		}
 	}
-	if len(result) > 0 && result[0].Filename != "Ubuntu.24.04.Desktop.mkv" {
-		t.Errorf("expected 'Ubuntu.24.04.Desktop.mkv', got %q", result[0].Filename)
+	if len(result) > 0 && result[0].GetFilename() != "Ubuntu.24.04.Desktop.mkv" {
+		t.Errorf("expected 'Ubuntu.24.04.Desktop.mkv', got %q", result[0].GetFilename())
 	}
 }
 
@@ -181,11 +181,11 @@ func TestFilterByQuery_OnlyExclusion(t *testing.T) {
 	if len(result) != 1 {
 		t.Errorf("expected 1 result for '-sample', got %d", len(result))
 		for _, p := range result {
-			t.Logf("  got: %s", p.Filename)
+			t.Logf("  got: %s", p.GetFilename())
 		}
 	}
-	if len(result) > 0 && result[0].Filename != "my.file.mkv" {
-		t.Errorf("expected 'my.file.mkv', got %q", result[0].Filename)
+\tif len(result) > 0 && result[0].GetFilename() != "my.file.mkv" {
+\t\tt.Errorf("expected 'my.file.mkv', got %q", result[0].GetFilename())
 	}
 }
 
@@ -202,7 +202,7 @@ func TestFilterByQuery_MultipleExclusions(t *testing.T) {
 	if len(result) != 2 {
 		t.Errorf("expected 2 results for 'Anime -720p -480p', got %d", len(result))
 		for _, p := range result {
-			t.Logf("  got: %s", p.Filename)
+			t.Logf("  got: %s", p.GetFilename())
 		}
 	}
 }
@@ -233,7 +233,7 @@ func TestFilterByQuery_StandaloneDash(t *testing.T) {
 	if len(result) != 1 {
 		t.Errorf("expected 1 result for '- my' (literal hyphen), got %d", len(result))
 		for _, p := range result {
-			t.Logf("  got: %s", p.Filename)
+			t.Logf("  got: %s", p.GetFilename())
 		}
 	}
 }

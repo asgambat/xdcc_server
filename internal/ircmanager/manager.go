@@ -336,12 +336,12 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		manager:     m,
 		joinedChs:   make(map[string]string),
 		status:      "connecting",
+		startedCh:   make(chan struct{}),
 	}
 
-	// Initialize context and WaitGroup BEFORE inserting in m.conns so
-	// that no other goroutine can observe a connection with nil ctx/cancel.
+	// Initialize context BEFORE inserting in m.conns so that no other
+	// goroutine can observe a connection with nil ctx/cancel.
 	conn.ctx, conn.cancel = context.WithCancel(m.ctx)
-	conn.wg.Add(1)
 
 	// Insert the new connection — fully initialized and ready to run.
 	m.mu.Lock()
@@ -353,8 +353,12 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		m.logger.Warnf("updating server status in DB failed: %v", err)
 	}
 
-	// Start connection in background
+	// Start connection in background, then wait until run() has called
+	// wg.Add(1). This guarantees that any subsequent wg.Wait() (e.g. in
+	// DisconnectServer) observes the counter already incremented and does
+	// not return prematurely.
 	go conn.run()
+	<-conn.startedCh
 
 	return nil
 }
@@ -471,21 +475,20 @@ func (m *Manager) LeaveChannel(serverID int64, channel string) error {
 
 // GetServers returns the list of all known IRC servers with their status.
 func (m *Manager) GetServers() []store.ServerRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	servers, err := m.store.ListServers(m.ctx)
 	if err != nil {
 		m.logger.Warnf("listing servers failed: %v", err)
 		return nil
 	}
 
-	// Overlay live status from managed connections
+	// Overlay live status from managed connections (hold lock only for the overlay)
+	m.mu.RLock()
 	for i, s := range servers {
 		if conn, ok := m.conns[s.ID]; ok {
 			servers[i].Status = conn.Status()
 		}
 	}
+	m.mu.RUnlock()
 	return servers
 }
 
@@ -801,6 +804,12 @@ type managedConnection struct {
 	runningMu sync.Mutex     // Protects isRunning field
 	isRunning bool           // Prevents duplicate run() calls
 
+	// startedCh is closed by run() once wg.Add(1) has been called, so
+	// that ConnectServer (which waits on it) can be sure that any
+	// subsequent wg.Wait() will observe the counter already incremented.
+	startedCh   chan struct{}
+	startedOnce sync.Once
+
 	manager *Manager
 }
 
@@ -808,6 +817,17 @@ func (mc *managedConnection) Status() string {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 	return mc.status
+}
+
+// signalStarted closes startedCh exactly once, unblocking any caller
+// waiting for run() to register itself in the WaitGroup.
+// Safe to call from both the normal start path and the early-return guard.
+func (mc *managedConnection) signalStarted() {
+	mc.startedOnce.Do(func() {
+		if mc.startedCh != nil {
+			close(mc.startedCh)
+		}
+	})
 }
 
 // IsRunning returns whether the run() goroutine is currently active.
@@ -878,11 +898,19 @@ func (mc *managedConnection) run() {
 	if mc.isRunning {
 		mc.manager.logger.Warnf("run() already active for server %d, skipping duplicate call", mc.id)
 		mc.runningMu.Unlock()
+		// Signal startedCh defensively: unblocks any caller waiting on it
+		// even though this is a duplicate invocation (no-op if already done).
+		mc.signalStarted()
 		return
 	}
 	mc.isRunning = true
+	// wg.Add(1) is called here — not by the caller — so that Add and Done
+	// are always paired inside run() itself. signalStarted() is invoked
+	// immediately after to unblock ConnectServer (which waits on startedCh).
+	mc.wg.Add(1)
 	mc.runningMu.Unlock()
 
+	mc.signalStarted()
 	defer mc.wg.Done()
 
 	// Ensure cleanup on exit

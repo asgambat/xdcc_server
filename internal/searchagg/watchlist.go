@@ -77,7 +77,7 @@ func (a *Aggregator) RunWatchlist(ctx context.Context, w store.Watchlist) (*Watc
 	a.log.Infof("[WATCHLIST_RUN] Search returned %d packs total (provenance: %s)", len(result.Packs), result.Provenance)
 	for i, p := range result.Packs {
 		a.log.Infof("[WATCHLIST_RUN]   Pack %d: bot=%q filename=%q size=%d pack#=%d",
-			i+1, p.Bot, p.Filename, p.Size, p.PackNumber)
+			i+1, p.Bot, p.GetFilename(), p.GetSize(), p.PackNumber)
 	}
 
 	// Log provider statuses
@@ -201,7 +201,7 @@ func computeFingerprint(packs []*entities.XDCCPack) string {
 		entries = append(entries, fmt.Sprintf("%s|%d|%s|%s",
 			strings.ToLower(p.Bot),
 			p.PackNumber,
-			strings.ToLower(p.Filename),
+			strings.ToLower(p.GetFilename()),
 			strings.ToLower(p.Server.Address),
 		))
 	}
@@ -246,9 +246,9 @@ func serializeWatchlistResults(packs []*entities.XDCCPack) string {
 			PackNumber:    p.PackNumber,
 			PackMessage:   fmt.Sprintf("xdcc send #%d", p.PackNumber),
 			ServerAddress: p.Server.Address,
-			Channel:       p.Channel,
-			Filename:      p.Filename,
-			Size:          p.Size,
+			Channel:       p.GetChannel(),
+			Filename:      p.GetFilename(),
+			Size:          p.GetSize(),
 		}
 		items = append(items, item)
 	}
@@ -272,7 +272,7 @@ func filterNewPacks(ctx context.Context, st store.DownloadStore, packs []*entiti
 	filenames := make([]string, 0, len(packs))
 	seen := make(map[string]struct{}, len(packs))
 	for _, p := range packs {
-		fn := strings.ToLower(p.Filename)
+		fn := strings.ToLower(p.GetFilename())
 		if _, ok := seen[fn]; !ok {
 			seen[fn] = struct{}{}
 			filenames = append(filenames, fn)
@@ -289,7 +289,7 @@ func filterNewPacks(ctx context.Context, st store.DownloadStore, packs []*entiti
 	// Filter: keep packs whose filename is NOT already downloaded/in-queue
 	var newPacks []*entities.XDCCPack
 	for _, p := range packs {
-		if !existing[strings.ToLower(p.Filename)] {
+		if !existing[strings.ToLower(p.GetFilename())] {
 			newPacks = append(newPacks, p)
 		}
 	}
@@ -320,8 +320,8 @@ func (a *Aggregator) enqueueNewPacks(ctx context.Context, packs []*entities.XDCC
 			Bot:           p.Bot,
 			ServerAddress: p.Server.Address,
 			Channel:       channel,
-			Filename:      p.Filename,
-			FileSize:      p.Size,
+			Filename:      p.GetFilename(),
+			FileSize:      p.GetSize(),
 			Priority:      100,
 		}
 

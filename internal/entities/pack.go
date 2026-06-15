@@ -1,23 +1,26 @@
 package entities
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // XDCCPack models an XDCC pack to be downloaded from an IRC bot.
 type XDCCPack struct {
-	Server           IrcServer `json:"server"`
-	Bot              string    `json:"bot"`
-	Channel          string    `json:"channel,omitempty"`
-	PackNumber       int       `json:"pack_number"`
-	Directory        string    `json:"directory,omitempty"`
-	Filename         string    `json:"filename"`
-	OriginalFilename string    `json:"original_filename,omitempty"`
-	Size             int64     `json:"size"`
+	mu               sync.RWMutex `json:"-"`
+	Server           IrcServer    `json:"server"`
+	Bot              string       `json:"bot"`
+	channel          string       `json:"channel,omitempty"`
+	PackNumber       int          `json:"pack_number"`
+	directory        string       `json:"directory,omitempty"`
+	filename         string       `json:"filename"`
+	originalFilename string       `json:"original_filename,omitempty"`
+	size             int64        `json:"size"`
 }
 
 // NewXDCCPack creates a new XDCCPack.
@@ -26,7 +29,7 @@ func NewXDCCPack(server IrcServer, bot string, packNumber int) *XDCCPack {
 		Server:     server,
 		Bot:        bot,
 		PackNumber: packNumber,
-		Directory:  ".",
+		directory:  ".",
 	}
 }
 
@@ -61,35 +64,75 @@ func cleanFilename(filename string) string {
 // The filename is sanitized via cleanFilename to prevent path traversal.
 func (p *XDCCPack) SetFilename(filename string, override bool) {
 	cleanName := cleanFilename(filename)
-	if p.Filename != "" && !override {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.filename != "" && !override {
 		ext := filepath.Ext(cleanName)
-		if ext != "" && !strings.HasSuffix(p.Filename, ext) {
-			p.Filename += ext
+		if ext != "" && !strings.HasSuffix(p.filename, ext) {
+			p.filename += ext
 		}
 		return
 	}
-	p.Filename = cleanName
+	p.filename = cleanName
 }
 
 // SetOriginalFilename records the expected filename (used by search engines for validation).
 func (p *XDCCPack) SetOriginalFilename(filename string) {
-	p.OriginalFilename = filename
+	p.mu.Lock()
+	p.originalFilename = filename
+	p.mu.Unlock()
 }
 
 // SetDirectory sets the target download directory.
 func (p *XDCCPack) SetDirectory(directory string) {
-	p.Directory = filepath.Clean(directory)
+	clean := filepath.Clean(directory)
+	p.mu.Lock()
+	p.directory = clean
+	p.mu.Unlock()
 }
 
 // SetSize sets the file size in bytes.
 func (p *XDCCPack) SetSize(size int64) {
-	p.Size = size
+	p.mu.Lock()
+	p.size = size
+	p.mu.Unlock()
+}
+
+// GetFilename returns the filename in a thread-safe manner.
+func (p *XDCCPack) GetFilename() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.filename
+}
+
+// GetSize returns the file size in a thread-safe manner.
+func (p *XDCCPack) GetSize() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.size
+}
+
+// GetChannel returns the channel in a thread-safe manner.
+func (p *XDCCPack) GetChannel() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.channel
+}
+
+// SetChannel sets the channel in a thread-safe manner.
+func (p *XDCCPack) SetChannel(channel string) {
+	p.mu.Lock()
+	p.channel = channel
+	p.mu.Unlock()
 }
 
 // IsFilenameValid checks if the provided filename matches the expected original filename.
 func (p *XDCCPack) IsFilenameValid(filename string) bool {
-	if p.OriginalFilename != "" {
-		return filename == p.OriginalFilename
+	p.mu.RLock()
+	orig := p.originalFilename
+	p.mu.RUnlock()
+	if orig != "" {
+		return filename == orig
 	}
 	return true
 }
@@ -99,14 +142,18 @@ func (p *XDCCPack) IsFilenameValid(filename string) bool {
 // configured Directory. If validation fails, falls back to filepath.Join
 // (which is safe because SetFilename already sanitizes the filename).
 func (p *XDCCPack) GetFilepath() string {
-	if p.Directory == "" || p.Directory == "." {
-		return p.Filename
+	p.mu.RLock()
+	dir := p.directory
+	filename := p.filename
+	p.mu.RUnlock()
+	if dir == "" || dir == "." {
+		return filename
 	}
-	full, err := SafeJoin(p.Directory, p.Filename)
+	full, err := SafeJoin(dir, filename)
 	if err != nil {
 		// Defensive fallback: filename is already sanitized by SetFilename,
 		// so a simple join is safe even if SafeJoin had an edge case.
-		return filepath.Join(p.Directory, p.Filename)
+		return filepath.Join(dir, filename)
 	}
 	return full
 }
@@ -123,8 +170,63 @@ func (p *XDCCPack) GetRequestMessage(full bool) string {
 
 // String returns a human-readable representation.
 func (p *XDCCPack) String() string {
+	p.mu.RLock()
+	filename := p.filename
+	size := p.size
+	p.mu.RUnlock()
 	return fmt.Sprintf("%s (/msg %s xdcc send #%d) [%s]",
-		p.Filename, p.Bot, p.PackNumber, HumanReadableBytes(p.Size))
+		filename, p.Bot, p.PackNumber, HumanReadableBytes(size))
+}
+
+// GetDirectory returns the directory in a thread-safe manner.
+func (p *XDCCPack) GetDirectory() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.directory
+}
+
+// MarshalJSON implements json.Marshaler for custom serialization of private fields.
+func (p *XDCCPack) MarshalJSON() ([]byte, error) {
+	type Alias XDCCPack
+	return json.Marshal(&struct {
+		Channel          string    `json:"channel,omitempty"`
+		Directory        string    `json:"directory,omitempty"`
+		Filename         string    `json:"filename"`
+		OriginalFilename string    `json:"original_filename,omitempty"`
+		Size             int64     `json:"size"`
+		*Alias
+	}{
+		Channel:          p.GetChannel(),
+		Directory:        p.GetDirectory(),
+		Filename:         p.GetFilename(),
+		OriginalFilename: func() string { p.mu.RLock(); defer p.mu.RUnlock(); return p.originalFilename }(),
+		Size:             p.GetSize(),
+		Alias:            (*Alias)(p),
+	})
+}
+
+// UnmarshalJSON implements json.Unmarshaler for custom deserialization of private fields.
+func (p *XDCCPack) UnmarshalJSON(data []byte) error {
+	type Alias XDCCPack
+	aux := &struct {
+		Channel          string `json:"channel,omitempty"`
+		Directory        string `json:"directory,omitempty"`
+		Filename         string `json:"filename"`
+		OriginalFilename string `json:"original_filename,omitempty"`
+		Size             int64  `json:"size"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.SetChannel(aux.Channel)
+	p.SetDirectory(aux.Directory)
+	p.SetFilename(aux.Filename, true)
+	p.SetOriginalFilename(aux.OriginalFilename)
+	p.SetSize(aux.Size)
+	return nil
 }
 
 // ExtractPackNumber parses the pack number from a pack message string.

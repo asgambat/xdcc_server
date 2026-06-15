@@ -45,16 +45,19 @@ func TestConnectionLifecycle_NoDuplicateRun(t *testing.T) {
 	}
 	conn.ctx, conn.cancel = mgr.ctx, mgr.cancel
 
-	// Launch run() twice - second call should be ignored
-	conn.wg.Add(1)
-	go conn.run()
-	time.Sleep(10 * time.Millisecond) // Let first run() start
+	// startedCh is needed by run() to signal that wg.Add(1) has been called.
+	conn.startedCh = make(chan struct{})
 
-	// This should be safely ignored
+	// Launch run() - wait for it to register in the WaitGroup before
+	// launching the duplicate (otherwise timing could interfere).
+	go conn.run()
+	<-conn.startedCh // deterministic: run() has called wg.Add(1)
+
+	// This should be safely ignored (isRunning is already true)
 	go conn.run()
 
-	// Give time for potential duplicate to execute
-	time.Sleep(100 * time.Millisecond)
+	// Give duplicate goroutine time to execute its early-return path
+	time.Sleep(50 * time.Millisecond)
 
 	// Verify: should still be running (not panicked, not closed twice)
 	if !conn.IsRunning() {

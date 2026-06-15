@@ -182,8 +182,8 @@ func TestParseXDCCMessage_DirectoryPropagated(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, p := range packs {
-		if p.Directory != "/downloads" {
-			t.Errorf("Directory = %s, want /downloads", p.Directory)
+	if p.GetDirectory() != "/downloads" {
+		t.Errorf("Directory = %s, want /downloads", p.GetDirectory())
 		}
 	}
 }
@@ -193,8 +193,8 @@ func TestParseXDCCMessage_DirectoryPropagated(t *testing.T) {
 func TestPreparePacks_SinglePackLocation(t *testing.T) {
 	p := NewXDCCPack(NewIrcServer("irc.rizon.net"), "Bot", 1)
 	PreparePacks([]*XDCCPack{p}, "custom_name")
-	if p.Filename != "custom_name" {
-		t.Errorf("Filename = %q, want custom_name", p.Filename)
+	if p.GetFilename() != "custom_name" {
+		t.Errorf("Filename = %q, want custom_name", p.GetFilename())
 	}
 }
 
@@ -207,8 +207,8 @@ func TestPreparePacks_MultiplePacksLocation(t *testing.T) {
 	if packs[0].Filename != "ep-000" {
 		t.Errorf("packs[0].Filename = %q, want ep-000", packs[0].Filename)
 	}
-	if packs[1].Filename != "ep-001" {
-		t.Errorf("packs[1].Filename = %q, want ep-001", packs[1].Filename)
+	if packs[1].GetFilename() != "ep-001" {
+		t.Errorf("packs[1].Filename = %q, want ep-001", packs[1].GetFilename())
 	}
 }
 
@@ -216,7 +216,7 @@ func TestPreparePacks_NoLocation(t *testing.T) {
 	p := NewXDCCPack(NewIrcServer("irc.rizon.net"), "Bot", 1)
 	p.SetFilename("original.mkv", true)
 	PreparePacks([]*XDCCPack{p}, "")
-	if p.Filename != "original.mkv" {
+	if p.GetFilename() != "original.mkv" {
 		t.Errorf("filename should not change when location is empty")
 	}
 }
@@ -247,16 +247,16 @@ func TestPreparePacks_DirectoryLocation(t *testing.T) {
 	PreparePacks(packs, dir)
 
 	for i, p := range packs {
-		if p.Directory != dir {
-			t.Errorf("packs[%d].Directory = %q, want %q", i, p.Directory, dir)
+		if p.GetDirectory() != dir {
+			t.Errorf("packs[%d].Directory = %q, want %q", i, p.GetDirectory(), dir)
 		}
 	}
 	// Filenames must remain unchanged.
-	if packs[0].Filename != "file1.mkv" {
-		t.Errorf("packs[0].Filename = %q, want file1.mkv", packs[0].Filename)
+	if packs[0].GetFilename() != "file1.mkv" {
+		t.Errorf("packs[0].Filename = %q, want file1.mkv", packs[0].GetFilename())
 	}
-	if packs[1].Filename != "file2.mkv" {
-		t.Errorf("packs[1].Filename = %q, want file2.mkv", packs[1].Filename)
+	if packs[1].GetFilename() != "file2.mkv" {
+		t.Errorf("packs[1].Filename = %q, want file2.mkv", packs[1].GetFilename())
 	}
 }
 

@@ -6,8 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lrstanley/girc"
 	"xdcc_server/internal/entities"
+
+	"github.com/lrstanley/girc"
 )
 
 func (c *Client) registerHandlers() {
@@ -89,8 +90,8 @@ func (c *Client) registerHandlers() {
 				c.infof("No channels from WHOIS, joining fallback channel: %s", ch)
 				c.ps.needsJoin.Store(true)
 				// Record fallback channel on the pack for speed tracking.
-				if c.currentPack().Channel == "" {
-					c.currentPack().Channel = ch
+				if c.currentPack().GetChannel() == "" {
+					c.currentPack().SetChannel(ch)
 				}
 				client.Cmd.Join(ch)
 			}
@@ -129,16 +130,16 @@ func (c *Client) registerHandlers() {
 			if alreadyIn {
 				c.infof("Already in channel %s, skipping JOIN", part)
 				// Still record the channel on the pack for speed tracking.
-				if c.currentPack().Channel == "" {
-					c.currentPack().Channel = ch
+				if c.currentPack().GetChannel() == "" {
+					c.currentPack().SetChannel(ch)
 				}
 			} else {
 				c.infof("Joining channel: %s", part)
 				c.ps.needsJoin.Store(true)
 				// Record the discovered channel on the pack so it can be
 				// used for per-channel statistics after download completes.
-				if c.currentPack().Channel == "" {
-					c.currentPack().Channel = ch
+				if c.currentPack().GetChannel() == "" {
+					c.currentPack().SetChannel(ch)
 				}
 				time.Sleep(time.Duration(1+randN(2)) * time.Second)
 				client.Cmd.Join(part)

@@ -14,8 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lrstanley/girc"
 	"xdcc_server/internal/entities"
+
+	"github.com/lrstanley/girc"
 )
 
 // Internal constants
@@ -526,7 +527,7 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	c.resetForPack()
 	pack := c.currentPack()
 
-	c.infof("--- Starting pack download: %s (pack #%d) from bot %s ---", pack.Filename, pack.PackNumber, pack.Bot)
+	c.infof("--- Starting pack download: %s (pack #%d) from bot %s ---", pack.GetFilename(), pack.PackNumber, pack.Bot)
 
 	// Channel-join delay only on first connection (not between packs).
 	// 0 = no delay, -1 = random 5-10s, >0 = that many seconds.
@@ -657,7 +658,7 @@ func (c *Client) finishSuccess() {
 	elapsed := time.Since(c.ps.downStartTime)
 	speedStr := formatSpeed(float64(c.ps.filesize) / elapsed.Seconds())
 	fmt.Printf("\nFile %s downloaded successfully in %s at %s\n",
-		c.currentPack().Filename,
+		c.currentPack().GetFilename(),
 		formatDuration(elapsed),
 		speedStr)
 	c.ps.downloadDoneOnce.Do(func() {

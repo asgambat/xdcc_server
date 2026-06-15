@@ -763,6 +763,11 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
 			_ = qm.store.UpdateDownloadProgress(storeCtx, d.ID, bytesReceived, int64(speedBPS))
 
+			// Snapshot pack fields via thread-safe getters to avoid data races
+			// with the IRC DCC handler that writes to the pack concurrently.
+			packFilename := pack.GetFilename()
+			packSize := pack.GetSize()
+
 			// Emit progress event
 			qm.emitEvent(Event{
 				Type:          EventDownloadProgress,
@@ -770,18 +775,18 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				ProgressBytes: bytesReceived,
 				FileSize:      totalBytes,
 				SpeedBPS:      speedBPS,
-				Filename:      pack.Filename,
+				Filename:      packFilename,
 			})
 
 			// If we discovered filename/size from the pack, update store and emit metadata event.
 			// Only emit once (when metadataEmitted is still false) to avoid redundant SSE events.
-			if !metadataEmitted && pack.Filename != "" && (d.Filename == "" || strings.HasPrefix(d.Filename, "manual_download")) {
-				_ = qm.store.UpdateDownloadMetadata(storeCtx, d.ID, pack.Filename, pack.Size)
+			if !metadataEmitted && packFilename != "" && (d.Filename == "" || strings.HasPrefix(d.Filename, "manual_download")) {
+				_ = qm.store.UpdateDownloadMetadata(storeCtx, d.ID, packFilename, packSize)
 				qm.emitEvent(Event{
 					Type:       EventDownloadMetadataUpdate,
 					DownloadID: d.ID,
-					Filename:   pack.Filename,
-					FileSize:   pack.Size,
+					Filename:   packFilename,
+					FileSize:   packSize,
 				})
 				metadataEmitted = true
 			}
@@ -852,8 +857,8 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 
 				// Use discovered filename if record filename was empty
 				skippedFilename := d.Filename
-				if skippedFilename == "" && pack.Filename != "" {
-					skippedFilename = pack.Filename
+				if skippedFilename == "" && result.Filename != "" {
+					skippedFilename = result.Filename
 				}
 
 				qm.log.Infof("download %d skipped: %s already exists at %s", d.ID, skippedFilename, result.FilePath)
@@ -869,14 +874,15 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				})
 			} else {
 				// Download completed successfully
-				// Use discovered filename/size from pack if record was empty.
+				// Use discovered filename/size from workerResult (populated
+				// after runDownload returns, so no concurrent writes).
 				finalFilename := d.Filename
-				if finalFilename == "" && pack.Filename != "" {
-					finalFilename = pack.Filename
+				if finalFilename == "" && result.Filename != "" {
+					finalFilename = result.Filename
 				}
 				finalSize := d.FileSize
-				if finalSize == 0 && pack.Size > 0 {
-					finalSize = pack.Size
+				if finalSize == 0 && result.FileSize > 0 {
+					finalSize = result.FileSize
 				}
 				_ = qm.store.MarkDownloadCompleted(storeCtx, d.ID, finalFilename, finalSize)
 
@@ -886,10 +892,11 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				// Update channel average download speed using EMA.
 				// Use the channel from the DownloadRecord, but if it was
 				// discovered via WHOIS during the download, fall back to
-				// the channel stored on the pack object.
+				// the channel stored on the pack object (safe: runDownload
+				// has returned, no concurrent writes).
 				ch := d.Channel
 				if ch == "" {
-					ch = pack.Channel
+					ch = pack.GetChannel()
 				}
 				// Compute actual average speed: file_size / elapsed_seconds.
 				// This is more accurate than the last instantaneous speedBPS.
