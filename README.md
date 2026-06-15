@@ -1537,6 +1537,10 @@ task ci
 # This runs: deps, build, test:race, vet
 ```
 
+### Internal Architecture
+
+- **[`docs/CONFIG_UPDATE_PATTERN.md`](docs/CONFIG_UPDATE_PATTERN.md)** — recommended pattern for atomic, race-free partial config updates (`SnapshotAndApply` + `ApplyPartial`). Explains the TOCTOU window that opens if a handler calls `Clone()` twice and how the helper closes it.
+
 ### Contributing
 
 1. Fork the repository
