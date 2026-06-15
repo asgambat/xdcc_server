@@ -222,8 +222,8 @@ func TestFilterNewPacks_SomeAlreadyDownloaded(t *testing.T) {
 	if len(newPacks) != 1 {
 		t.Errorf("expected 1 new pack (b.mkv), got %d", len(newPacks))
 	}
-	if newPacks[0].Filename != "b.mkv" {
-		t.Errorf("expected b.mkv as new pack, got %s", newPacks[0].Filename)
+	if newPacks[0].GetFilename() != "b.mkv" {
+		t.Errorf("expected b.mkv as new pack, got %s", newPacks[0].GetFilename())
 	}
 }
 

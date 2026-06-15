@@ -18,10 +18,10 @@ import (
 // ===========================================================================
 
 type mockStore struct {
-	mu         sync.Mutex
-	downloads  map[int64]*store.DownloadRecord
-	nextID     int64
-	getQueueFn func() ([]store.DownloadRecord, error)
+	mu           sync.Mutex
+	downloads    map[int64]*store.DownloadRecord
+	nextID       int64
+	getQueueFn   func() ([]store.DownloadRecord, error)
 	markStartErr error
 }
 

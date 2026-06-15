@@ -146,8 +146,8 @@ func TestParseXDCCMessage_DefaultsApplied(t *testing.T) {
 	if packs[0].Server.Address != "irc.rizon.net" {
 		t.Errorf("Server.Address = %s, want irc.rizon.net", packs[0].Server.Address)
 	}
-	if packs[0].Directory != "." {
-		t.Errorf("Directory = %s, want .", packs[0].Directory)
+	if packs[0].GetDirectory() != "." {
+		t.Errorf("Directory = %s, want .", packs[0].GetDirectory())
 	}
 }
 
@@ -182,8 +182,8 @@ func TestParseXDCCMessage_DirectoryPropagated(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, p := range packs {
-	if p.GetDirectory() != "/downloads" {
-		t.Errorf("Directory = %s, want /downloads", p.GetDirectory())
+		if p.GetDirectory() != "/downloads" {
+			t.Errorf("Directory = %s, want /downloads", p.GetDirectory())
 		}
 	}
 }
@@ -204,8 +204,8 @@ func TestPreparePacks_MultiplePacksLocation(t *testing.T) {
 		NewXDCCPack(NewIrcServer("irc.rizon.net"), "Bot", 2),
 	}
 	PreparePacks(packs, "ep")
-	if packs[0].Filename != "ep-000" {
-		t.Errorf("packs[0].Filename = %q, want ep-000", packs[0].Filename)
+	if packs[0].GetFilename() != "ep-000" {
+		t.Errorf("packs[0].Filename = %q, want ep-000", packs[0].GetFilename())
 	}
 	if packs[1].GetFilename() != "ep-001" {
 		t.Errorf("packs[1].Filename = %q, want ep-001", packs[1].GetFilename())

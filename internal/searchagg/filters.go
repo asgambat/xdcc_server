@@ -222,7 +222,7 @@ func sortPacks(packs []*entities.XDCCPack, query string) {
 		a, b := packs[i], packs[j]
 
 		// Sort alphabetically by filename
-		return strings.ToLower(a.Filename) < strings.ToLower(b.Filename)
+		return strings.ToLower(a.GetFilename()) < strings.ToLower(b.GetFilename())
 	})
 }
 

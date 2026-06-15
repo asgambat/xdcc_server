@@ -25,8 +25,8 @@ func TestCacheGetSet(t *testing.T) {
 	if len(got.Packs) != 1 {
 		t.Errorf("expected 1 pack, got %d", len(got.Packs))
 	}
-	if got.Packs[0].Filename != "test.mkv" {
-		t.Errorf("expected filename test.mkv, got %s", got.Packs[0].Filename)
+	if got.Packs[0].GetFilename() != "test.mkv" {
+		t.Errorf("expected filename test.mkv, got %s", got.Packs[0].GetFilename())
 	}
 	if !got.isFresh() {
 		t.Errorf("expected entry to be fresh")

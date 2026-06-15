@@ -602,7 +602,7 @@ func (m *Manager) SendChannelMessage(serverID int64, channel, message string) er
 // 6. Handles DCC transfer with progress callback
 // 7. Maintains the connection after download (channels remain joined)
 func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, channel string, progressFn func(bytesReceived, totalBytes int64, speedBPS float64)) (string, error) {
-	m.logger.Infof("DownloadPack: starting download for %s from bot %s on %s", pack.Filename, pack.Bot, pack.Server.Address)
+	m.logger.Infof("DownloadPack: starting download for %s from bot %s on %s", pack.GetFilename(), pack.Bot, pack.Server.Address)
 
 	// Find or create persistent connection for this server
 	_, conn, err := m.ensureConnection(pack.Server.Address, pack.Server.Port)

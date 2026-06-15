@@ -184,8 +184,8 @@ func TestFilterByQuery_OnlyExclusion(t *testing.T) {
 			t.Logf("  got: %s", p.GetFilename())
 		}
 	}
-\tif len(result) > 0 && result[0].GetFilename() != "my.file.mkv" {
-\t\tt.Errorf("expected 'my.file.mkv', got %q", result[0].GetFilename())
+	if len(result) > 0 && result[0].GetFilename() != "my.file.mkv" {
+		t.Errorf("expected 'my.file.mkv', got %q", result[0].GetFilename())
 	}
 }
 
@@ -391,12 +391,12 @@ func TestSortPacks_PrefixFirst(t *testing.T) {
 
 	// All packs with "Anime" prefix first, then sorted by size desc, then alphabetically
 	if len(packs) >= 3 {
-		if !containsLower(packs[0].Filename, "anime") {
-			t.Errorf("expected first result to have 'Anime' prefix, got %s", packs[0].Filename)
+		if !containsLower(packs[0].GetFilename(), "anime") {
+			t.Errorf("expected first result to have 'Anime' prefix, got %s", packs[0].GetFilename())
 		}
 		// Anime_Movie.mkv (300) should come before Anime_Show.mkv (200)
-		if packs[0].Filename != "Anime_Movie.mkv" {
-			t.Errorf("expected first to be Anime_Movie.mkv (largest size), got %s", packs[0].Filename)
+		if packs[0].GetFilename() != "Anime_Movie.mkv" {
+			t.Errorf("expected first to be Anime_Movie.mkv (largest size), got %s", packs[0].GetFilename())
 		}
 	}
 }
@@ -412,11 +412,11 @@ func TestSortPacks_NoQuery(t *testing.T) {
 
 	// When no query, sort by size desc then alphabetically
 	// All have same size (100), so alphabetical: a.mkv, b.mkv, c.mkv
-	if packs[0].Filename != "a.mkv" {
-		t.Errorf("expected first to be a.mkv (alphabetical when same size), got %s", packs[0].Filename)
+	if packs[0].GetFilename() != "a.mkv" {
+		t.Errorf("expected first to be a.mkv (alphabetical when same size), got %s", packs[0].GetFilename())
 	}
-	if packs[2].Filename != "c.mkv" {
-		t.Errorf("expected last to be c.mkv, got %s", packs[2].Filename)
+	if packs[2].GetFilename() != "c.mkv" {
+		t.Errorf("expected last to be c.mkv, got %s", packs[2].GetFilename())
 	}
 }
 
@@ -427,8 +427,8 @@ func TestSortPacks_LargerSizeFirst(t *testing.T) {
 	}
 	sortPacks(allSameSize, "")
 	// Same size → alphabetical
-	if allSameSize[0].Filename != "a.mkv" {
-		t.Errorf("expected 'a.mkv' first when same size, got %s", allSameSize[0].Filename)
+	if allSameSize[0].GetFilename() != "a.mkv" {
+		t.Errorf("expected 'a.mkv' first when same size, got %s", allSameSize[0].GetFilename())
 	}
 
 	diffSize := []*entities.XDCCPack{
@@ -436,8 +436,8 @@ func TestSortPacks_LargerSizeFirst(t *testing.T) {
 		mkPack("large.mkv", 1000, "Bot"),
 	}
 	sortPacks(diffSize, "")
-	if diffSize[0].Filename != "large.mkv" {
-		t.Errorf("expected 'large.mkv' first (larger size), got %s", diffSize[0].Filename)
+	if diffSize[0].GetFilename() != "large.mkv" {
+		t.Errorf("expected 'large.mkv' first (larger size), got %s", diffSize[0].GetFilename())
 	}
 }
 

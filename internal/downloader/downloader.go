@@ -77,12 +77,12 @@ func printResult(pack *entities.XDCCPack, r xdccirc.PackResult) {
 	}
 	switch {
 	case errors.Is(r.Error, xdccirc.ErrAlreadyDownloaded):
-		fmt.Printf("File already downloaded (skipping): %s\n", pack.Filename)
+		fmt.Printf("File already downloaded (skipping): %s\n", pack.GetFilename())
 	case errors.Is(r.Error, xdccirc.ErrBotDenied):
 		if r.LastBotNotice != "" {
 			fmt.Printf("Bot denied XDCC request: %s\n", r.LastBotNotice)
 		} else {
-			fmt.Printf("Bot denied XDCC request for: %s\n", pack.Filename)
+			fmt.Printf("Bot denied XDCC request for: %s\n", pack.GetFilename())
 		}
 	case errors.Is(r.Error, xdccirc.ErrBotNotFound):
 		fmt.Printf("Bot %s not found on server %s\n", pack.Bot, pack.Server.Address)
@@ -96,7 +96,7 @@ func printResult(pack *entities.XDCCPack, r xdccirc.PackResult) {
 	case errors.Is(r.Error, xdccirc.ErrTimeout):
 		fmt.Printf("Download of pack #%d timed out after all retries\n", pack.PackNumber)
 	case errors.Is(r.Error, xdccirc.ErrDownloadFailed):
-		fmt.Printf("Download of %s failed after all retries\n", pack.Filename)
+		fmt.Printf("Download of %s failed after all retries\n", pack.GetFilename())
 	default:
 		fmt.Printf("Error downloading pack %d: %v\n", pack.PackNumber, r.Error)
 	}

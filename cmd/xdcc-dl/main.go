@@ -172,8 +172,8 @@ func runWithServer(serverURL, message, outDir string) error {
 			Bot:           p.Bot,
 			ServerAddress: p.Server.Address,
 			Channel:       channel,
-			Filename:      p.Filename,
-			FileSize:      p.Size,
+			Filename:      p.GetFilename(),
+			FileSize:      p.GetSize(),
 		}
 
 		// Send to server
@@ -182,19 +182,19 @@ func runWithServer(serverURL, message, outDir string) error {
 			// Check for specific error types
 			errStr := err.Error()
 			if strings.Contains(errStr, "duplicate") {
-				fmt.Fprintf(os.Stderr, "⚠️  Skipped %s (already in queue): %v\n", p.Filename, err)
+				fmt.Fprintf(os.Stderr, "⚠️  Skipped %s (already in queue): %v\n", p.GetFilename(), err)
 				continue
 			}
-			return fmt.Errorf("delegating download %s: %w", p.Filename, err)
+			return fmt.Errorf("delegating download %s: %w", p.GetFilename(), err)
 		}
 
-		fmt.Fprintf(os.Stderr, "📥 Queued %s (id=%d) on server\n", p.Filename, id)
+		fmt.Fprintf(os.Stderr, "📥 Queued %s (id=%d) on server\n", p.GetFilename(), id)
 
 		// Poll for progress
 		fmt.Fprintf(os.Stderr, "\n")
 		lastProgress := int64(0)
 		lastSpeed := float64(0)
-		fileSize := p.Size
+		fileSize := p.GetSize()
 
 		_, pollErr := c.PollDownload(id, 1*time.Second, 0, func(rec *store.DownloadRecord) {
 			switch rec.Status {
@@ -209,7 +209,7 @@ func runWithServer(serverURL, message, outDir string) error {
 					speed := formatSpeed(rec.SpeedBPS)
 					eta := formatETA(fileSize-rec.ProgressBytes, rec.SpeedBPS)
 					fmt.Fprintf(os.Stderr, "\r⬇️  %s — %s/%s (%.1f%%) — %s — ETA %s",
-						p.Filename,
+						p.GetFilename(),
 						formatBytes(rec.ProgressBytes),
 						formatBytes(fileSize),
 						progressPct,
@@ -229,23 +229,23 @@ func runWithServer(serverURL, message, outDir string) error {
 		if final != nil {
 			switch final.Status {
 			case store.DownloadStatusCompleted:
-				fmt.Fprintf(os.Stderr, "\r✅ %s — completed successfully                       \n", p.Filename)
+				fmt.Fprintf(os.Stderr, "\r✅ %s — completed successfully                       \n", p.GetFilename())
 			case store.DownloadStatusFailed:
 				errMsg := final.ErrorMessage
 				if errMsg == "" {
 					errMsg = "unknown error"
 				}
-				fmt.Fprintf(os.Stderr, "\r❌ %s — FAILED: %s                       \n", p.Filename, errMsg)
+				fmt.Fprintf(os.Stderr, "\r❌ %s — FAILED: %s                       \n", p.GetFilename(), errMsg)
 				if pollErr != nil {
 					return pollErr
 				}
 			case store.DownloadStatusSkipped:
-				fmt.Fprintf(os.Stderr, "\r⏭️  %s — skipped (already exists)                       \n", p.Filename)
+				fmt.Fprintf(os.Stderr, "\r⏭️  %s — skipped (already exists)                       \n", p.GetFilename())
 			default:
-				fmt.Fprintf(os.Stderr, "\rℹ️  %s — status: %s                       \n", p.Filename, final.Status)
+				fmt.Fprintf(os.Stderr, "\rℹ️  %s — status: %s                       \n", p.GetFilename(), final.Status)
 			}
 		} else if pollErr != nil {
-			fmt.Fprintf(os.Stderr, "\r⚠️  %s — polling error: %v                       \n", p.Filename, pollErr)
+			fmt.Fprintf(os.Stderr, "\r⚠️  %s — polling error: %v                       \n", p.GetFilename(), pollErr)
 		}
 	}
 

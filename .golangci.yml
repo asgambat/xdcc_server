@@ -93,6 +93,7 @@ linters-settings:
       - "ifElseChain"      # Often too noisy
       - "hugeParam"        # Many false positives
       - "rangeValCopy"     # Style preference, not correctness
+      - "unnecessaryDefer" # Conflicts with badLock on barrier patterns (Lock+defer Unlock)
 
 # Linters to enable
 linters:

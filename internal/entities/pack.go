@@ -15,12 +15,12 @@ type XDCCPack struct {
 	mu               sync.RWMutex `json:"-"`
 	Server           IrcServer    `json:"server"`
 	Bot              string       `json:"bot"`
-	channel          string       `json:"channel,omitempty"`
-	PackNumber       int          `json:"pack_number"`
-	directory        string       `json:"directory,omitempty"`
-	filename         string       `json:"filename"`
-	originalFilename string       `json:"original_filename,omitempty"`
-	size             int64        `json:"size"`
+	channel          string
+	PackNumber       int `json:"pack_number"`
+	directory        string
+	filename         string
+	originalFilename string
+	size             int64
 }
 
 // NewXDCCPack creates a new XDCCPack.
@@ -189,11 +189,11 @@ func (p *XDCCPack) GetDirectory() string {
 func (p *XDCCPack) MarshalJSON() ([]byte, error) {
 	type Alias XDCCPack
 	return json.Marshal(&struct {
-		Channel          string    `json:"channel,omitempty"`
-		Directory        string    `json:"directory,omitempty"`
-		Filename         string    `json:"filename"`
-		OriginalFilename string    `json:"original_filename,omitempty"`
-		Size             int64     `json:"size"`
+		Channel          string `json:"channel,omitempty"`
+		Directory        string `json:"directory,omitempty"`
+		Filename         string `json:"filename"`
+		OriginalFilename string `json:"original_filename,omitempty"`
+		Size             int64  `json:"size"`
 		*Alias
 	}{
 		Channel:          p.GetChannel(),

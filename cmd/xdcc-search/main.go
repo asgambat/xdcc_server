@@ -81,13 +81,13 @@ Verbosity levels:
 			for _, pack := range results {
 				msg := pack.GetRequestMessage(true)
 				line := fmt.Sprintf("%s [%s] (xdcc-dl %q)",
-					pack.Filename,
-					entities.HumanReadableBytes(pack.Size),
+					pack.GetFilename(),
+					entities.HumanReadableBytes(pack.GetSize()),
 					msg)
 				if pack.Server.Address != "irc.rizon.net" {
 					line = fmt.Sprintf("%s [%s] (xdcc-dl %q --server %s)",
-						pack.Filename,
-						entities.HumanReadableBytes(pack.Size),
+						pack.GetFilename(),
+						entities.HumanReadableBytes(pack.GetSize()),
 						msg,
 						pack.Server.Address)
 				}
@@ -115,7 +115,7 @@ func filterByPrefix(packs []*entities.XDCCPack, term string) []*entities.XDCCPac
 	prefix := strings.ToLower(term)
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if strings.HasPrefix(strings.ToLower(p.Filename), prefix) {
+		if strings.HasPrefix(strings.ToLower(p.GetFilename()), prefix) {
 			out = append(out, p)
 		}
 	}

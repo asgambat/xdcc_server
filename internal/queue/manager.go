@@ -195,8 +195,7 @@ func (qm *Manager) Stop() {
 
 	// Wait for any in-flight tryDispatch to complete before stopping timers
 	// and monitors. This reduces races between shutdown and new starts.
-	qm.dispatchMu.Lock()
-	qm.dispatchMu.Unlock()
+	qm.waitForDispatchBarrier()
 
 	// Stop the startup timer so the delayed dispatch callback doesn't fire
 	// after shutdown has begun, calling tryDispatch() outside the lifecycle.
@@ -638,7 +637,7 @@ func (qm *Manager) tryDispatch() {
 			sk, d.ID, d.ServerAddress, d.Channel, d.Bot)
 
 		if qm.closing.Load() {
-			activeCount = qm.rollbackDispatchReservation(d.ID, sk)
+			qm.rollbackDispatchReservation(d.ID, sk)
 			return
 		}
 
@@ -928,6 +927,20 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 	}()
 
 	return nil
+}
+
+// waitForDispatchBarrier acquires dispatchMu and immediately releases it,
+// acting as a synchronization barrier. It blocks until any in-flight
+// tryDispatch call has returned, since each such call holds dispatchMu for
+// its entire duration. Used during Stop() to make sure no dispatch is
+// racing with shutdown cleanup.
+//
+// Extracted into its own function so that gocritic's badLock check sees a
+// proper Lock/Unlock pair with defer, while preserving the barrier
+// semantics (unlock happens immediately, not at end of Stop()).
+func (qm *Manager) waitForDispatchBarrier() {
+	qm.dispatchMu.Lock()
+	defer qm.dispatchMu.Unlock()
 }
 
 // rollbackDispatchReservation releases a previously reserved (server, channel)

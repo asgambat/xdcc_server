@@ -87,13 +87,13 @@ func TestParseRow_Valid(t *testing.T) {
 	if pack.PackNumber != 42 {
 		t.Errorf("PackNumber = %d, want 42", pack.PackNumber)
 	}
-	if pack.Filename != "episode.mkv" {
-		t.Errorf("Filename = %q, want episode.mkv", pack.Filename)
+	if pack.GetFilename() != "episode.mkv" {
+		t.Errorf("Filename = %q, want episode.mkv", pack.GetFilename())
 	}
 	if pack.Server.Address != "irc.rizon.net" {
 		t.Errorf("Server.Address = %q, want irc.rizon.net", pack.Server.Address)
 	}
-	if pack.Size == 0 {
+	if pack.GetSize() == 0 {
 		t.Error("Size should be non-zero for a valid size string")
 	}
 }
@@ -281,7 +281,7 @@ func TestSearch_ReturnsPacks(t *testing.T) {
 	if len(packs) != 1 {
 		t.Fatalf("got %d packs, want 1", len(packs))
 	}
-	if packs[0].Filename != "one_piece.mkv" {
-		t.Errorf("Filename = %q, want one_piece.mkv", packs[0].Filename)
+	if packs[0].GetFilename() != "one_piece.mkv" {
+		t.Errorf("Filename = %q, want one_piece.mkv", packs[0].GetFilename())
 	}
 }
