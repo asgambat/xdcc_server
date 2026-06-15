@@ -244,11 +244,13 @@ tasks:
         msg: "golangci-lint not found. Install from https://golangci-lint.run/usage/install/"
 
   check:
-    desc: Run all code quality checks (fmt, vet, test, frontend typecheck)
+    desc: Run all code quality checks (fmt, vet, vet-race, tidy, test, frontend typecheck)
     cmds:
       - task: frontend:check
       - task: fmt
       - task: vet
+      - task: deps:tidy
+      - "{{.GO_CMD}} vet -race ./..."
       - task: test
 
   # ============================================================

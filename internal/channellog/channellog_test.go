@@ -144,9 +144,9 @@ func TestLogPrivate_CreatesFile(t *testing.T) {
 
 	l.LogPrivate("irc.rizon.net", "alice", "secret message")
 
-	// getOrOpen sanitizes the key and appends ".log", so "private.log"
-	// becomes "private.log.log" on disk ("." is in the allowed char set).
-	path := filepath.Join(dir, "private.log.log")
+	// getOrOpen sanitizes the key "private" and appends ".log",
+	// producing "private.log" on disk.
+	path := filepath.Join(dir, "private.log")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -242,8 +242,8 @@ func TestLogPrivate_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Same as TestLogPrivate_CreatesFile: "private.log" → "private.log.log".
-	path := filepath.Join(dir, "private.log.log")
+	// Same as TestLogPrivate_CreatesFile: key "private" → "private.log".
+	path := filepath.Join(dir, "private.log")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)

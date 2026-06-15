@@ -80,6 +80,10 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 		if cfg.Logging.FilePath != "" {
 			logDir = filepath.Dir(cfg.Logging.FilePath)
 		}
+		// Resolve to absolute path for a clear, unambiguous startup message.
+		if abs, err := filepath.Abs(logDir); err == nil {
+			logDir = abs
+		}
 		cl, err := channellog.New(logDir)
 		if err != nil {
 			logger.Warnf("channellog: init failed (dir=%s): %v — channel logging disabled", logDir, err)
@@ -89,7 +93,7 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 				logger.Infof("channellog: enabled for %d channel(s), writing to %s", len(cfg.IRC.ChannelLog), logDir)
 			}
 			if cfg.IRC.LogPrivateMessages {
-				logger.Infof("channellog: private message logging enabled, writing to %s", logDir)
+				logger.Infof("channellog: private message logging enabled, writing to %s/private.log", logDir)
 			}
 		}
 	}
@@ -546,7 +550,7 @@ func (m *Manager) SendChannelMessage(serverID int64, channel, message string) er
 			continue
 		}
 		m.logger.Infof("sending message to %s on %s: %q", channel, conn.address, line)
-		ircClient.Cmd.Message(channel, line)
+		conn.sendChannelMsg(ircClient, channel, line)
 	}
 	return nil
 }
@@ -1232,6 +1236,20 @@ func (mc *managedConnection) waitConnected(timeout time.Duration) bool {
 	return false
 }
 
+// sendChannelMsg sends a PRIVMSG to the given channel via the girc client
+// and also logs it to the channel log file (if channel logging is enabled).
+// girc's PRIVMSG handler only fires for incoming messages, so outgoing ones
+// would otherwise not appear in the channel log.
+func (mc *managedConnection) sendChannelMsg(cl *girc.Client, channel, message string) {
+	cl.Cmd.Message(channel, message)
+
+	if mc.manager.chlog != nil && mc.manager.cfg != nil &&
+		mc.manager.cfg.IsChannelLogged(channel) {
+		nick := cl.GetNick()
+		mc.manager.chlog.Log(channel, nick, channellog.KindMessage, message)
+	}
+}
+
 // sendChannelGreeting sends a random greeting message to the given channel
 // after a random delay between 2 and 4 seconds. The greeting is picked from
 // the configured greetings list (config.IRC.Greetings); when the list is empty
@@ -1277,7 +1295,7 @@ func (mc *managedConnection) sendChannelGreeting(cl *girc.Client, channel string
 		}
 
 		mc.manager.logger.Infof("sending greeting to %s on %s: %q", channel, mc.address, greeting)
-		cl.Cmd.Message(channel, greeting)
+		mc.sendChannelMsg(cl, channel, greeting)
 	}()
 }
 

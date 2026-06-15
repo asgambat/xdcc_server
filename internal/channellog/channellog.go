@@ -226,12 +226,15 @@ func (l *Logger) Log(channel, sender string, kind EventKind, message string) {
 // This method is independent from Log() — private.log is a single shared
 // file, not a per-channel file.
 func (l *Logger) LogPrivate(serverAddr, sender, message string) {
-	const privateLogName = "private.log"
+	// Use "private" as the lookup key so that getOrOpen creates the file
+	// as "private.log" on disk (sanitizeChannelName("private")+".log").
+	// The previous key "private.log" resulted in "private.log.log" because
+	// "." is in the allowed character set and getOrOpen always appends
+	// ".log" to the sanitized name.
+	const privateLogKey = "private"
+	const privateFileName = "private.log"
 
-	// Use a special key so getOrOpen returns the same channelFile for
-	// private.log. We use a literal "private.log" that passes through
-	// sanitizeChannelName unchanged.
-	cf := l.getOrOpen(privateLogName)
+	cf := l.getOrOpen(privateLogKey)
 	if cf == nil {
 		return
 	}
@@ -241,7 +244,7 @@ func (l *Logger) LogPrivate(serverAddr, sender, message string) {
 
 	// Re-open if the file was closed underneath us.
 	if cf.f == nil {
-		path := filepath.Join(l.dir, privateLogName)
+		path := filepath.Join(l.dir, privateFileName)
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return
