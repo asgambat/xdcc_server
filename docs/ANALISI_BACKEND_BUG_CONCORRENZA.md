@@ -107,7 +107,7 @@ Il backend ha subito diversi interventi di correzione di concorrenza (vedi `docs
 
 **Impatto:** Timeout di shutdown, stato DB errato, possibile goroutine leak.
 
-**Fix consigliata:** Rendere `ConnectServer` atomico rispetto a `DisconnectServer`: dopo aver deciso di riconnettere, mantenere il lock o un flag per-server fino a quando `oldConn` non è completamente terminato e `m.conns` è aggiornato. Evitare di rilasciare il lock tra la decisione e l'inserimento. Oppure usare una `sync.Mutex` dedicata per server per serializzare connect/disconnect dello stesso ID, riducendo il contenitività.
+**Fix consigliata:** Rendere `ConnectServer` atomico rispetto a `DisconnectServer`: dopo aver deciso di riconnettere, mantenere il lock o un flag per-server fino a quando `oldConn` non è completamente terminato e `m.conns` è aggiornato. Evitare di rilasciare il lock tra la decisione e l'inserimento.
 
 ---
 

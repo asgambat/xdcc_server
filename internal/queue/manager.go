@@ -663,7 +663,9 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 	}
 
 	if qm.closing.Load() {
-		_ = qm.store.RequeueDownload(qm.storeCtxForCallbacks(), d.ID)
+		storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+		_ = qm.store.RequeueDownload(storeCtx, d.ID)
+		cancelStoreCtx()
 		return fmt.Errorf("queue manager is shutting down")
 	}
 
@@ -675,7 +677,9 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 		qm.mu.Unlock()
 		cancel()
 		// Keep store state coherent if reservation vanished after MarkDownloadStarted.
-		_ = qm.store.RequeueDownload(qm.storeCtxForCallbacks(), d.ID)
+		storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+		_ = qm.store.RequeueDownload(storeCtx, d.ID)
+		cancelStoreCtx()
 		if !ok {
 			return fmt.Errorf("slot reservation missing for download %d (%s)", d.ID, sk)
 		}
@@ -756,7 +760,7 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 
 			// Update store (status is NOT set here — MarkDownloadStarted
 			// already set it before this callback began).
-			storeCtx := qm.storeCtxForCallbacks()
+			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
 			_ = qm.store.UpdateDownloadProgress(storeCtx, d.ID, bytesReceived, int64(speedBPS))
 
 			// Emit progress event
@@ -781,6 +785,8 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				})
 				metadataEmitted = true
 			}
+
+			cancelStoreCtx()
 		}
 
 		// Completion callback
@@ -805,7 +811,8 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 			// cancelled/requeued) before we overwrite it. If the user
 			// explicitly paused, cancelled, or removed the download, respect
 			// that decision.
-			storeCtx := qm.storeCtxForCallbacks()
+			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+			defer cancelStoreCtx()
 			current, err := qm.store.GetDownload(storeCtx, d.ID)
 			if err == nil && current != nil {
 				if current.Status == store.DownloadStatusPaused ||
@@ -937,12 +944,11 @@ func (qm *Manager) rollbackDispatchReservation(downloadID int64, sk string) int 
 // by worker callbacks. During shutdown qm.ctx is cancelled, so use a
 // time-bounded fallback context to allow final state persistence without
 // risking indefinite blocking on an unresponsive database.
-func (qm *Manager) storeCtxForCallbacks() context.Context {
+func (qm *Manager) storeCtxForCallbacks() (context.Context, context.CancelFunc) {
 	if qm.ctx.Err() != nil {
-		ctx, _ := context.WithTimeout(context.Background(), 3*time.Second)
-		return ctx
+		return context.WithTimeout(context.Background(), 3*time.Second)
 	}
-	return qm.ctx
+	return qm.ctx, func() {}
 }
 
 // removeActiveJobLocked removes an active job and its reserved slot atomically.

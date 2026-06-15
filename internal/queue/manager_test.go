@@ -1247,7 +1247,8 @@ func TestStop_Clean(t *testing.T) {
 func TestStoreCtxForCallbacks_FallsBackAfterCancel(t *testing.T) {
 	qm, _ := newTestQM(t)
 
-	ctxBefore := qm.storeCtxForCallbacks()
+	ctxBefore, cancelBefore := qm.storeCtxForCallbacks()
+	defer cancelBefore()
 	if ctxBefore.Err() != nil {
 		t.Fatalf("expected active context before cancel, got err=%v", ctxBefore.Err())
 	}
@@ -1257,7 +1258,8 @@ func TestStoreCtxForCallbacks_FallsBackAfterCancel(t *testing.T) {
 		t.Fatal("expected manager context to be cancelled")
 	}
 
-	ctxAfter := qm.storeCtxForCallbacks()
+	ctxAfter, cancelAfter := qm.storeCtxForCallbacks()
+	defer cancelAfter()
 	if ctxAfter.Err() != nil {
 		t.Fatalf("expected fallback store context to be usable, got err=%v", ctxAfter.Err())
 	}

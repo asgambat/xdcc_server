@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lrstanley/girc"
 	"xdcc_server/internal/channellog"
 	"xdcc_server/internal/config"
 	"xdcc_server/internal/entities"
@@ -19,6 +18,8 @@ import (
 	"xdcc_server/internal/logging"
 	"xdcc_server/internal/pubsub"
 	"xdcc_server/internal/store"
+
+	"github.com/lrstanley/girc"
 )
 
 // Internal constants
@@ -40,6 +41,11 @@ type Manager struct {
 	store  store.ServerStore
 	cfg    *config.Config
 	logger *logging.Logger
+
+	// serverOps serializes connect/disconnect operations per server ID,
+	// preventing interleaving races between ConnectServer and DisconnectServer.
+	opMu      sync.Mutex
+	serverOps map[int64]*sync.Mutex
 
 	conns      map[int64]*managedConnection
 	connecting map[int64]struct{} // servers currently being connected
@@ -63,6 +69,7 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 		store:      st,
 		cfg:        cfg,
 		logger:     logger,
+		serverOps:  make(map[int64]*sync.Mutex),
 		conns:      make(map[int64]*managedConnection),
 		connecting: make(map[int64]struct{}),
 		subscriber: pubsub.New[Event](256),
@@ -240,6 +247,21 @@ func (m *Manager) emitEvent(evt Event) {
 	m.subscriber.Publish(evt)
 }
 
+// lockServerOp acquires a per-server mutex so ConnectServer and
+// DisconnectServer cannot run concurrently for the same server ID.
+func (m *Manager) lockServerOp(serverID int64) func() {
+	m.opMu.Lock()
+	lock, ok := m.serverOps[serverID]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.serverOps[serverID] = lock
+	}
+	m.opMu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
+}
+
 // ---------------------------------------------------------------------------
 // Public API (Fase 3.5)
 // ---------------------------------------------------------------------------
@@ -260,12 +282,18 @@ func (m *Manager) ConnectServerByID(serverID int64) error {
 // ConnectServer connects to an IRC server with the given details.
 // If the server is already connected, it returns nil.
 func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
+	unlockServer := m.lockServerOp(srv.ID)
+	defer unlockServer()
+
 	m.mu.Lock()
 
 	// If already connected, return immediately.
-	if existing, ok := m.conns[srv.ID]; ok && existing.Status() == "connected" {
-		m.mu.Unlock()
-		return nil
+	if existing, ok := m.conns[srv.ID]; ok {
+		status := existing.Status()
+		if status == "connected" || status == "connecting" || status == "reconnecting" {
+			m.mu.Unlock()
+			return nil
+		}
 	}
 
 	// If another goroutine is already connecting this server, don't
@@ -301,25 +329,30 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		oldConn.wg.Wait()
 	}
 
-	// Create new managed connection
-	conn := &managedConnection{
-		id:        srv.ID,
-		address:   srv.Address,
-		port:      srv.Port,
-		nickname:  m.cfg.IRC.Nickname,
-		manager:   m,
-		joinedChs: make(map[string]string),
-		status:    "connecting",
+	// Load auto-join channels before publishing the new connection in m.conns.
+	// If setup fails, we abort without exposing a half-initialized connection.
+	channels, err := m.store.GetChannelsByServer(m.ctx, srv.ID)
+	if err != nil {
+		return fmt.Errorf("loading channels for server %d: %w", srv.ID, err)
 	}
 
-	// Load auto-join channels from DB
-	channels, err := m.store.GetChannelsByServer(m.ctx, srv.ID)
-	if err == nil {
-		for _, ch := range channels {
-			if ch.AutoJoin {
-				conn.autoJoinChs = append(conn.autoJoinChs, ch.Name)
-			}
+	autoJoinChs := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		if ch.AutoJoin {
+			autoJoinChs = append(autoJoinChs, ch.Name)
 		}
+	}
+
+	// Create new managed connection
+	conn := &managedConnection{
+		id:          srv.ID,
+		address:     srv.Address,
+		port:        srv.Port,
+		nickname:    m.cfg.IRC.Nickname,
+		autoJoinChs: autoJoinChs,
+		manager:     m,
+		joinedChs:   make(map[string]string),
+		status:      "connecting",
 	}
 
 	// Insert the new connection. The connecting flag is cleaned up by the
@@ -346,6 +379,9 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 // already disconnected or removed by a concurrent call), it returns nil
 // because the desired state is already achieved.
 func (m *Manager) DisconnectServer(serverID int64) error {
+	unlockServer := m.lockServerOp(serverID)
+	defer unlockServer()
+
 	m.mu.Lock()
 	conn, ok := m.conns[serverID]
 	if ok {
