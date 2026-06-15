@@ -633,7 +633,7 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 		FallbackChannel:  channel,
 		ThrottleBytes:    0, // Use unlimited for now, can make configurable
 		WaitTime:         1,
-		ChannelJoinDelay: m.cfg.GetChannelJoinDelay(),                                     // from config: -1=random, 0=no delay, >0=fixed
+		ChannelJoinDelay: m.cfg.GetChannelJoinDelay(),                                      // from config: -1=random, 0=no delay, >0=fixed
 		Username:         m.cfg.GetNickname(), Logger: xdccirc.LoggerFunc(m.logger.Printf), // *logging.Logger has Printf, so this works
 		ProgressCallback: progressFn,
 		// When the persistent connection drops and reconnects, the xdccirc.Client

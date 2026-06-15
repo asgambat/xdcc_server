@@ -36,9 +36,9 @@ type windowEntry struct {
 // within a `window` per unique client IP.
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		entries: make(map[string]*windowEntry),
-		limit:   limit,
-		window:  window,
+		entries:   make(map[string]*windowEntry),
+		limit:     limit,
+		window:    window,
 		lastSweep: time.Now(),
 	}
 }

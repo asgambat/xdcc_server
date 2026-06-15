@@ -53,7 +53,7 @@ func (c *Client) registerHandlers() {
 
 			// Reset the reusable timer to 5s under timerMu (fix 2.20): the
 			// timer is shared between this handler goroutine and the download
-			// goroutine (resetForPack), so all accesses must be serialised.
+			// goroutine (resetForPack), so all accesses must be serialized.
 			// Capture the channel inside the lock so the goroutine below uses
 			// a stable reference even if the timer is later reset/replaced.
 			c.conn.timerMu.Lock()
@@ -184,7 +184,7 @@ func (c *Client) registerHandlers() {
 			if flags.needsJoin {
 				// New channel: reset the fallback timer to 5s from now
 				// so XDCC is sent 5s after JOIN confirmation.
-				// Acquire timerMu (fix 2.20) to synchronise with resetForPack
+				// Acquire timerMu (fix 2.20) to synchronize with resetForPack
 				// and the RPL_ENDOFWHOIS handler which also touch the timer.
 				c.infof("New channel joined, waiting 5s before XDCC request")
 				c.conn.timerMu.Lock()

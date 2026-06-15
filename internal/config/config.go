@@ -939,7 +939,7 @@ func (c *Config) GetLogPrivateMessages() bool {
 }
 
 // GetMessageRateLimit returns the rate limit and window for message sending.
-func (c *Config) GetMessageRateLimit() (limit int, windowSec int) {
+func (c *Config) GetMessageRateLimit() (limit, windowSec int) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.IRC.MessageRateLimit, c.IRC.MessageRateWindowSec
@@ -997,10 +997,19 @@ func (c *Config) GetMaxRateBPS() int64 {
 // Clone returns a deep copy of all data fields of c. The mutex fields are not
 // copied — the returned Config starts with zero-value (unlocked) mutexes.
 // Use Clone to take a safe, read-locked snapshot of the live config.
-func (c *Config) Clone() Config {
+// Returns a pointer so callers do not implicitly copy the embedded mutex.
+func (c *Config) Clone() *Config {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := Config{
+	return c.cloneLocked()
+}
+
+// cloneLocked returns a deep copy of c's data fields. The mutex fields are
+// not copied — the returned Config has zero-value (unlocked) mutexes.
+// Callers must hold c.mu (read or write) before calling this method; it does
+// not acquire any lock on its own.
+func (c *Config) cloneLocked() *Config {
+	out := &Config{
 		IRC:       c.IRC,
 		HTTP:      c.HTTP,
 		Security:  c.Security,
@@ -1055,10 +1064,49 @@ func (c *Config) Clone() Config {
 	return out
 }
 
+// SnapshotAndApply atomically captures the current config state, passes a
+// deep copy of that snapshot to fn for mutation, and installs the mutated
+// snapshot as the new live config (via Replace, which takes the write lock).
+//
+// The returned *Config is the PRE-mutation snapshot — the same value the
+// caller can use as the "old" side of a diff when calling ApplyPartial to
+// persist only changed fields to disk:
+//
+//	old := a.Config.SnapshotAndApply(func(snap *Config) {
+//	    snap.UI.Theme = "dark"
+//	})
+//	a.Config.ApplyPartial(path, old) // diff(old, live) = theme change only
+//
+// This helper closes the TOCTOU window that opens if a handler calls Clone()
+// twice — once for the diff's "old" side and once to build the new value —
+// because a concurrent Replace could land between the two Clones and
+// silently widen the persisted diff to include unrelated changes. The two
+// clones here are taken under a single RLock, so they always see the same
+// pre-mutation state.
+//
+// fn must not call back into c (e.g. via c.Clone or c.Replace) — it should
+// only mutate the passed *Config value.
+func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
+	c.mu.RLock()
+	old := c.cloneLocked()
+	// Second clone under the same RLock: ensures `old` and `post` share the
+	// exact same pre-mutation state, so the diff computed later is
+	// strictly the user's intended mutation.
+	post := c.cloneLocked()
+	c.mu.RUnlock()
+
+	if fn != nil {
+		fn(post)
+	}
+	c.Replace(post)
+	return old
+}
+
 // Replace atomically replaces all data fields of c with those from other.
 // The mutex fields of c are preserved. other must be a local (non-shared) Config value
-// built in a single goroutine before calling Replace.
-func (c *Config) Replace(other Config) {
+// built in a single goroutine before calling Replace. It is passed by pointer
+// to avoid copying the embedded mutex when calling.
+func (c *Config) Replace(other *Config) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.IRC = other.IRC

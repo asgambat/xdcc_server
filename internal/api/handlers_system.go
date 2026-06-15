@@ -62,9 +62,9 @@ func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return a copy of the config with the admin token redacted.
-	cfg := *a.Config
+	cfg := a.Config.Clone()
 	cfg.Security.AdminToken = "***REDACTED***"
-	writeJSON(w, http.StatusOK, &cfg)
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // handleGetConfigRaw reads and returns the raw config.yaml file content
@@ -231,13 +231,22 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Preserve the admin token from the live config.
-		snapshotForToken := a.Config.Clone()
-		newCfg.Security.AdminToken = snapshotForToken.Security.AdminToken
-
-		// Update in-memory config atomically via Replace to avoid racing
-		// with concurrent reads (e.g. ircmanager, queue goroutines).
-		a.Config.Replace(newCfg)
+		// SnapshotAndApply atomically captures the live config (so we can
+		// preserve the admin token), lets us overlay the parsed newCfg onto
+		// the snapshot, and installs the result via Replace — all under a
+		// single RLock. The returned pre-snapshot is intentionally unused
+		// here because SaveRaw writes the raw body bytes verbatim and does
+		// not need a diff.
+		a.Config.SnapshotAndApply(func(snap *config.Config) {
+			// Always preserve the live admin token: the raw YAML editor
+			// round-trips with the redacted placeholder, so a user-supplied
+			// token would always be the redacted one.
+			newCfg.Security.AdminToken = snap.Security.AdminToken
+			// Use snap.Replace (field-by-field copy) instead of *snap = newCfg
+			// to avoid copying snap's embedded sync.RWMutex, which would be
+			// flagged by `go vet` as "copies lock value".
+			snap.Replace(&newCfg)
+		})
 
 		// Sync rate limiter with new config values.
 		a.syncMsgRateLimiter()
@@ -264,31 +273,37 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Protect the admin token: if the client sent the redacted placeholder
-	// (which happens when the Advanced tab loads raw YAML and saves it back),
-	// preserve the live token so it isn't overwritten.
-	oldCfg := a.Config.Clone()
-	if newCfg.Security.AdminToken == "" || newCfg.Security.AdminToken == "***REDACTED***" {
-		newCfg.Security.AdminToken = oldCfg.Security.AdminToken
-	}
-
-	// Validate the new config before applying or persisting.
+	// Validate the new config before applying or persisting. Validation
+	// runs before SnapshotAndApply so a failure leaves the live config
+	// untouched (Validate does not depend on the live admin token).
 	if err := newCfg.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
 			fmt.Sprintf("config validation failed: %v", err))
 		return
 	}
 
-	// Update in-memory config atomically via Replace to avoid racing
-	// with concurrent reads (e.g. ircmanager, queue goroutines).
-	a.Config.Replace(newCfg)
+	// SnapshotAndApply atomically captures the live config (so we can
+	// preserve the admin token when the client sent the redacted placeholder
+	// or left the field empty), overlays the validated newCfg onto the
+	// snapshot, and installs the result via Replace — all under a single
+	// RLock. The returned pre-snapshot is used as the "old" side of the
+	// diff computed by ApplyPartial.
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		if newCfg.Security.AdminToken == "" || newCfg.Security.AdminToken == "***REDACTED***" {
+			newCfg.Security.AdminToken = snap.Security.AdminToken
+		}
+		// Use snap.Replace (field-by-field copy) instead of *snap = newCfg
+		// to avoid copying snap's embedded sync.RWMutex, which would be
+		// flagged by `go vet` as "copies lock value".
+		snap.Replace(&newCfg)
+	})
 
 	// Sync rate limiter with new config values.
 	a.syncMsgRateLimiter()
 
 	// Persist using partial update to preserve comments & formatting.
 	if a.ConfigPath != "" {
-		if err := a.Config.ApplyPartial(a.ConfigPath, &oldCfg); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving config to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("config updated in memory but failed to persist: %v", err))
@@ -320,18 +335,18 @@ func (a *API) handleUpdateTheme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Snapshot old config for partial save and build the updated config.
-	oldCfg := a.Config.Clone()
-	newCfg := oldCfg
-	newCfg.UI.Theme = body.Theme
-
-	// Update in-memory config atomically via Replace to avoid racing
-	// with concurrent reads (e.g. ircmanager, queue goroutines).
-	a.Config.Replace(newCfg)
+	// SnapshotAndApply atomically captures the pre-mutation state and installs
+	// the post-mutation state under a single RLock, returning the pre-snapshot
+	// (oldCfg) for use as the "old" side of the diff when persisting.
+	// This closes the TOCTOU window that would open if we called Clone() twice
+	// (once for oldCfg, once for the new value).
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		snap.UI.Theme = body.Theme
+	})
 
 	// Persist only the theme change to disk using partial update.
 	if a.ConfigPath != "" {
-		if err := a.Config.ApplyPartial(a.ConfigPath, &oldCfg); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving theme to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("theme updated in memory but failed to persist: %v", err))
@@ -452,7 +467,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"disk_free_bytes":   diskFreeBytes,
 		"disk_total_bytes":  diskTotalBytes,
 		"token_ttl_minutes": a.Config.GetTokenTTLMinutes(),
-		"ui_theme":          a.Config.GetUITheme(),              // public — used by frontend for initial theme
+		"ui_theme":          a.Config.GetUITheme(),           // public — used by frontend for initial theme
 		"messages_enabled":  a.Config.GetEnableMessageSend(), // public — used by frontend to show/hide send button
 	})
 }
