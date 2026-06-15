@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/lrstanley/girc"
 )
 
 // TestRandIntRange_InRange verifies that randIntRange(min, max) always
@@ -84,4 +86,32 @@ func TestSendChannelGreeting_CancelledByContext(t *testing.T) {
 
 	// Give the goroutine a moment to exit via the cancelled context.
 	time.Sleep(50 * time.Millisecond)
+}
+
+func TestActiveGreetingClient_ValidatesStateAndPointer(t *testing.T) {
+	t.Parallel()
+
+	current := &girc.Client{}
+	other := &girc.Client{}
+
+	mc := &managedConnection{
+		status: "connected",
+		irc:    current,
+	}
+
+	if got := mc.activeGreetingClient(current); got != current {
+		t.Fatal("expected activeGreetingClient to return the current client when state is connected")
+	}
+
+	if got := mc.activeGreetingClient(other); got != nil {
+		t.Fatal("expected nil when expected client pointer does not match")
+	}
+
+	mc.mu.Lock()
+	mc.status = "disconnected"
+	mc.mu.Unlock()
+
+	if got := mc.activeGreetingClient(current); got != nil {
+		t.Fatal("expected nil when connection status is not connected")
+	}
 }

@@ -48,7 +48,6 @@ type Manager struct {
 	serverOps map[int64]*sync.Mutex
 
 	conns      map[int64]*managedConnection
-	connecting map[int64]struct{} // servers currently being connected
 	subscriber *pubsub.Hub[Event]
 
 	// chlog writes per-channel PRIVMSG/NOTICE traffic to disk when the
@@ -71,7 +70,6 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 		logger:     logger,
 		serverOps:  make(map[int64]*sync.Mutex),
 		conns:      make(map[int64]*managedConnection),
-		connecting: make(map[int64]struct{}),
 		subscriber: pubsub.New[Event](256),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -296,24 +294,9 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		}
 	}
 
-	// If another goroutine is already connecting this server, don't
-	// create a duplicate. This prevents the race condition where two
-	// callers both see a stale connection and both try to reconnect.
-	if _, connecting := m.connecting[srv.ID]; connecting {
-		m.mu.Unlock()
-		return nil
-	}
-
-	// Mark as connecting to prevent other goroutines from creating
-	// a duplicate connection for the same serverID.
-	m.connecting[srv.ID] = struct{}{}
-	defer func() {
-		m.mu.Lock()
-		delete(m.connecting, srv.ID)
-		m.mu.Unlock()
-	}()
-
 	// Grab the old connection (if any) for cleanup outside the lock.
+	// The per-server lock (lockServerOp) already prevents concurrent
+	// ConnectServer/DisconnectServer for the same server ID.
 	var oldConn *managedConnection
 	if existing, ok := m.conns[srv.ID]; ok {
 		oldConn = existing
@@ -355,8 +338,12 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		status:      "connecting",
 	}
 
-	// Insert the new connection. The connecting flag is cleaned up by the
-	// defer registered above, which runs atomically after this function returns.
+	// Initialize context and WaitGroup BEFORE inserting in m.conns so
+	// that no other goroutine can observe a connection with nil ctx/cancel.
+	conn.ctx, conn.cancel = context.WithCancel(m.ctx)
+	conn.wg.Add(1)
+
+	// Insert the new connection — fully initialized and ready to run.
 	m.mu.Lock()
 	m.conns[srv.ID] = conn
 	m.mu.Unlock()
@@ -367,8 +354,6 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 	}
 
 	// Start connection in background
-	conn.ctx, conn.cancel = context.WithCancel(m.ctx)
-	conn.wg.Add(1)
 	go conn.run()
 
 	return nil
@@ -411,22 +396,31 @@ func (m *Manager) DisconnectServer(serverID int64) error {
 		close(done)
 	}()
 
+	gracefulShutdown := false
+
 	// Use select with timeout for visibility
 	select {
 	case <-done:
 		m.logger.Infof("server %d disconnected cleanly", serverID)
-		return nil
+		gracefulShutdown = true
 	case <-time.After(5 * time.Second):
 		m.logger.Warnf("server %d shutdown taking longer than expected, still waiting...", serverID)
 	}
 
-	// Second phase: wait up to 10 more seconds (15s total)
-	select {
-	case <-done:
-		m.logger.Infof("server %d shutdown completed after delay", serverID)
-	case <-time.After(10 * time.Second):
-		m.logger.Errorf("server %d shutdown exceeded 15s, giving up (goroutine leak likely)", serverID)
-		return fmt.Errorf("server %d shutdown timeout after 15s", serverID)
+	if !gracefulShutdown {
+		// Second phase: wait up to 10 more seconds (15s total)
+		select {
+		case <-done:
+			m.logger.Infof("server %d shutdown completed after delay", serverID)
+		case <-time.After(10 * time.Second):
+			// Avoid false-positive timeout errors if run() already stopped right
+			// after the timeout fired.
+			if conn.IsRunning() {
+				m.logger.Errorf("server %d shutdown exceeded 15s and run() is still active", serverID)
+				return fmt.Errorf("server %d shutdown timeout after 15s (run goroutine still active)", serverID)
+			}
+			m.logger.Warnf("server %d shutdown exceeded 15s wait budget, but run() already stopped", serverID)
+		}
 	}
 
 	if err := m.store.SetServerStatus(m.ctx, serverID, "disconnected"); err != nil {
@@ -830,6 +824,42 @@ func (mc *managedConnection) setStatus(s string) {
 	mc.mu.Unlock()
 }
 
+// closeTrackedClient clears mc.irc under lock and closes the tracked client.
+// If no tracked client exists, it closes fallback (if provided).
+func (mc *managedConnection) closeTrackedClient(fallback *girc.Client, reason string) {
+	mc.mu.Lock()
+	tracked := mc.irc
+	mc.irc = nil
+	mc.mu.Unlock()
+
+	if tracked != nil {
+		if mc.manager != nil && mc.manager.logger != nil && reason != "" {
+			mc.manager.logger.Infof("closing IRC client for server %d (%s)", mc.id, reason)
+		}
+		tracked.Close()
+		return
+	}
+
+	if fallback != nil {
+		if mc.manager != nil && mc.manager.logger != nil && reason != "" {
+			mc.manager.logger.Infof("closing IRC client for server %d (%s)", mc.id, reason)
+		}
+		fallback.Close()
+	}
+}
+
+// activeGreetingClient returns the current IRC client only if it still matches
+// the expected pointer and the connection is live.
+func (mc *managedConnection) activeGreetingClient(expected *girc.Client) *girc.Client {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if expected == nil || mc.status != "connected" || mc.irc == nil || mc.irc != expected {
+		return nil
+	}
+	return mc.irc
+}
+
 // connectResult represents the outcome of a connection attempt.
 type connectResult int
 
@@ -867,15 +897,8 @@ func (mc *managedConnection) run() {
 			mc.setStatus("error")
 			_ = mc.manager.store.SetServerStatus(context.Background(), mc.id, "error")
 
-			// Clean up IRC client resources to prevent goroutine/channel
-			// leaks. If the panic happened inside connect(), there may be
-			// a girc.Client with active handlers and spawned goroutines.
-			mc.mu.RLock()
-			if mc.irc != nil {
-				mc.manager.logger.Infof("closing IRC client for server %d after panic", mc.id)
-				mc.irc.Close()
-			}
-			mc.mu.RUnlock()
+			// Clean up IRC client resources to prevent goroutine/channel leaks.
+			mc.closeTrackedClient(nil, "panic recovery")
 		}
 	}()
 
@@ -1154,7 +1177,7 @@ func (mc *managedConnection) connect() connectResult {
 	// Phase 1: Wait for CONNECTED event or immediate failure
 	select {
 	case <-mc.ctx.Done():
-		client.Close()
+		mc.closeTrackedClient(client, "context cancelled during connect")
 		// Drain with timeout to prevent indefinite blocking
 		select {
 		case <-disconnected:
@@ -1178,7 +1201,7 @@ func (mc *managedConnection) connect() connectResult {
 	select {
 	case <-mc.ctx.Done():
 		// Explicit disconnect requested — send QUIT, close, then drain with timeout
-		client.Close()
+		mc.closeTrackedClient(client, "explicit disconnect")
 		// Drain with timeout to prevent indefinite blocking
 		select {
 		case <-disconnected:
@@ -1248,28 +1271,60 @@ func (mc *managedConnection) disconnect() {
 // with a short polling fallback. Returns true if connected within the
 // timeout, false otherwise.
 func (mc *managedConnection) waitConnected(timeout time.Duration) bool {
-	mc.mu.RLock()
-	ch := mc.connectedCh
-	mc.mu.RUnlock()
+	deadline := time.Now().Add(timeout)
 
-	if ch != nil {
+	for {
+		mc.mu.RLock()
+		ch := mc.connectedCh
+		ready := mc.status == "connected" && mc.irc != nil
+		mc.mu.RUnlock()
+
+		if ready {
+			return true
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+
+		if ch == nil {
+			sleepFor := waitConnectedPollInterval
+			if remaining < sleepFor {
+				sleepFor = remaining
+			}
+			time.Sleep(sleepFor)
+			continue
+		}
+
+		timer := time.NewTimer(remaining)
 		select {
 		case <-ch:
-			return mc.Status() == "connected"
-		case <-time.After(timeout):
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+
+			mc.mu.RLock()
+			readyAfterSignal := mc.status == "connected" && mc.irc != nil
+			sameSignal := mc.connectedCh == ch
+			mc.mu.RUnlock()
+			if readyAfterSignal {
+				return true
+			}
+			if sameSignal {
+				sleepFor := waitConnectedPollInterval
+				if remaining < sleepFor {
+					sleepFor = remaining
+				}
+				time.Sleep(sleepFor)
+			}
+		case <-timer.C:
 			return false
 		}
 	}
-
-	// Fallback: connectedCh not yet populated, poll briefly
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if mc.Status() == "connected" {
-			return true
-		}
-		time.Sleep(waitConnectedPollInterval)
-	}
-	return false
 }
 
 // sendChannelMsg sends a PRIVMSG to the given channel via the girc client
@@ -1330,8 +1385,14 @@ func (mc *managedConnection) sendChannelGreeting(cl *girc.Client, channel string
 		default:
 		}
 
+		sendClient := mc.activeGreetingClient(cl)
+		if sendClient == nil {
+			// The connection changed or dropped while waiting.
+			return
+		}
+
 		mc.manager.logger.Infof("sending greeting to %s on %s: %q", channel, mc.address, greeting)
-		mc.sendChannelMsg(cl, channel, greeting)
+		mc.sendChannelMsg(sendClient, channel, greeting)
 	}()
 }
 

@@ -459,14 +459,10 @@ func TestConnectServer_SetupFailure_DoesNotTrackConnection(t *testing.T) {
 
 	mgr.mu.RLock()
 	_, tracked := mgr.conns[srvID]
-	_, connecting := mgr.connecting[srvID]
 	mgr.mu.RUnlock()
 
 	if tracked {
 		t.Fatalf("server %d should not remain tracked after setup failure", srvID)
-	}
-	if connecting {
-		t.Fatalf("server %d should not remain in connecting set after setup failure", srvID)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 
 	"xdcc_server/internal/config"
 	"xdcc_server/internal/logging"
+
+	"github.com/lrstanley/girc"
 )
 
 // ===========================================================================
@@ -113,4 +115,68 @@ func TestConnectionLifecycle_PanicRecovery(t *testing.T) {
 	// This test would require injecting a panic into connect()
 	// For now, we document that panic recovery exists in run()
 	t.Skip("Requires mock IRC client that can panic on demand")
+}
+
+func TestWaitConnected_RequiresConnectedStatusAndClient(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan struct{})
+	close(ch)
+
+	mc := &managedConnection{
+		status:      "connected",
+		connectedCh: ch,
+	}
+
+	if mc.waitConnected(20 * time.Millisecond) {
+		t.Fatal("expected waitConnected=false when irc client is nil")
+	}
+
+	mc.mu.Lock()
+	mc.irc = &girc.Client{}
+	mc.mu.Unlock()
+
+	if !mc.waitConnected(20 * time.Millisecond) {
+		t.Fatal("expected waitConnected=true when status is connected and irc client is set")
+	}
+}
+
+func TestWaitConnected_ChannelRotationAfterFirstClose(t *testing.T) {
+	t.Parallel()
+
+	first := make(chan struct{})
+	close(first)
+
+	mc := &managedConnection{
+		status:      "connecting",
+		connectedCh: first,
+	}
+
+	resultCh := make(chan bool, 1)
+	go func() {
+		resultCh <- mc.waitConnected(300 * time.Millisecond)
+	}()
+
+	// Simulate a reconnect attempt that publishes a new connected channel.
+	time.Sleep(20 * time.Millisecond)
+	second := make(chan struct{})
+	mc.mu.Lock()
+	mc.connectedCh = second
+	mc.mu.Unlock()
+
+	time.Sleep(20 * time.Millisecond)
+	mc.mu.Lock()
+	mc.status = "connected"
+	mc.irc = &girc.Client{}
+	close(second)
+	mc.mu.Unlock()
+
+	select {
+	case ok := <-resultCh:
+		if !ok {
+			t.Fatal("expected waitConnected=true after channel rotation and live connected state")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for waitConnected result")
+	}
 }
