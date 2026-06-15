@@ -521,11 +521,9 @@ func (c *Client) currentPack() *entities.XDCCPack {
 	return c.packs[idx]
 }
 
-// stopWhoisFallbackTimer safely stops the reusable WHOIS fallback timer and
-// drains its channel so the next reset does not immediately read a stale value.
-// This is safe to call even if the timer has never been created or has already
-// fired. It is called from resetForPack() between packs.
-func (c *Client) stopWhoisFallbackTimer() {
+// stopWhoisFallbackTimerUnlocked stops and drains the reusable WHOIS fallback
+// timer. Callers MUST hold c.conn.timerMu before calling this method.
+func (c *Client) stopWhoisFallbackTimerUnlocked() {
 	if c.conn.whoisFallbackTimer == nil {
 		return
 	}
@@ -563,7 +561,7 @@ func (c *Client) resetForPack() {
 	// Stop the WHOIS fallback timer from the previous pack and drain its
 	// channel so it can be safely reused in the next pack.
 	c.conn.timerMu.Lock()
-	c.stopWhoisFallbackTimer()
+	c.stopWhoisFallbackTimerUnlocked()
 	c.conn.timerMu.Unlock()
 
 	// Allocate a fresh packState per pack so that sync.Once instances are

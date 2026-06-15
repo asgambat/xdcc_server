@@ -60,7 +60,7 @@ func (c *Client) registerHandlers() {
 			if c.conn.whoisFallbackTimer == nil {
 				c.conn.whoisFallbackTimer = time.NewTimer(5 * time.Second)
 			} else {
-				c.stopWhoisFallbackTimer()
+				c.stopWhoisFallbackTimerUnlocked()
 				c.conn.whoisFallbackTimer.Reset(5 * time.Second)
 			}
 			timerC := c.conn.whoisFallbackTimer.C
@@ -189,7 +189,7 @@ func (c *Client) registerHandlers() {
 				c.infof("New channel joined, waiting 5s before XDCC request")
 				c.conn.timerMu.Lock()
 				if c.conn.whoisFallbackTimer != nil {
-					c.stopWhoisFallbackTimer()
+					c.stopWhoisFallbackTimerUnlocked()
 					c.conn.whoisFallbackTimer.Reset(5 * time.Second)
 				}
 				c.conn.timerMu.Unlock()
