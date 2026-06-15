@@ -170,8 +170,8 @@ func (qm *Manager) Start() error {
 	// cleanly shut it down even during the startup delay.
 	go qm.monitorLoop()
 
-	if qm.cfg.Download.StartupDelayMinutes > 0 {
-		delay := time.Duration(qm.cfg.Download.StartupDelayMinutes) * time.Minute
+	if dlCfg := qm.cfg.GetDownloadConfig(); dlCfg.StartupDelayMinutes > 0 {
+		delay := time.Duration(dlCfg.StartupDelayMinutes) * time.Minute
 		qm.log.Infof("queue manager: delaying dispatch by %v to allow IRC connections to establish", delay)
 		qm.startupTimer = time.AfterFunc(delay, func() {
 			close(qm.startupReady)
@@ -323,9 +323,10 @@ func (qm *Manager) Enqueue(d store.DownloadRecord) (int64, error) {
 	if qm.diskMon != nil {
 		_, _, low, err := qm.diskMon.Check()
 		if err == nil && low {
+			minDisk := qm.cfg.GetDownloadConfig().MinDiskSpace
 			return 0, fmt.Errorf("insufficient disk space: %s available, need %s",
-				diskmon.FormatBytes(qm.cfg.Download.MinDiskSpace),
-				diskmon.FormatBytes(qm.cfg.Download.MinDiskSpace))
+				diskmon.FormatBytes(minDisk),
+				diskmon.FormatBytes(minDisk))
 		}
 	}
 
@@ -567,7 +568,7 @@ func (qm *Manager) tryDispatch() {
 		}
 	}
 
-	maxParallel := qm.cfg.Download.MaxParallelTotal
+	maxParallel := qm.cfg.GetDownloadConfig().MaxParallelTotal
 	if maxParallel < 1 {
 		maxParallel = 5
 	}
@@ -708,7 +709,7 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 	pack := entities.NewXDCCPack(server, d.Bot, packNumber)
 	pack.SetFilename(d.Filename, true)
 	pack.SetSize(d.FileSize)
-	pack.SetDirectory(qm.cfg.Download.TempDir)
+	pack.SetDirectory(qm.cfg.GetDownloadConfig().TempDir)
 
 	// metadataEmitted and startTime are intentionally confined to this worker
 	// closure. Today runDownload invokes progressFn/completeFn in a single
@@ -723,14 +724,16 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 	// the DCC data transfer time is measured (excluding WHOIS/JOIN/XDCC).
 	var startTime time.Time
 
-	// Prepare worker config
+	// Prepare worker config — snapshot download config once to avoid repeated
+	// locking and ensure consistent values throughout the download.
+	dlSnap := qm.cfg.GetDownloadConfig()
 	wCfg := DownloadConfig{
-		TempDir:          qm.cfg.Download.TempDir,
-		DestDir:          qm.cfg.Download.DestDir,
-		ConflictPolicy:   qm.cfg.Download.ConflictPolicy,
-		MaxRateBPS:       qm.cfg.Download.MaxRateBPS,
-		Nickname:         qm.cfg.IRC.Nickname,
-		ChannelJoinDelay: qm.cfg.Download.ChannelJoinDelay, // from config: -1=random, 0=no delay, >0=fixed
+		TempDir:          dlSnap.TempDir,
+		DestDir:          dlSnap.DestDir,
+		ConflictPolicy:   dlSnap.ConflictPolicy,
+		MaxRateBPS:       dlSnap.MaxRateBPS,
+		Nickname:         qm.cfg.GetNickname(),
+		ChannelJoinDelay: dlSnap.ChannelJoinDelay, // from config: -1=random, 0=no delay, >0=fixed
 		Logger:           qm.log,
 		IRCManager:       qm.ircMgr, // Pass IRC Manager for persistent connections
 	}
@@ -1006,7 +1009,7 @@ func (qm *Manager) removeActiveJobLocked(downloadID int64) (context.CancelFunc, 
 //   - No auto-retry if mode is "suggest_only"
 //   - Clear tracking of fallback reason in log
 func (qm *Manager) handleFallback(original store.DownloadRecord, result workerResult) {
-	mode := qm.cfg.Download.FailFallback
+	mode := qm.cfg.GetDownloadConfig().FailFallback
 	if mode != "auto_retry_best" {
 		qm.log.Errorf("fallback: download %d failed, mode is %q (no auto-retry); suggestion: consider alternative pack for %q",
 			original.ID, mode, original.Filename)
@@ -1029,7 +1032,7 @@ func (qm *Manager) handleFallback(original store.DownloadRecord, result workerRe
 	}
 
 	// Check max retry attempts guardrail
-	maxRetries := qm.cfg.Download.MaxRetryAttempts
+	maxRetries := qm.cfg.GetDownloadConfig().MaxRetryAttempts
 	if maxRetries < 1 {
 		maxRetries = 3
 	}
@@ -1081,5 +1084,5 @@ func (qm *Manager) handleFallback(original store.DownloadRecord, result workerRe
 // This respects time-based bandwidth profiles (quiet hours).
 // For now, it returns the configured max_rate_bps directly.
 func (qm *Manager) GetEffectiveMaxRate() int64 {
-	return qm.cfg.Download.MaxRateBPS
+	return qm.cfg.GetMaxRateBPS()
 }

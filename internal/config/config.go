@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -101,6 +102,11 @@ type Config struct {
 	UI            UIConfig             `yaml:"ui"             json:"ui"`
 	Profiling     ProfilingConfig      `yaml:"profiling"      json:"profiling"`
 	Notifications []NotificationConfig `yaml:"notifications"  json:"notifications"`
+
+	// mu guards concurrent reads and writes of all data fields.
+	// fileMu serializes on-disk write operations (Save, SaveRaw, ApplyPartial).
+	mu     sync.RWMutex
+	fileMu sync.Mutex
 }
 
 type IRCConfig struct {
@@ -845,6 +851,8 @@ const DefaultGreeting = "hello everybody"
 // selection uses crypto/rand to be safe even when called concurrently from
 // many goroutines (e.g. when multiple channels are joined simultaneously).
 func (c *Config) PickGreeting() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if len(c.IRC.Greetings) == 0 {
 		return DefaultGreeting
 	}
@@ -862,6 +870,8 @@ func (c *Config) PickGreeting() string {
 // is normalized (lowercase, # prefix). Blacklisted channels are never
 // joined, not even manually or via WHOIS discovery.
 func (c *Config) IsChannelBlacklisted(channel string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	ch := normalizeChannelName(channel)
 	if ch == "" {
 		return false
@@ -880,6 +890,8 @@ func (c *Config) IsChannelBlacklisted(channel string) bool {
 // The check is case-insensitive and normalizes the channel name (lowercase,
 // leading '#'). Returns false when the list is empty (default — no logging).
 func (c *Config) IsChannelLogged(channel string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if len(c.IRC.ChannelLog) == 0 {
 		return false
 	}
@@ -901,6 +913,167 @@ func (c *Config) ParseCleanupInterval() (time.Duration, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Thread-safe accessors for scalar fields read by concurrent goroutines.
+// These acquire mu.RLock internally so callers don't need external locking.
+// ---------------------------------------------------------------------------
+
+// GetNickname returns the configured IRC nickname.
+func (c *Config) GetNickname() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.Nickname
+}
+
+// GetEnableMessageSend returns whether IRC message sending is enabled.
+func (c *Config) GetEnableMessageSend() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.EnableMessageSend
+}
+
+// GetLogPrivateMessages returns whether private message logging is enabled.
+func (c *Config) GetLogPrivateMessages() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.LogPrivateMessages
+}
+
+// GetMessageRateLimit returns the rate limit and window for message sending.
+func (c *Config) GetMessageRateLimit() (limit int, windowSec int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.MessageRateLimit, c.IRC.MessageRateWindowSec
+}
+
+// GetTrustProxy returns whether X-Forwarded-For is trusted.
+func (c *Config) GetTrustProxy() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.HTTP.TrustProxy
+}
+
+// GetDownloadConfig returns a copy of the download configuration.
+func (c *Config) GetDownloadConfig() DownloadConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download
+}
+
+// GetTokenTTLMinutes returns the security token TTL.
+func (c *Config) GetTokenTTLMinutes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Security.TokenTTLMinutes
+}
+
+// GetUITheme returns the current UI theme.
+func (c *Config) GetUITheme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.Theme
+}
+
+// GetSetupCompleted returns whether setup has been completed.
+func (c *Config) GetSetupCompleted() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.SetupCompleted
+}
+
+// GetChannelJoinDelay returns the channel join delay setting.
+func (c *Config) GetChannelJoinDelay() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.ChannelJoinDelay
+}
+
+// GetMaxRateBPS returns the download rate limit in bytes per second.
+func (c *Config) GetMaxRateBPS() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxRateBPS
+}
+
+// Clone returns a deep copy of all data fields of c. The mutex fields are not
+// copied — the returned Config starts with zero-value (unlocked) mutexes.
+// Use Clone to take a safe, read-locked snapshot of the live config.
+func (c *Config) Clone() Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := Config{
+		IRC:       c.IRC,
+		HTTP:      c.HTTP,
+		Security:  c.Security,
+		Download:  c.Download,
+		Search:    c.Search,
+		Storage:   c.Storage,
+		Logging:   c.Logging,
+		UI:        c.UI,
+		Profiling: c.Profiling,
+	}
+	// Deep-copy slice fields to prevent sharing underlying arrays.
+	if c.Notifications != nil {
+		out.Notifications = make([]NotificationConfig, len(c.Notifications))
+		for i, n := range c.Notifications {
+			out.Notifications[i] = n
+			if n.Events != nil {
+				out.Notifications[i].Events = make([]string, len(n.Events))
+				copy(out.Notifications[i].Events, n.Events)
+			}
+		}
+	}
+	if c.IRC.Greetings != nil {
+		out.IRC.Greetings = make([]string, len(c.IRC.Greetings))
+		copy(out.IRC.Greetings, c.IRC.Greetings)
+	}
+	if c.IRC.ChannelBlacklist != nil {
+		out.IRC.ChannelBlacklist = make([]string, len(c.IRC.ChannelBlacklist))
+		copy(out.IRC.ChannelBlacklist, c.IRC.ChannelBlacklist)
+	}
+	if c.IRC.ChannelLog != nil {
+		out.IRC.ChannelLog = make([]string, len(c.IRC.ChannelLog))
+		copy(out.IRC.ChannelLog, c.IRC.ChannelLog)
+	}
+	if c.IRC.DefaultServers != nil {
+		out.IRC.DefaultServers = make([]ServerConfig, len(c.IRC.DefaultServers))
+		for i, s := range c.IRC.DefaultServers {
+			out.IRC.DefaultServers[i] = s
+			if s.Channels != nil {
+				out.IRC.DefaultServers[i].Channels = make([]ChannelConfig, len(s.Channels))
+				copy(out.IRC.DefaultServers[i].Channels, s.Channels)
+			}
+		}
+	}
+	if c.HTTP.CORSOrigins != nil {
+		out.HTTP.CORSOrigins = make([]string, len(c.HTTP.CORSOrigins))
+		copy(out.HTTP.CORSOrigins, c.HTTP.CORSOrigins)
+	}
+	if c.Search.EnabledProviders != nil {
+		out.Search.EnabledProviders = make([]string, len(c.Search.EnabledProviders))
+		copy(out.Search.EnabledProviders, c.Search.EnabledProviders)
+	}
+	return out
+}
+
+// Replace atomically replaces all data fields of c with those from other.
+// The mutex fields of c are preserved. other must be a local (non-shared) Config value
+// built in a single goroutine before calling Replace.
+func (c *Config) Replace(other Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.IRC = other.IRC
+	c.HTTP = other.HTTP
+	c.Security = other.Security
+	c.Download = other.Download
+	c.Search = other.Search
+	c.Storage = other.Storage
+	c.Logging = other.Logging
+	c.UI = other.UI
+	c.Profiling = other.Profiling
+	c.Notifications = other.Notifications
+}
+
+// ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
@@ -908,7 +1081,16 @@ func (c *Config) ParseCleanupInterval() (time.Duration, error) {
 // comments and formatting from the Advanced YAML editor. A .bak backup of the
 // existing file is created before overwriting. The bytes are validated by the
 // caller before calling this method. If path is empty, returns an error.
+// Concurrent calls to SaveRaw, Save, and ApplyPartial are serialized via fileMu.
 func (c *Config) SaveRaw(path string, rawYAML []byte) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	return c.saveRawUnlocked(path, rawYAML)
+}
+
+// saveRawUnlocked is the non-locking implementation of SaveRaw.
+// Callers must hold c.fileMu before calling.
+func (c *Config) saveRawUnlocked(path string, rawYAML []byte) error {
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
@@ -957,12 +1139,25 @@ func (c *Config) SaveRaw(path string, rawYAML []byte) error {
 // Save marshals the current configuration to YAML and writes it atomically
 // to the given path. For raw byte writes (preserving comments/formatting),
 // use SaveRaw instead. If path is empty, returns an error.
+// Concurrent calls to Save, SaveRaw, and ApplyPartial are serialized via fileMu.
 func (c *Config) Save(path string) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	return c.saveUnlocked(path)
+}
+
+// saveUnlocked is the non-locking implementation of Save.
+// Callers must hold c.fileMu before calling.
+func (c *Config) saveUnlocked(path string) error {
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
+	// Marshal under RLock to prevent a concurrent Replace from racing with
+	// yaml.Marshal's reflection-based field traversal.
+	c.mu.RLock()
 	data, err := yaml.Marshal(c)
+	c.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("marshaling config to YAML: %w", err)
 	}
@@ -1037,13 +1232,21 @@ type configChange struct {
 // to the YAML node tree. This preserves all comments, formatting, and field
 // ordering in the file. For non-scalar changes (slices, nested structs) it
 // falls back to a full Save().
+// Concurrent calls to ApplyPartial, Save, and SaveRaw are serialized via fileMu.
 func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
-	// Compute the changes between old and new config.
+	// Compute the changes between old and new config under RLock so that
+	// a concurrent Replace cannot race with the reflection-based diff.
+	c.mu.RLock()
 	changes := diffConfigs(oldCfg, c)
+	c.mu.RUnlock()
+
 	if len(changes) == 0 {
 		return nil // nothing to do
 	}
@@ -1052,7 +1255,7 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 	// back to a full rewrite since we can't surgically update those.
 	for _, ch := range changes {
 		if !isScalarValue(ch.newValue) {
-			return c.Save(path)
+			return c.saveUnlocked(path)
 		}
 	}
 
@@ -1065,16 +1268,16 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		// If we can't parse as a node tree, fall back to full save.
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 
 	// Navigate to the root mapping node.
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 	rootMapping := doc.Content[0]
 	if rootMapping.Kind != yaml.MappingNode {
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 
 	// Create a backup before modifying.
@@ -1088,7 +1291,7 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 		if err := applyScalarChange(rootMapping, ch.yamlPath, ch.newValue); err != nil {
 			// If we can't apply a change (e.g. key missing in YAML), fall
 			// back to full save.
-			return c.Save(path)
+			return c.saveUnlocked(path)
 		}
 	}
 

@@ -114,8 +114,10 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 // their auto-join channels. It also connects to any servers marked auto_connect
 // in the database that are not yet managed.
 func (m *Manager) Start() error {
-	// Connect default servers from config
-	for _, sc := range m.cfg.IRC.DefaultServers {
+	// Connect default servers from config — take a snapshot to avoid
+	// racing with a concurrent config Replace from the API.
+	cfgSnap := m.cfg.Clone()
+	for _, sc := range cfgSnap.IRC.DefaultServers {
 		if !sc.AutoConnect {
 			continue
 		}
@@ -331,7 +333,7 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		id:          srv.ID,
 		address:     srv.Address,
 		port:        srv.Port,
-		nickname:    m.cfg.IRC.Nickname,
+		nickname:    m.cfg.GetNickname(),
 		autoJoinChs: autoJoinChs,
 		manager:     m,
 		joinedChs:   make(map[string]string),
@@ -631,8 +633,8 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 		FallbackChannel:  channel,
 		ThrottleBytes:    0, // Use unlimited for now, can make configurable
 		WaitTime:         1,
-		ChannelJoinDelay: m.cfg.Download.ChannelJoinDelay,                                 // from config: -1=random, 0=no delay, >0=fixed
-		Username:         m.cfg.IRC.Nickname, Logger: xdccirc.LoggerFunc(m.logger.Printf), // *logging.Logger has Printf, so this works
+		ChannelJoinDelay: m.cfg.GetChannelJoinDelay(),                                     // from config: -1=random, 0=no delay, >0=fixed
+		Username:         m.cfg.GetNickname(), Logger: xdccirc.LoggerFunc(m.logger.Printf), // *logging.Logger has Printf, so this works
 		ProgressCallback: progressFn,
 		// When the persistent connection drops and reconnects, the xdccirc.Client
 		// calls this to get the new girc.Client and re-bind its handlers.
@@ -647,7 +649,10 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 
 	// Create xdccirc.Client and attach it to the existing persistent connection
 	packSlice := []*entities.XDCCPack{pack}
-	client := xdccirc.NewClient(ctx, packSlice, opts, 1) // verbosity=1 so WHOIS/JOIN logs appear
+	client, err := xdccirc.NewClient(ctx, packSlice, opts, 1) // verbosity=1 so WHOIS/JOIN logs appear
+	if err != nil {
+		return "", err
+	}
 	client.SetExistingClient(gircClient)
 	// Remove download handlers when done to prevent accumulation on the
 	// shared girc.Client across multiple downloads on the same connection.
@@ -1481,7 +1486,7 @@ func (mc *managedConnection) registerChannelLogHandlers(cl *girc.Client) {
 	// Private message handler — logs DMs to private.log.
 	// Reads cfg.IRC.LogPrivateMessages dynamically on each event.
 	privMsgHandler := func(_ *girc.Client, e girc.Event) {
-		if !mc.manager.cfg.IRC.LogPrivateMessages {
+		if !mc.manager.cfg.GetLogPrivateMessages() {
 			return
 		}
 		if len(e.Params) == 0 {

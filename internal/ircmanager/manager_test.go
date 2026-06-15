@@ -478,7 +478,7 @@ func TestConnectDisconnect_SerializedPerServer(t *testing.T) {
 		id:        srvID,
 		address:   "irc.test.net",
 		port:      6667,
-		nickname:  mgr.cfg.IRC.Nickname,
+		nickname:  mgr.cfg.GetNickname(),
 		manager:   mgr,
 		joinedChs: make(map[string]string),
 		status:    "disconnected",

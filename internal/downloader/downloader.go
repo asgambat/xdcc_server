@@ -43,7 +43,13 @@ func DownloadPacks(ctx context.Context, packs []*entities.XDCCPack, opts Options
 	}
 
 	for _, group := range groupByServer(packs) {
-		client := xdccirc.NewClient(ctx, group, ircOpts, opts.Verbosity)
+		client, err := xdccirc.NewClient(ctx, group, ircOpts, opts.Verbosity)
+		if err != nil {
+			for _, pack := range group {
+				printResult(pack, xdccirc.PackResult{Error: err})
+			}
+			continue
+		}
 		results := client.DownloadAll()
 		for i, pack := range group {
 			printResult(pack, results[i])

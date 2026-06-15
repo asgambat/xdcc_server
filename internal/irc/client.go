@@ -63,13 +63,61 @@ type packState struct {
 	packFilename  string // discovered from bot notice before DCC SEND
 	packSize      int64  // discovered from bot notice before DCC SEND
 
-	// --- Lifecycle atomics (per-pack) ---
-	messageSent        atomic.Bool // true after XDCC request has been sent
-	whoisFoundChannels atomic.Bool // WHOIS found at least one channel
-	needsJoin          atomic.Bool // we sent a JOIN and must wait for confirmation
+	// --- Lifecycle flags (per-pack, protected by mu) ---
+	messageSent        bool // true after XDCC request has been sent
+	whoisFoundChannels bool // WHOIS found at least one channel
+	needsJoin          bool // we sent a JOIN and must wait for confirmation
 
 	// --- Stall detection ---
 	lastActivity atomic.Int64 // unix nanoseconds of last received byte
+}
+
+type packDecisionSnapshot struct {
+	messageSent        bool
+	whoisFoundChannels bool
+	needsJoin          bool
+}
+
+// snapshotDecisionFlags reads all decision flags under one lock so callers
+// can branch on a coherent per-pack snapshot.
+func (ps *packState) snapshotDecisionFlags() packDecisionSnapshot {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return packDecisionSnapshot{
+		messageSent:        ps.messageSent,
+		whoisFoundChannels: ps.whoisFoundChannels,
+		needsJoin:          ps.needsJoin,
+	}
+}
+
+func (ps *packState) setWhoisFoundChannels(found bool) {
+	ps.mu.Lock()
+	ps.whoisFoundChannels = found
+	ps.mu.Unlock()
+}
+
+func (ps *packState) setNeedsJoin(needsJoin bool) {
+	ps.mu.Lock()
+	ps.needsJoin = needsJoin
+	ps.mu.Unlock()
+}
+
+func (ps *packState) isMessageSent() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.messageSent
+}
+
+// markMessageSent returns true when the message was already marked as sent.
+// Otherwise it marks it as sent and returns false.
+func (ps *packState) markMessageSent() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.messageSent {
+		return true
+	}
+	ps.messageSent = true
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +149,10 @@ type Connection struct {
 	// Instead of spawning a new timer (via time.After) on each WHOIS response
 	// — which can accumulate goroutines in burst scenarios — we reuse a single
 	// timer per Connection. The timer is stopped and drained in resetForPack().
+	// timerMu protects whoisFallbackTimer against concurrent access from the
+	// girc handler goroutine (RPL_ENDOFWHOIS, JOIN) and the download goroutine
+	// (resetForPack). Always hold timerMu when reading or writing whoisFallbackTimer.
+	timerMu            sync.Mutex
 	whoisFallbackTimer *time.Timer
 }
 
@@ -138,7 +190,10 @@ type Client struct {
 // NewClient creates a new XDCC Client that will download all packs in order.
 // packs must all belong to the same IRC server.
 // verbosity: -1=quiet, 0=normal, 1=verbose (-v), 2=debug (-vv).
-func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOptions, verbosity int) *Client {
+func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOptions, verbosity int) (*Client, error) {
+	if len(packs) == 0 {
+		return nil, fmt.Errorf("irc.NewClient: packs must not be empty")
+	}
 	if opts.ChannelJoinDelay < 0 {
 		opts.ChannelJoinDelay = randN(6) + 5
 	}
@@ -163,7 +218,7 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 		logger:    logger,
 		conn:      &Connection{},
 		ps:        &packState{}, // non-nil so methods like SetAlreadyJoinedChannels are safe before resetForPack
-	}
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +266,9 @@ func (c *Client) SetAlreadyJoinedChannels(channels []string) {
 // DownloadAll downloads all packs sequentially, reusing the IRC connection
 // for packs on the same server. Returns one PackResult per pack.
 func (c *Client) DownloadAll() []PackResult {
+	if len(c.packs) == 0 {
+		return nil
+	}
 	c.logf("=== Starting XDCC download session ===")
 	c.logf("Server: %s:%d", c.packs[0].Server.Address, c.packs[0].Server.Port)
 	c.logf("Total packs to download: %d", len(c.packs))
@@ -456,7 +514,11 @@ func (c *Client) reconnect() error {
 // ---------------------------------------------------------------------------
 
 func (c *Client) currentPack() *entities.XDCCPack {
-	return c.packs[c.packIdxVal.Load()]
+	idx := c.packIdxVal.Load()
+	if int(idx) >= len(c.packs) {
+		panic(fmt.Sprintf("irc.Client: packIdxVal %d out of range (len=%d)", idx, len(c.packs)))
+	}
+	return c.packs[idx]
 }
 
 // stopWhoisFallbackTimer safely stops the reusable WHOIS fallback timer and
@@ -500,7 +562,9 @@ func (c *Client) resetForPack() {
 
 	// Stop the WHOIS fallback timer from the previous pack and drain its
 	// channel so it can be safely reused in the next pack.
+	c.conn.timerMu.Lock()
 	c.stopWhoisFallbackTimer()
+	c.conn.timerMu.Unlock()
 
 	// Allocate a fresh packState per pack so that sync.Once instances are
 	// independent and no stale values leak between packs.

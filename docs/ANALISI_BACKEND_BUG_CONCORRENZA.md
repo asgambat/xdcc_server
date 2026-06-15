@@ -205,30 +205,6 @@ Ma `closeOnce` deve essere un campo di `Logger` per permettere idempotenza tra i
 
 ---
 
-### 2.16 `pubsub.Hub`: `Unsubscribe` chiude il canale sotto lock, ma il publisher può già avere il riferimento
-
-**File:** `internal/pubsub/pubsub.go:39-49`, `internal/pubsub/pubsub.go:73-93`
-
-**Problema:** `Publish` acquisisce `h.mu.Lock()` e itera su `h.subscribers`. `Unsubscribe` acquisisce `h.mu.Lock()`, rimuove il canale e lo chiude. La sequenza è corretta: non può esserci send su un canale chiuso in contemporanea, perché entrambe sotto lock. **Tuttavia** `Unsubscribe` chiude il canale mentre un altro subscriber (non quello target) sta per ricevere un evento: l'ordine è serializzato dal lock, quindi nessun problema. Il vero problema è che `Subscribe` aggiunge un canale e lo ritorna. Se il chiamante non lo consuma, il buffer si riempie e gli eventi vengono droppati. Questo è documentato, ma in `ircmanager.Manager` il subscriber è un `pubsub.Hub[Event]`; `Subscribe` (riga 228) ritorna un canale e la documentazione dice "MUST consume". In `api/handlers_sse.go` probabilmente si consuma, ma se un handler non consuma, `Publish` non blocca (buono), ma l'evento va perso. Non è un bug di concorrenza, ma una perdita di eventi possibile.
-
-**Impatto:** Eventi SSE persi per subscriber lenti, stato frontend non sincronizzato.
-
-**Fix consigliata:** Utilizzare un hub SSE con eviction per subscriber lenti (come `internal/sse/hub.go`) anche per il `pubsub.Hub` interno, oppure rendere il buffer più grande e loggare quando si droppano eventi. Per ora, il commento è sufficiente; ma se l'API non consuma sempre, è un problema reale.
-
----
-
-### 2.17 `sse.Hub`: `EventsSince` calcola `oldestID` usando `h.nextID - h.bufferCount` senza considerare l'overflow di int64
-
-**File:** `internal/sse/hub.go:204-237`
-
-**Problema:** `nextID` è `int64` e incrementato da `atomic.AddInt64`. Dopo ~9.2 quintilioni di eventi, `nextID` diventa negativo. `EventsSince` non gestisce l'overflow: `oldestID` diventa negativo, `lastEventID < oldestID` può dare risultati strani, e il calcolo di `count` diventa errato. In pratica il server non raggiunge quel numero di eventi, ma è un bug teorico. Più realisticamente, se `h.nextID` è 0 all'inizio, `oldestID = 0 - 0 = 0`, e `lastEventID < 0` restituisce nil: corretto.
-
-**Impatto:** Teorico; rilevante solo per uptime estremo.
-
-**Fix consigliata:** Non necessaria a breve termine. Se si vuole correggere, usare unsigned o gestire l'overflow: se `nextID < bufferCount` allora `oldestID = 0` o restituire nil per full resync.
-
----
-
 ### 2.18 `irc.Client`: `packIdxVal` è atomic, ma `currentPack()` non ha bounds check e `c.packs` può essere vuoto
 
 **File:** `internal/irc/client.go:457-459`
@@ -249,7 +225,7 @@ Ma `closeOnce` deve essere un campo di `Logger` per permettere idempotenza tra i
 
 **Impatto:** Correlazione errata di eventi IRC a pack; download successivi possono essere completati/falliti per cause del pack precedente.
 
-**Fix consigliata:** Catturare il pack corrente all'ingresso dell'handler e passarlo alla funzione di gestione, invece di chiamare `currentPack()` ripetutamente. Per NOTICE, confrontare il mittente con `pack.Bot` catturato. In alternativa, passare un identificatore di sessione (pack index) agli handler in modo che ignorino eventi di pack precedenti.
+**Fix consigliata:** Catturare il pack corrente all'ingresso dell'handler e passarlo alla funzione di gestione, invece di chiamare `currentPack()` ripetutamente. Per NOTICE, confrontare il mittente con `pack.Bot` catturato. 
 
 ---
 
@@ -261,7 +237,7 @@ Ma `closeOnce` deve essere un campo di `Logger` per permettere idempotenza tra i
 
 **Impatto:** Race condition sul timer; potenziale invio di XDCC con ritardo errato o doppio invio.
 
-**Fix consigliata:** Sincronizzare l'accesso al timer con un mutex dedicato, oppure usare `time.AfterFunc` con `atomic.Bool` per disarmarlo. La soluzione più semplice è una `sync.Mutex` in `Connection` per proteggere il timer e il flag `messageSent`.
+**Fix consigliata:** Sincronizzare l'accesso al timer con un mutex dedicato. La soluzione più semplice è una `sync.Mutex` in `Connection` per proteggere il timer e il flag `messageSent`.
 
 ---
 
@@ -273,27 +249,7 @@ Ma `closeOnce` deve essere un campo di `Logger` per permettere idempotenza tra i
 
 **Impatto:** Decisioni logiche inconsistenti, possibile invio XDCC in condizioni non ottimali.
 
-**Fix consigliata:** Raccogliere uno snapshot dei flag in una piccola struttura sotto `c.ps.mu` (o un nuovo mutex) quando si prendono decisioni. Alternativamente, consolidare gli stati in un unico campo `state` con transizioni atomiche (es. `atomic.Int32` con enum).
-
----
-
-### 2.22 `store/sqlite.go`: `GetChannelsByServerAndName` restituisce `&ch` di una variabile locale non copiata
-
-**File:** `internal/store/sqlite.go:259-272`
-
-**Problema:** La funzione dichiara `var ch ChannelRecord`, fa `Scan` su di essa e restituisce `&ch`. In Go, `ch` è una variabile allocata sullo stack, ma il compilatore lo fa escape sullo heap. Restituire il puntatore a una variabile locale è idiomatico e sicuro. **Non è un bug**. È segnalato solo per completezza.
-
----
-
-### 2.23 `store/sqlite.go`: `GetChannelAvgSpeed` mancante — la query `UpdateChannelAvgSpeed` usa subquery non bloccata
-
-**File:** `internal/store/sqlite.go:289-299`
-
-**Problema:** `UpdateChannelAvgSpeed` aggiorna `irc_channels` usando `server_id IN (SELECT id FROM irc_servers WHERE address=?)`. In SQLite con WAL, l'UPDATE richiede una lock di scrittura; la subquery SELECT può procedere in parallelo con altre letture. Non c'è un metodo dedicato per leggere la media; il codice usa `GetChannelsByServer` per ottenerla. Questo non è un bug di concorrenza, ma un'inefficienza. Inoltre, se due download sullo stesso canale finiscono contemporaneamente, due UPDATE concorrenti su `avg_speed_bps` sono serializzati da SQLite; con WAL e busy timeout sono gestiti, quindi ok.
-
-**Impatto:** Nessuno rilevante.
-
-**Fix consigliata:** Nessuna.
+**Fix consigliata:** Raccogliere uno snapshot dei flag in una piccola struttura sotto `c.ps.mu` (o un nuovo mutex) quando si prendono decisioni.
 
 ---
 
@@ -305,15 +261,7 @@ Ma `closeOnce` deve essere un campo di `Logger` per permettere idempotenza tra i
 
 **Impatto:** Crescita indefinita della memoria; potenziale DoS per riempimento della mappa.
 
-**Fix consigliata:** Aggiungere un cleanup periodico che rimuove IP con timestamp più vecchi di un multiplo della finestra, oppure usare un `sync.Map` con TTL e un goroutine di pulizia. Oppure, più semplicemente, nel metodo `Allow` scartare le entry obsolete durante l'operazione.
-
----
-
-### 2.25 `api/api.go`: `CORS` middleware riflette l'origine senza verificare che l'origine non contenga spazi o null; non è un bug di concorrenza ma un piccolo hardening
-
-**File:** `internal/api/api.go:189-222`
-
-**Problema:** `strings.TrimRight` rimuove trailing slash. La verifica è esatta. Non c'è normalizzazione dello schema (http vs https). Non è un bug di concorrenza; è segnalato come nota di sicurezza minore.
+**Fix consigliata:** Nel metodo `Allow` scartare le entry obsolete durante l'operazione.
 
 ---
 

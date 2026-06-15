@@ -49,6 +49,10 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 	port := parts[3]
 	sizeStr := parts[4]
 
+	// Capture pack once at handler entry (fix 2.19) so all references within
+	// this function use the same snapshot even if packIdxVal advances.
+	pack := c.currentPack()
+
 	// Passive DCC: the bot reports IP 0.0.0.0 (NAT/firewall scenario).
 	// Fall back to the source hostname from the IRC CTCP event, or to the
 	// server address as a last resort. This is non-standard but widely used
@@ -59,14 +63,13 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 			c.logf("Passive DCC: using source host %s instead of 0.0.0.0", sourceHost)
 			peerIP = sourceHost
 		} else {
-			peerIP = c.currentPack().Server.Address
+			peerIP = pack.Server.Address
 			c.logf("Passive DCC with unknown source host, falling back to %s", peerIP)
 		}
 	}
 	peerAddr := peerIP + ":" + port
 	filesize := parseI64(sizeStr)
 
-	pack := c.currentPack()
 	pack.SetFilename(filename, false)
 
 	c.ps.mu.Lock()
@@ -114,7 +117,8 @@ func (c *Client) startDownload(addr string, appendMode bool) {
 		flag = os.O_APPEND | os.O_WRONLY
 	}
 
-	path := c.currentPack().GetFilepath()
+	pack := c.currentPack()
+	path := pack.GetFilepath()
 	f, err := os.OpenFile(path, flag, 0o644)
 	if err != nil {
 		c.finishWithError(fmt.Errorf("cannot open file: %w", err))

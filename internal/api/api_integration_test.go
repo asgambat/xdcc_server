@@ -962,8 +962,8 @@ func TestUpdateConfig(t *testing.T) {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if ta.api.Config.Download.MaxParallelTotal != 3 {
-		t.Errorf("expected max_parallel=3, got %d", ta.api.Config.Download.MaxParallelTotal)
+	if ta.api.Config.GetDownloadConfig().MaxParallelTotal != 3 {
+		t.Errorf("expected max_parallel=3, got %d", ta.api.Config.GetDownloadConfig().MaxParallelTotal)
 	}
 }
 
@@ -1069,10 +1069,10 @@ func TestSetupBootstrap(t *testing.T) {
 	}
 
 	// Verify config was updated
-	if ta.api.Config.IRC.Nickname != "testuser" {
-		t.Errorf("expected nickname 'testuser', got %s", ta.api.Config.IRC.Nickname)
+	if ta.api.Config.GetNickname() != "testuser" {
+		t.Errorf("expected nickname 'testuser', got %s", ta.api.Config.GetNickname())
 	}
-	if !ta.api.Config.UI.SetupCompleted {
+	if !ta.api.Config.GetSetupCompleted() {
 		t.Errorf("expected setup_completed=true after bootstrap")
 	}
 }

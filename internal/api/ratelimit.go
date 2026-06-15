@@ -21,6 +21,8 @@ type RateLimiter struct {
 	entries map[string]*windowEntry
 	limit   int           // max requests allowed per window
 	window  time.Duration // window duration
+	// lastSweep tracks the last lazy cleanup pass that evicted stale IPs.
+	lastSweep time.Time
 }
 
 // windowEntry records the request count for a single IP within the current
@@ -37,6 +39,15 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 		entries: make(map[string]*windowEntry),
 		limit:   limit,
 		window:  window,
+		lastSweep: time.Now(),
+	}
+}
+
+func (rl *RateLimiter) evictStaleLocked(now time.Time) {
+	for k, e := range rl.entries {
+		if now.After(e.resetAt) {
+			delete(rl.entries, k)
+		}
 	}
 }
 
@@ -50,16 +61,12 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	// Lazy eviction: sweep entries that expired more than 2 windows ago.
-	// This bounds the map and avoids a dedicated cleanup goroutine.
-	// Threshold of 200 keeps memory bounded even under moderate traffic.
-	if len(rl.entries) > 200 {
-		cutoff := now.Add(-2 * rl.window)
-		for k, e := range rl.entries {
-			if e.resetAt.Before(cutoff) {
-				delete(rl.entries, k)
-			}
-		}
+	// Lazy eviction: run one cleanup pass every configured window and remove
+	// clients whose window has already expired. This keeps the IP map bounded
+	// without a background goroutine and also works when traffic stays low.
+	if rl.window > 0 && now.Sub(rl.lastSweep) >= rl.window {
+		rl.evictStaleLocked(now)
+		rl.lastSweep = now
 	}
 
 	entry, exists := rl.entries[ip]
@@ -78,11 +85,16 @@ func (rl *RateLimiter) Allow(ip string) bool {
 }
 
 // Reconfigure updates the rate limit parameters at runtime. Existing
-// entries are preserved but new requests will use the updated limit
-// and window duration from the next window boundary.
+// active entries are preserved, while stale ones may be evicted during
+// the reconfigure cleanup pass.
 func (rl *RateLimiter) Reconfigure(limit int, window time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.limit = limit
 	rl.window = window
+	if rl.window > 0 {
+		now := time.Now()
+		rl.evictStaleLocked(now)
+		rl.lastSweep = now
+	}
 }

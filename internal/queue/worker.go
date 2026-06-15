@@ -269,7 +269,10 @@ func downloadWithTempConnection(
 
 	// Execute download
 	packSlice := []*entities.XDCCPack{pack}
-	client := xdccirc.NewClient(ctx, packSlice, opts, -1) // -1 = quiet
+	client, err := xdccirc.NewClient(ctx, packSlice, opts, -1) // -1 = quiet
+	if err != nil {
+		return "", err
+	}
 	results := client.DownloadAll()
 
 	if len(results) == 0 {

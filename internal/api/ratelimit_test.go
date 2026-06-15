@@ -136,38 +136,37 @@ func TestRateLimiter_ConcurrentDifferentIPs(t *testing.T) {
 }
 
 func TestRateLimiter_Eviction(t *testing.T) {
-	// Use a very short window so entries expire quickly.
-	rl := NewRateLimiter(1, 5*time.Millisecond)
+	t.Parallel()
+	// Use a short window so stale entries can be evicted quickly.
+	rl := NewRateLimiter(1, 20*time.Millisecond)
 
-	// Phase 1: add 250 unique IPs (above eviction threshold of 200).
-	for i := 0; i < 250; i++ {
-		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+	for i := 0; i < 50; i++ {
+		ip := fmt.Sprintf("10.0.0.%d", i)
 		rl.Allow(ip)
 	}
 
-	// Wait for all entries to expire (>2 windows = >10ms).
-	time.Sleep(15 * time.Millisecond)
+	// Ensure all first-wave entries are stale.
+	time.Sleep(30 * time.Millisecond)
 
-	// Phase 2: add another 250 unique IPs. The next Allow should
-	// trigger eviction because the map has >200 entries and the old
-	// ones are all stale (>2 windows ago).
-	for i := 250; i < 500; i++ {
-		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
-		rl.Allow(ip)
+	// Trigger lazy sweep and add one fresh entry.
+	if !rl.Allow("203.0.113.1") {
+		t.Fatal("fresh request should be allowed")
 	}
 
-	// Verify: old entries should have been evicted; only the 250
-	// fresh entries from Phase 2 should remain.
 	rl.mu.Lock()
 	size := len(rl.entries)
+	_, hasStale := rl.entries["10.0.0.1"]
+	_, hasFresh := rl.entries["203.0.113.1"]
 	rl.mu.Unlock()
 
-	// Allow some slack for the trigger-ip entry.
-	if size > 270 {
-		t.Errorf("expected eviction to reduce map size, got %d entries", size)
+	if hasStale {
+		t.Fatal("expected stale IP entries to be evicted")
 	}
-	if size < 240 {
-		t.Errorf("expected ~250 fresh entries, got %d", size)
+	if !hasFresh {
+		t.Fatal("expected fresh IP entry to remain")
+	}
+	if size > 2 {
+		t.Errorf("expected small map after stale eviction, got %d entries", size)
 	}
 }
 

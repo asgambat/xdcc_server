@@ -180,8 +180,7 @@ func findKeyInYAML(s, key string, start int) int {
 // so changes to message_rate_limit / message_rate_window_sec take effect
 // without a server restart.
 func (a *API) syncMsgRateLimiter() {
-	limit := a.Config.IRC.MessageRateLimit
-	windowSec := a.Config.IRC.MessageRateWindowSec
+	limit, windowSec := a.Config.GetMessageRateLimit()
 	if limit > 0 && windowSec > 0 {
 		if rl := a.MsgRateLimiter.Load(); rl != nil {
 			// Reconfigure existing limiter (method is mutex-protected).
@@ -233,10 +232,12 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Preserve the admin token from the live config.
-		newCfg.Security.AdminToken = a.Config.Security.AdminToken
+		snapshotForToken := a.Config.Clone()
+		newCfg.Security.AdminToken = snapshotForToken.Security.AdminToken
 
-		// Update in-memory config to reflect the saved YAML changes.
-		*a.Config = newCfg
+		// Update in-memory config atomically via Replace to avoid racing
+		// with concurrent reads (e.g. ircmanager, queue goroutines).
+		a.Config.Replace(newCfg)
 
 		// Sync rate limiter with new config values.
 		a.syncMsgRateLimiter()
@@ -266,8 +267,9 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Protect the admin token: if the client sent the redacted placeholder
 	// (which happens when the Advanced tab loads raw YAML and saves it back),
 	// preserve the live token so it isn't overwritten.
+	oldCfg := a.Config.Clone()
 	if newCfg.Security.AdminToken == "" || newCfg.Security.AdminToken == "***REDACTED***" {
-		newCfg.Security.AdminToken = a.Config.Security.AdminToken
+		newCfg.Security.AdminToken = oldCfg.Security.AdminToken
 	}
 
 	// Validate the new config before applying or persisting.
@@ -277,11 +279,9 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Snapshot old config for diff-based partial save.
-	oldCfg := *a.Config
-
-	// Apply to live config.
-	*a.Config = newCfg
+	// Update in-memory config atomically via Replace to avoid racing
+	// with concurrent reads (e.g. ircmanager, queue goroutines).
+	a.Config.Replace(newCfg)
 
 	// Sync rate limiter with new config values.
 	a.syncMsgRateLimiter()
@@ -320,11 +320,14 @@ func (a *API) handleUpdateTheme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Snapshot old config for partial save.
-	oldCfg := *a.Config
+	// Snapshot old config for partial save and build the updated config.
+	oldCfg := a.Config.Clone()
+	newCfg := oldCfg
+	newCfg.UI.Theme = body.Theme
 
-	// Update only the theme field in the live config.
-	a.Config.UI.Theme = body.Theme
+	// Update in-memory config atomically via Replace to avoid racing
+	// with concurrent reads (e.g. ircmanager, queue goroutines).
+	a.Config.Replace(newCfg)
 
 	// Persist only the theme change to disk using partial update.
 	if a.ConfigPath != "" {
@@ -369,7 +372,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	uptimeSeconds := int64(time.Since(a.StartTime).Seconds())
 
 	// Get disk info
-	di, err := getDiskInfo(a.Config.Download.DestDir)
+	di, err := getDiskInfo(a.Config.GetDownloadConfig().DestDir)
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -401,7 +404,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	warnings := make([]string, 0)
 	info := make(map[string]interface{})
 
-	di, err := getDiskInfo(a.Config.Download.DestDir)
+	di, err := getDiskInfo(a.Config.GetDownloadConfig().DestDir)
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -448,9 +451,9 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":    uptimeSeconds,
 		"disk_free_bytes":   diskFreeBytes,
 		"disk_total_bytes":  diskTotalBytes,
-		"token_ttl_minutes": a.Config.Security.TokenTTLMinutes,
-		"ui_theme":          a.Config.UI.Theme,              // public — used by frontend for initial theme
-		"messages_enabled":  a.Config.IRC.EnableMessageSend, // public — used by frontend to show/hide send button
+		"token_ttl_minutes": a.Config.GetTokenTTLMinutes(),
+		"ui_theme":          a.Config.GetUITheme(),              // public — used by frontend for initial theme
+		"messages_enabled":  a.Config.GetEnableMessageSend(), // public — used by frontend to show/hide send button
 	})
 }
 
@@ -542,7 +545,7 @@ func (a *API) handleAdminImport(w http.ResponseWriter, r *http.Request) {
 // =========================================================================
 
 func (a *API) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	completed := a.Config.UI.SetupCompleted
+	completed := a.Config.GetSetupCompleted()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"setup_completed": completed,

@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"xdcc_server/internal/store"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // =========================================================================
@@ -348,7 +349,7 @@ func (a *API) handleGetChannelTopic(w http.ResponseWriter, r *http.Request) {
 // This endpoint is gated by config.IRC.EnableMessageSend (default: false).
 func (a *API) handleSendChannelMessage(w http.ResponseWriter, r *http.Request) {
 	// Gate: message sending must be explicitly enabled in config.
-	if a.Config == nil || !a.Config.IRC.EnableMessageSend {
+	if a.Config == nil || !a.Config.GetEnableMessageSend() {
 		writeError(w, http.StatusForbidden, "MESSAGES_DISABLED",
 			"Message sending is disabled. Set irc.enable_message_send=true in config.")
 		return
@@ -402,7 +403,7 @@ func (a *API) handleSendChannelMessage(w http.ResponseWriter, r *http.Request) {
 	// Apply per-IP rate limiting for flood prevention.
 	// Uses atomic load to avoid data races with syncMsgRateLimiter().
 	if rl := a.MsgRateLimiter.Load(); rl != nil {
-		clientIP := extractClientIP(r, a.Config.HTTP.TrustProxy)
+		clientIP := extractClientIP(r, a.Config.GetTrustProxy())
 		if !rl.Allow(clientIP) {
 			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED",
 				"Too many messages. Please wait before sending another message.")
