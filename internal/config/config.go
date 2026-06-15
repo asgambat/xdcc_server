@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -107,6 +108,12 @@ type Config struct {
 	// fileMu serializes on-disk write operations (Save, SaveRaw, ApplyPartial).
 	mu     sync.RWMutex
 	fileMu sync.Mutex
+
+	// revision is incremented atomically every time the config is persisted
+	// to disk (Save, SaveRaw, ApplyPartial). Components that cache
+	// config-derived state (e.g. open channel log files) poll this value
+	// to detect when their cached state needs to be rebuilt.
+	revision atomic.Int64
 }
 
 type IRCConfig struct {
@@ -994,6 +1001,75 @@ func (c *Config) GetMaxRateBPS() int64 {
 	return c.Download.MaxRateBPS
 }
 
+// GetMaxParallelTotal returns the global maximum parallel downloads.
+func (c *Config) GetMaxParallelTotal() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxParallelTotal
+}
+
+// GetMinDiskSpace returns the minimum required disk space in bytes.
+func (c *Config) GetMinDiskSpace() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MinDiskSpace
+}
+
+// GetFailFallback returns the failure fallback mode.
+func (c *Config) GetFailFallback() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.FailFallback
+}
+
+// GetMaxRetryAttempts returns the maximum number of retry attempts.
+func (c *Config) GetMaxRetryAttempts() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxRetryAttempts
+}
+
+// GetTempDir returns the download temporary directory.
+func (c *Config) GetTempDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.TempDir
+}
+
+// GetDestDir returns the download destination directory.
+func (c *Config) GetDestDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.DestDir
+}
+
+// GetStartupDelayMinutes returns the startup delay in minutes.
+func (c *Config) GetStartupDelayMinutes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.StartupDelayMinutes
+}
+
+// GetConflictPolicy returns the file conflict resolution policy.
+func (c *Config) GetConflictPolicy() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.ConflictPolicy
+}
+
+// bumpRevision atomically increments the config revision counter.
+// Must be called under fileMu (already held by all write paths).
+func (c *Config) bumpRevision() {
+	c.revision.Add(1)
+}
+
+// GetConfigRevision returns the current config revision number.
+// Components that cache config-derived state can poll this value to
+// detect when the config was persisted and rebuild their cached state.
+func (c *Config) GetConfigRevision() int64 {
+	return c.revision.Load()
+}
+
 // Clone returns a deep copy of all data fields of c. The mutex fields are not
 // copied — the returned Config starts with zero-value (unlocked) mutexes.
 // Use Clone to take a safe, read-locked snapshot of the live config.
@@ -1066,7 +1142,13 @@ func (c *Config) cloneLocked() *Config {
 
 // SnapshotAndApply atomically captures the current config state, passes a
 // deep copy of that snapshot to fn for mutation, and installs the mutated
-// snapshot as the new live config (via Replace, which takes the write lock).
+// snapshot as the new live config.
+//
+// The entire operation runs under mu.Lock() — snapshot, mutation, and
+// installation are serialized with respect to all other writers and readers.
+// This eliminates the TOCTOU window that existed with the previous RLock +
+// Unlock + Replace(Lock) pattern, where a concurrent SnapshotAndApply could
+// interleave between the RUnlock and the Replace, causing a lost update.
 //
 // The returned *Config is the PRE-mutation snapshot — the same value the
 // caller can use as the "old" side of a diff when calling ApplyPartial to
@@ -1077,28 +1159,36 @@ func (c *Config) cloneLocked() *Config {
 //	})
 //	a.Config.ApplyPartial(path, old) // diff(old, live) = theme change only
 //
-// This helper closes the TOCTOU window that opens if a handler calls Clone()
-// twice — once for the diff's "old" side and once to build the new value —
-// because a concurrent Replace could land between the two Clones and
-// silently widen the persisted diff to include unrelated changes. The two
-// clones here are taken under a single RLock, so they always see the same
-// pre-mutation state.
-//
 // fn must not call back into c (e.g. via c.Clone or c.Replace) — it should
-// only mutate the passed *Config value.
+// only mutate the passed *Config value. Calling back would deadlock because
+// mu is held for the entire duration.
 func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	old := c.cloneLocked()
-	// Second clone under the same RLock: ensures `old` and `post` share the
+	// Second clone under the same Lock: ensures `old` and `post` share the
 	// exact same pre-mutation state, so the diff computed later is
 	// strictly the user's intended mutation.
 	post := c.cloneLocked()
-	c.mu.RUnlock()
 
 	if fn != nil {
 		fn(post)
 	}
-	c.Replace(post)
+
+	// Inline field-by-field copy from Replace — cannot call Replace because
+	// it would deadlock trying to acquire mu.Lock() again.
+	c.IRC = post.IRC
+	c.HTTP = post.HTTP
+	c.Security = post.Security
+	c.Download = post.Download
+	c.Search = post.Search
+	c.Storage = post.Storage
+	c.Logging = post.Logging
+	c.UI = post.UI
+	c.Profiling = post.Profiling
+	c.Notifications = post.Notifications
+
 	return old
 }
 
@@ -1143,7 +1233,7 @@ func (c *Config) saveRawUnlocked(path string, rawYAML []byte) error {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
-	// Stat the file once: if it exists, create a backup and preserve its mode.
+	// Create a backup and preserve file mode if the file exists.
 	mode := os.FileMode(0o644)
 	if fi, statErr := os.Stat(path); statErr == nil {
 		mode = fi.Mode()
@@ -1153,35 +1243,11 @@ func (c *Config) saveRawUnlocked(path string, rawYAML []byte) error {
 		}
 	}
 
-	// Atomic write: write to temp file first, then rename.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, rawYAML, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+	if err := atomicWriteFile(path, rawYAML, mode); err != nil {
+		return err
 	}
-
-	if err := os.Rename(tmp, path); err == nil {
-		return nil
-	}
-
-	// Rename failed (e.g., Docker bind mount → EBUSY). Clean up temp file
-	// and fall back to writing directly to the target path.
-	os.Remove(tmp)
-	if err := os.WriteFile(path, rawYAML, mode); err == nil {
-		return nil
-	}
-
-	// Last-resort fallback: write to /data then copy (Docker volume workaround).
-	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
-		tmpData := "/data/config.yaml.tmp"
-		if err := os.WriteFile(tmpData, rawYAML, 0o600); err == nil {
-			defer os.Remove(tmpData)
-			if copyErr := copyFile(tmpData, path); copyErr == nil {
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("all write methods failed for %s", path)
+	c.bumpRevision()
+	return nil
 }
 
 // Save marshals the current configuration to YAML and writes it atomically
@@ -1210,7 +1276,7 @@ func (c *Config) saveUnlocked(path string) error {
 		return fmt.Errorf("marshaling config to YAML: %w", err)
 	}
 
-	// Stat the file once: if it exists, create a backup and preserve its mode.
+	// Create a backup and preserve file mode if the file exists.
 	mode := os.FileMode(0o644)
 	if fi, statErr := os.Stat(path); statErr == nil {
 		mode = fi.Mode()
@@ -1220,24 +1286,28 @@ func (c *Config) saveUnlocked(path string) error {
 		}
 	}
 
-	// Atomic write: write to temp file first, then rename.
+	if err := atomicWriteFile(path, data, mode); err != nil {
+		return err
+	}
+	c.bumpRevision()
+	return nil
+}
+
+// atomicWriteFile writes data to path atomically using a temp file + rename.
+// Falls back to direct write if rename fails (e.g. Docker bind mount EBUSY).
+// Last-resort: writes to /data then copies (Docker volume workaround).
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+		return fmt.Errorf("writing temp file %s: %w", tmp, err)
 	}
-
 	if err := os.Rename(tmp, path); err == nil {
 		return nil
 	}
-
-	// Rename failed (e.g., Docker bind mount → EBUSY). Clean up temp file
-	// and fall back to writing directly to the target path.
 	os.Remove(tmp)
 	if err := os.WriteFile(path, data, mode); err == nil {
 		return nil
 	}
-
-	// Last-resort fallback: write to /data then copy (Docker volume workaround).
 	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
 		tmpData := "/data/config.yaml.tmp"
 		if err := os.WriteFile(tmpData, data, 0o600); err == nil {
@@ -1247,7 +1317,6 @@ func (c *Config) saveUnlocked(path string) error {
 			}
 		}
 	}
-
 	return fmt.Errorf("all write methods failed for %s", path)
 }
 
@@ -1349,39 +1418,17 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 		mode = fi.Mode()
 	}
 
-	// Write the modified node tree back to disk (atomic write).
+	// Write the modified node tree back to disk.
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return fmt.Errorf("marshaling updated config: %w", err)
 	}
 
-	// Atomic write: write to temp file first, then rename.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+	if err := atomicWriteFile(path, out, mode); err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, path); err == nil {
-		return nil
-	}
-	os.Remove(tmp)
-
-	// Rename failed — fall back to direct write.
-	if err := os.WriteFile(path, out, mode); err == nil {
-		return nil
-	}
-
-	// Last-resort /data fallback.
-	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
-		tmpData := "/data/config.yaml.tmp"
-		if err := os.WriteFile(tmpData, out, 0o600); err == nil {
-			defer os.Remove(tmpData)
-			if copyErr := copyFile(tmpData, path); copyErr == nil {
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("all write methods failed for %s", path)
+	c.bumpRevision()
+	return nil
 }
 
 // diffConfigs compares two Config structs and returns a list of field changes.

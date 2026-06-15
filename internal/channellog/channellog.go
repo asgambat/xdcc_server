@@ -306,6 +306,37 @@ func (l *Logger) Close() error {
 	return firstErr
 }
 
+// ReconcileChannels closes file handles for channels that are no longer in
+// the logged set. The isLogged function should return true if a channel
+// should still be logged. Channels whose handle is already closed are
+// skipped. This is designed to be called periodically by a component that
+// polls config changes (e.g. via GetConfigRevision).
+func (l *Logger) ReconcileChannels(isLogged func(channel string) bool) {
+	if l == nil || isLogged == nil {
+		return
+	}
+
+	l.mu.Lock()
+	var toClose []*channelFile
+	for name, cf := range l.files {
+		if !isLogged(name) {
+			toClose = append(toClose, cf)
+			delete(l.files, name)
+		}
+	}
+	l.mu.Unlock()
+
+	for _, cf := range toClose {
+		cf.mu.Lock()
+		if cf.f != nil {
+			_ = cf.f.Sync()
+			_ = cf.f.Close()
+			cf.f = nil
+		}
+		cf.mu.Unlock()
+	}
+}
+
 // getOrOpen returns the channelFile for the given channel, opening it on
 // first access. Returns nil if the file cannot be opened.
 func (l *Logger) getOrOpen(channel string) *channelFile {

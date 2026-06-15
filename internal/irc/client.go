@@ -29,6 +29,13 @@ const (
 	// is established. Without this buffer, fast connections would time out
 	// while waiting for post-CONNECT server responses.
 	connectGracePeriod = 30 * time.Second
+
+	// defaultChannelJoinDelayMin and defaultChannelJoinDelayRange define the
+	// random channel-join delay when ChannelJoinDelay is < 0 (random mode).
+	// The delay is randN(range) + min, giving a uniform [min, min+range-1]
+	// interval. Current values produce a random 5-10 second delay.
+	defaultChannelJoinDelayMin   = 5
+	defaultChannelJoinDelayRange = 6
 )
 
 // ---------------------------------------------------------------------------
@@ -195,7 +202,7 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 		return nil, fmt.Errorf("irc.NewClient: packs must not be empty")
 	}
 	if opts.ChannelJoinDelay < 0 {
-		opts.ChannelJoinDelay = randN(6) + 5
+		opts.ChannelJoinDelay = randN(defaultChannelJoinDelayRange) + defaultChannelJoinDelayMin
 	}
 	if opts.ConnectTimeout <= 0 {
 		opts.ConnectTimeout = 120

@@ -387,7 +387,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	uptimeSeconds := int64(time.Since(a.StartTime).Seconds())
 
 	// Get disk info
-	di, err := getDiskInfo(a.Config.GetDownloadConfig().DestDir)
+	di, err := getDiskInfo(a.Config.GetDestDir())
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -419,7 +419,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	warnings := make([]string, 0)
 	info := make(map[string]interface{})
 
-	di, err := getDiskInfo(a.Config.GetDownloadConfig().DestDir)
+	di, err := getDiskInfo(a.Config.GetDestDir())
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -585,34 +585,41 @@ func (a *API) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := a.Config
-
-	if body.Nickname != "" {
-		cfg.IRC.Nickname = body.Nickname
-	}
-	if body.ServerAddress != "" {
-		port := body.ServerPort
-		if port < 1 || port > 65535 {
-			port = 6667
+	// SnapshotAndApply atomically captures the pre-mutation config (so we
+	// can compute a diff for partial persistence later) and installs the
+	// mutated version via Replace — all under proper locking. This closes
+	// the data race that existed when the handler wrote directly to Config
+	// fields without acquiring mu.Lock().
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		if body.Nickname != "" {
+			snap.IRC.Nickname = body.Nickname
 		}
-		cfg.IRC.DefaultServers = []config.ServerConfig{
-			{
-				Address:     body.ServerAddress,
-				Port:        port,
-				AutoConnect: true,
-			},
+		if body.ServerAddress != "" {
+			port := body.ServerPort
+			if port < 1 || port > 65535 {
+				port = 6667
+			}
+			snap.IRC.DefaultServers = []config.ServerConfig{
+				{
+					Address:     body.ServerAddress,
+					Port:        port,
+					AutoConnect: true,
+				},
+			}
 		}
-	}
-	if body.DownloadDir != "" {
-		cfg.Download.DestDir = body.DownloadDir
-	}
-	if body.TempDir != "" {
-		cfg.Download.TempDir = body.TempDir
-	}
+		if body.DownloadDir != "" {
+			snap.Download.DestDir = body.DownloadDir
+		}
+		if body.TempDir != "" {
+			snap.Download.TempDir = body.TempDir
+		}
+		snap.UI.SetupCompleted = true
+	})
 
-	cfg.UI.SetupCompleted = true
-
-	for _, dir := range []string{cfg.Download.TempDir, cfg.Download.DestDir} {
+	// Read directories from the now-updated live config via the thread-safe
+	// getter (acquires mu.RLock internally).
+	dlCfg := a.Config.GetDownloadConfig()
+	for _, dir := range []string{dlCfg.TempDir, dlCfg.DestDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			a.logAndError(w, http.StatusInternalServerError, "MKDIR_ERROR",
 				fmt.Sprintf("creating directory %s: %v", dir, err))
@@ -620,9 +627,11 @@ func (a *API) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Persist the bootstrap config to disk so setup survives a restart.
+	// Persist using ApplyPartial to preserve comments and formatting.
+	// Falls back to a full Save() automatically for non-scalar changes
+	// (e.g. DefaultServers slice).
 	if a.ConfigPath != "" {
-		if err := a.Config.Save(a.ConfigPath); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving bootstrap config to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("setup completed in memory but failed to persist config: %v", err))

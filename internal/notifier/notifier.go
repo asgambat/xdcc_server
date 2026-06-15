@@ -777,11 +777,17 @@ func (m *Manager) Run(ctx context.Context, ch <-chan queue.Event, wg *sync.WaitG
 	}
 }
 
-// dispatch sends an event to all notifiers concurrently.
+// dispatch sends an event to all notifiers concurrently and waits for
+// all notifications to complete before returning. This ensures that
+// goroutines don't outlive the caller (especially during drainEvents
+// at shutdown) and prevents unbounded goroutine accumulation.
 func (m *Manager) dispatch(evt queue.Event) {
+	var wg sync.WaitGroup
 	for _, n := range m.notifiers {
 		n := n
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := n.Notify(evt); err != nil {
 				m.logger.Errorf("notifier: notification failed for download %d: %v", evt.DownloadID, err)
 			} else {
@@ -789,6 +795,7 @@ func (m *Manager) dispatch(evt queue.Event) {
 			}
 		}()
 	}
+	wg.Wait()
 }
 
 // drainEvents drains remaining events during shutdown.
@@ -807,7 +814,8 @@ func (m *Manager) drainEvents(ch <-chan queue.Event) {
 	}
 }
 
-// NotifyWatchlistResults sends a watchlist notification to all notifiers.
+// NotifyWatchlistResults sends a watchlist notification to all notifiers
+// and waits for all to complete before returning.
 func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 	if len(m.notifiers) == 0 {
 		return
@@ -820,9 +828,12 @@ func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 		Timestamp:     time.Now().Format(time.RFC3339),
 	}
 
+	var wg sync.WaitGroup
 	for _, n := range m.notifiers {
 		n := n
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := n.NotifyWatchlistResults(event); err != nil {
 				m.logger.Errorf("notifier: watchlist notification failed for %q: %v", name, err)
 			} else {
@@ -830,6 +841,7 @@ func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 			}
 		}()
 	}
+	wg.Wait()
 }
 
 // Notifiers returns the list of configured notifiers (for introspection).

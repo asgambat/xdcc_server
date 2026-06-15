@@ -171,6 +171,11 @@ func (c *Client) startDownloadAppend() {
 // When the connection closes (EOF) the defer block decides success/failure by
 // comparing progress to the expected file size.
 func (c *Client) receiveData() {
+	// Capture downloadDone locally so the throttle select does not
+	// dynamically read c.ps.downloadDone, which resetForPack() replaces
+	// between packs.
+	downloadDone := c.ps.downloadDone
+
 	// Pre-create throttle timer to avoid per-chunk allocations on long downloads.
 	var throttleTimer *time.Timer
 	if c.opts.ThrottleBytes > 0 {
@@ -243,7 +248,7 @@ func (c *Client) receiveData() {
 					throttleTimer.Reset(time.Duration(sleepTime * float64(time.Second)))
 					select {
 					case <-throttleTimer.C:
-					case <-c.ps.downloadDone:
+					case <-downloadDone:
 						return
 					}
 				}
@@ -257,12 +262,19 @@ func (c *Client) receiveData() {
 }
 
 func (c *Client) ackSender() {
+	// Capture packState and its channels locally so the goroutine does not
+	// dynamically read c.ps, which resetForPack() replaces between packs.
+	// Without this, the goroutine could block forever on the new packState's
+	// channels after c.ps is replaced (goroutine leak).
+	ps := c.ps
+	ackQueue := ps.ackQueue
+	downloadDone := ps.downloadDone
 	for {
 		select {
-		case ack := <-c.ps.ackQueue:
-			c.ps.mu.Lock()
-			conn := c.ps.dccConn
-			c.ps.mu.Unlock()
+		case ack := <-ackQueue:
+			ps.mu.Lock()
+			conn := ps.dccConn
+			ps.mu.Unlock()
 			if conn == nil {
 				continue
 			}
@@ -271,7 +283,7 @@ func (c *Client) ackSender() {
 				c.debugf("ACK write failed: %v", err)
 				return
 			}
-		case <-c.ps.downloadDone:
+		case <-downloadDone:
 			return
 		}
 	}
@@ -298,19 +310,25 @@ func (c *Client) enqueueACK() {
 }
 
 func (c *Client) progressPrinter() {
+	// Capture packState and its channels locally so the goroutine does not
+	// dynamically read c.ps, which resetForPack() replaces between packs.
+	ps := c.ps
+	downloadDone := ps.downloadDone
+	downloadStarted := ps.downloadStarted
+
 	// Wait for the DCC transfer to start instead of busy-polling
 	// c.ps.downloading with lock/unlock every 50ms.
 	select {
-	case <-c.ps.downloadStarted:
-	case <-c.ps.downloadDone:
+	case <-downloadStarted:
+	case <-downloadDone:
 		return
 	}
 
-	// Guard against future misuse: verify c.ps.downloading is actually true
+	// Guard against future misuse: verify ps.downloading is actually true
 	// before entering the progress loop.
-	c.ps.mu.Lock()
-	dl := c.ps.downloading
-	c.ps.mu.Unlock()
+	ps.mu.Lock()
+	dl := ps.downloading
+	ps.mu.Unlock()
 	if !dl {
 		return
 	}
@@ -324,10 +342,10 @@ func (c *Client) progressPrinter() {
 	for {
 		select {
 		case <-ticker.C:
-			prog := atomic.LoadInt64(&c.ps.progress)
-			c.ps.mu.Lock()
-			total := c.ps.filesize
-			c.ps.mu.Unlock()
+			prog := atomic.LoadInt64(&ps.progress)
+			ps.mu.Lock()
+			total := ps.filesize
+			ps.mu.Unlock()
 			elapsed := time.Since(lastTime).Seconds()
 			speed := float64(prog-lastProgress) / elapsed
 			lastProgress = prog
@@ -366,14 +384,14 @@ func (c *Client) progressPrinter() {
 					eta)
 			}
 
-			c.ps.mu.Lock()
-			dl := c.ps.downloading
-			c.ps.mu.Unlock()
+			ps.mu.Lock()
+			dl := ps.downloading
+			ps.mu.Unlock()
 			if !dl {
 				fmt.Println()
 				return
 			}
-		case <-c.ps.downloadDone:
+		case <-downloadDone:
 			fmt.Println()
 			return
 		}

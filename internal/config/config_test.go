@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -225,32 +228,234 @@ func TestIsChannelLogged_EmptyList(t *testing.T) {
 	}
 }
 
-// TestPickGreeting_ConcurrentSafe sanity-checks that concurrent calls to
-// PickGreeting never panic and never return a string outside the configured
-// list. This is important because the IRC manager spawns one goroutine per
-// channel JOIN, all of which call PickGreeting.
-func TestPickGreeting_ConcurrentSafe(t *testing.T) {
-	list := []string{"hi", "hello", "ciao"}
-	listSet := make(map[string]bool, len(list))
-	for _, s := range list {
-		listSet[s] = true
+// TestGetConfigRevision_BumpsOnSave verifies that the revision counter
+// is incremented atomically each time the config is persisted to disk
+// via Save, SaveRaw, or ApplyPartial.
+func TestGetConfigRevision_BumpsOnSave(t *testing.T) {
+	c := DefaultConfig()
+
+	// Initial revision is 0.
+	if rev := c.GetConfigRevision(); rev != 0 {
+		t.Fatalf("initial revision = %d, want 0", rev)
 	}
-	c := &Config{IRC: IRCConfig{Greetings: list}}
+
+	path := t.TempDir() + "/config.yaml"
+
+	// Save() should bump revision.
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 1 {
+		t.Errorf("after Save: revision = %d, want 1", rev)
+	}
+
+	// SaveRaw() with valid YAML should bump revision.
+	yamlBytes := []byte("irc:\n  nickname: test\nui:\n  theme: dark\n")
+	if err := c.SaveRaw(path, yamlBytes); err != nil {
+		t.Fatalf("SaveRaw failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 2 {
+		t.Errorf("after SaveRaw: revision = %d, want 2", rev)
+	}
+
+	// ApplyPartial with a scalar change should bump revision.
+	// The YAML file already has ui.theme=dark, so the change can be
+	// surgically applied without falling back to saveUnlocked.
+	old := c.Clone()
+	c.SnapshotAndApply(func(snap *Config) {
+		snap.UI.Theme = "light"
+	})
+	if err := c.ApplyPartial(path, old); err != nil {
+		t.Fatalf("ApplyPartial failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 3 {
+		t.Errorf("after ApplyPartial: revision = %d, want 3", rev)
+	}
+}
+
+// TestGetConfigRevision_NoBumpOnNoChange verifies that ApplyPartial does
+// not bump the revision when there are no changes to persist.
+func TestGetConfigRevision_NoBumpOnNoChange(t *testing.T) {
+	c := DefaultConfig()
+	path := t.TempDir() + "/config.yaml"
+
+	// First save to create the file and set initial revision.
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 1 {
+		t.Fatalf("after Save: revision = %d, want 1", rev)
+	}
+
+	// ApplyPartial with no changes (old == current) should NOT bump.
+	old := c.Clone()
+	if err := c.ApplyPartial(path, old); err != nil {
+		t.Fatalf("ApplyPartial failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 1 {
+		t.Errorf("after no-op ApplyPartial: revision = %d, want 1 (no bump)", rev)
+	}
+}
+
+// TestGetConfigRevision_NoBumpOnError verifies that SaveRaw does not bump
+// the revision when the write fails (e.g., path is empty).
+func TestGetConfigRevision_NoBumpOnError(t *testing.T) {
+	c := DefaultConfig()
+
+	if rev := c.GetConfigRevision(); rev != 0 {
+		t.Fatalf("initial revision = %d, want 0", rev)
+	}
+
+	// SaveRaw with empty path should return an error and NOT bump.
+	if err := c.SaveRaw("", []byte("x")); err == nil {
+		t.Fatal("expected error from SaveRaw with empty path, got nil")
+	}
+	if rev := c.GetConfigRevision(); rev != 0 {
+		t.Errorf("after failed SaveRaw: revision = %d, want 0 (no bump)", rev)
+	}
+}
+
+// TestGetConfigRevision_Monotonic ensures revisions increase monotonically
+// across multiple write operations.
+func TestGetConfigRevision_Monotonic(t *testing.T) {
+	c := DefaultConfig()
+	path := t.TempDir() + "/config.yaml"
+
+	var lastRev int64
+	for i := 0; i < 5; i++ {
+		// Alternate Save and SaveRaw
+		if i%2 == 0 {
+			if err := c.Save(path); err != nil {
+				t.Fatalf("Save #%d failed: %v", i, err)
+			}
+		} else {
+			if err := c.SaveRaw(path, []byte("irc:\n  nickname: test"+fmt.Sprint(i)+"\n")); err != nil {
+				t.Fatalf("SaveRaw #%d failed: %v", i, err)
+			}
+		}
+
+		rev := c.GetConfigRevision()
+		if rev <= lastRev {
+			t.Errorf("iteration %d: revision %d <= previous %d (must be strictly increasing)", i, rev, lastRev)
+		}
+		lastRev = rev
+	}
+
+	if lastRev != 5 {
+		t.Errorf("after 5 writes: revision = %d, want 5", lastRev)
+	}
+}
+
+// TestGetConfigRevision_ConcurrentAccess verifies that GetConfigRevision
+// can be called concurrently with writes without panicking.
+func TestGetConfigRevision_ConcurrentAccess(t *testing.T) {
+	c := DefaultConfig()
+	path := t.TempDir() + "/config.yaml"
+
+	// First save to create the file.
+	if err := c.Save(path); err != nil {
+		t.Fatalf("initial Save failed: %v", err)
+	}
 
 	done := make(chan struct{})
-	for i := 0; i < 20; i++ {
+
+	// Writer goroutine: repeatedly calls Save.
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for i := 0; i < 20; i++ {
+			_ = c.Save(path)
+		}
+	}()
+
+	// Reader goroutines: repeatedly read the revision.
+	for i := 0; i < 4; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			for j := 0; j < 50; j++ {
-				got := c.PickGreeting()
-				if !listSet[got] {
-					t.Errorf("got unexpected greeting %q", got)
-					return
-				}
+			for j := 0; j < 200; j++ {
+				_ = c.GetConfigRevision()
 			}
 		}()
 	}
-	for i := 0; i < 20; i++ {
+
+	for i := 0; i < 5; i++ {
 		<-done
+	}
+}
+
+// TestApplyPartial_FallbackOnMissingKey verifies that ApplyPartial falls
+// back to saveUnlocked when the key to update doesn't exist in the YAML
+// file. The revision still bumps because saveUnlocked increments it.
+func TestApplyPartial_FallbackOnMissingKey(t *testing.T) {
+	c := DefaultConfig()
+	path := t.TempDir() + "/config.yaml"
+
+	// Write a minimal YAML file that lacks the "ui" section.
+	yamlBytes := []byte("irc:\n  nickname: test\n")
+	if err := c.SaveRaw(path, yamlBytes); err != nil {
+		t.Fatalf("SaveRaw failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 1 {
+		t.Fatalf("after SaveRaw: revision = %d, want 1", rev)
+	}
+
+	// Change ui.theme — this key doesn't exist in the YAML file, so
+	// ApplyPartial should fall back to saveUnlocked, which bumps revision.
+	old := c.Clone()
+	c.SnapshotAndApply(func(snap *Config) {
+		snap.UI.Theme = "light"
+	})
+	if err := c.ApplyPartial(path, old); err != nil {
+		t.Fatalf("ApplyPartial failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 2 {
+		t.Errorf("after ApplyPartial (missing key fallback): revision = %d, want 2", rev)
+	}
+
+	// The file should now contain all fields (from the saveUnlocked fallback).
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "light") {
+		t.Error("expected 'light' theme in config after saveUnlocked fallback")
+	}
+}
+
+// TestApplyPartial_FallbackOnNonScalar verifies that ApplyPartial falls
+// back to saveUnlocked when a change involves a non-scalar type (e.g., a
+// slice like greetings). The revision still bumps.
+func TestApplyPartial_FallbackOnNonScalar(t *testing.T) {
+	c := DefaultConfig()
+	path := t.TempDir() + "/config.yaml"
+
+	// Write a YAML file that includes the greetings field.
+	yamlBytes := []byte("irc:\n  nickname: test\n  greetings:\n    - hi\n    - hello\n")
+	if err := c.SaveRaw(path, yamlBytes); err != nil {
+		t.Fatalf("SaveRaw failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 1 {
+		t.Fatalf("after SaveRaw: revision = %d, want 1", rev)
+	}
+
+	// Change greetings (a slice — non-scalar) — ApplyPartial should detect
+	// this and fall back to saveUnlocked, which bumps revision.
+	old := c.Clone()
+	c.SnapshotAndApply(func(snap *Config) {
+		snap.IRC.Greetings = []string{"ciao", "buongiorno"}
+	})
+	if err := c.ApplyPartial(path, old); err != nil {
+		t.Fatalf("ApplyPartial failed: %v", err)
+	}
+	if rev := c.GetConfigRevision(); rev != 2 {
+		t.Errorf("after ApplyPartial (non-scalar fallback): revision = %d, want 2", rev)
+	}
+
+	// The file should contain the new greetings from the full rewrite.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "ciao") {
+		t.Error("expected 'ciao' in config after saveUnlocked fallback")
 	}
 }

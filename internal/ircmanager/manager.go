@@ -57,6 +57,12 @@ type Manager struct {
 	// whole manager on a filesystem hiccup.
 	chlog *channellog.Logger
 
+	// chlogReconcileDone is closed by Stop() to signal the config revision
+	// polling goroutine to exit. chlogReconcileExited is closed by the
+	// goroutine on exit, so Stop() can wait for it before closing chlog.
+	chlogReconcileDone   chan struct{}
+	chlogReconcileExited chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -114,6 +120,14 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 // their auto-join channels. It also connects to any servers marked auto_connect
 // in the database that are not yet managed.
 func (m *Manager) Start() error {
+	// Start config revision polling to reconcile stale channel log files
+	// when the operator adds/removes channels from irc.channel_log at runtime.
+	if m.chlog != nil {
+		m.chlogReconcileDone = make(chan struct{})
+		m.chlogReconcileExited = make(chan struct{})
+		go m.reconcileChannelLogLoop()
+	}
+
 	// Connect default servers from config — take a snapshot to avoid
 	// racing with a concurrent config Replace from the API.
 	cfgSnap := m.cfg.Clone()
@@ -179,19 +193,26 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("listing servers: %w", err)
 	}
 
+	// Collect server IDs to connect under RLock, then connect outside
+	// the lock. This avoids the fragile unlock/re-lock pattern in the
+	// loop that could race with a concurrent RemoveServer modifying m.conns
+	// or the servers slice between iterations.
 	m.mu.RLock()
+	var toConnect []int64
 	for _, s := range servers {
 		if s.AutoConnect && s.Status == "disconnected" {
 			if _, exists := m.conns[s.ID]; !exists {
-				m.mu.RUnlock()
-				if err := m.ConnectServerByID(s.ID); err != nil {
-					m.logger.Warnf("connecting to server %s (id=%d) failed: %v", s.Address, s.ID, err)
-				}
-				m.mu.RLock()
+				toConnect = append(toConnect, s.ID)
 			}
 		}
 	}
 	m.mu.RUnlock()
+
+	for _, id := range toConnect {
+		if err := m.ConnectServerByID(id); err != nil {
+			m.logger.Warnf("connecting to server %d failed: %v", id, err)
+		}
+	}
 
 	return nil
 }
@@ -215,6 +236,14 @@ func (m *Manager) Stop() {
 	}
 	wg.Wait()
 
+	// Stop the config revision polling goroutine and wait for it to fully
+	// exit before closing the channel logger. This prevents a race between
+	// ReconcileChannels (still running in the goroutine) and Close().
+	if m.chlogReconcileDone != nil {
+		close(m.chlogReconcileDone)
+		<-m.chlogReconcileExited
+	}
+
 	// Flush per-channel log files to disk before tearing down the manager.
 	if m.chlog != nil {
 		if err := m.chlog.Close(); err != nil {
@@ -223,6 +252,44 @@ func (m *Manager) Stop() {
 	}
 
 	m.cancel()
+}
+
+// ---------------------------------------------------------------------------
+// Config revision polling for channel log reconciliation
+// ---------------------------------------------------------------------------
+
+// reconcileChannelLogLoop periodically polls the config revision number.
+// When it detects a change, it reconciles the channellog file handles:
+// channels removed from irc.channel_log get their log files closed.
+// Runs every 30 seconds (matching channellog's own sync interval).
+func (m *Manager) reconcileChannelLogLoop() {
+	defer close(m.chlogReconcileExited)
+
+	lastRev := m.cfg.GetConfigRevision()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.chlogReconcileDone:
+			return
+		case <-ticker.C:
+			rev := m.cfg.GetConfigRevision()
+			if rev == lastRev {
+				continue
+			}
+			lastRev = rev
+			m.logger.Debugf("channellog: config revision changed (%d), reconciling channel log files", rev)
+			m.chlog.ReconcileChannels(func(ch string) bool {
+				// "private" is not a real channel — it's the key used by
+				// LogPrivate for the private.log file. Always keep it.
+				if ch == "private" {
+					return true
+				}
+				return m.cfg.IsChannelLogged(ch)
+			})
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -928,18 +995,27 @@ func (mc *managedConnection) run() {
 		if r := recover(); r != nil {
 			mc.manager.logger.Errorf("PANIC in run() for server %d: %v\n%s", mc.id, r, debug.Stack())
 			mc.setStatus("error")
-			_ = mc.manager.store.SetServerStatus(context.Background(), mc.id, "error")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "error"); err != nil {
+				mc.manager.logger.Warnf("set server %d status=error in DB failed: %v", mc.id, err)
+			}
+			cancel()
 
 			// Clean up IRC client resources to prevent goroutine/channel leaks.
 			mc.closeTrackedClient(nil, "panic recovery")
 		}
 	}()
 
-	// Helper: final disconnect cleanup. Uses context.Background() because
+	// Helper: final disconnect cleanup. Uses a timeout context because
 	// mc.ctx is already cancelled when this runs (conn.disconnect() cancels
-	// it), and ExecContext with a cancelled context would silently fail.
+	// it), and a bare context.Background() would let store operations
+	// block indefinitely during shutdown.
 	disconnectCleanup := func() {
-		_ = mc.manager.store.SetServerStatus(context.Background(), mc.id, "disconnected")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "disconnected"); err != nil {
+			mc.manager.logger.Warnf("set server %d status=disconnected in DB failed: %v", mc.id, err)
+		}
 		mc.manager.emitEvent(Event{
 			Type:       EventServerDisconnected,
 			ServerID:   mc.id,
@@ -1046,8 +1122,15 @@ func (mc *managedConnection) connect() connectResult {
 			ServerAddr: mc.address,
 		})
 
-		// Auto-join channels (skip blacklisted)
-		for _, ch := range mc.autoJoinChs {
+		// Auto-join channels (skip blacklisted).
+		// Take a snapshot under RLock to avoid racing with concurrent
+		// joinChannel/leaveChannel (HTTP handler goroutines) that write
+		// to autoJoinChs under mc.mu.Lock().
+		mc.mu.RLock()
+		chsSnapshot := make([]string, len(mc.autoJoinChs))
+		copy(chsSnapshot, mc.autoJoinChs)
+		mc.mu.RUnlock()
+		for _, ch := range chsSnapshot {
 			if mc.manager.cfg.IsChannelBlacklisted(ch) {
 				mc.manager.logger.Infof("skipping auto-join of blacklisted channel %q on %s", ch, mc.address)
 				continue
@@ -1072,7 +1155,9 @@ func (mc *managedConnection) connect() connectResult {
 		// joined automatically (e.g. via WHOIS during a download).
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, true)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, true); err != nil {
+				mc.manager.logger.Warnf("mark channel %s joined in DB failed: %v", ch, err)
+			}
 		} else if err == nil {
 			_, err = mc.manager.store.AddChannel(mc.ctx, store.ChannelRecord{
 				ServerID: mc.id,
@@ -1117,7 +1202,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false); err != nil {
+				mc.manager.logger.Warnf("mark channel %s not joined in DB failed: %v", ch, err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -1140,7 +1227,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false); err != nil {
+				mc.manager.logger.Warnf("mark channel %s not joined in DB failed: %v", ch, err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -1163,7 +1252,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.UpdateChannelTopic(mc.ctx, channels.ID, topic)
+			if err := mc.manager.store.UpdateChannelTopic(mc.ctx, channels.ID, topic); err != nil {
+				mc.manager.logger.Warnf("update channel topic in DB failed: %v", err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -1221,12 +1312,16 @@ func (mc *managedConnection) connect() connectResult {
 	case <-connected:
 		// Connected successfully — proceed to Phase 2
 	case err := <-disconnected:
-		// Connection failed on first attempt
+		// Connection failed on first attempt.
 		mc.manager.logger.Errorf("connection to %s failed: %v", mc.address, err)
-		// Use context.Background() because mc.ctx might already be cancelled
+		// Use a timeout context because mc.ctx might already be cancelled
 		// if a concurrent DisconnectServer() called disconnect() while the
 		// connection was still being established.
-		_ = mc.manager.store.IncrementServerRetry(context.Background(), mc.id)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := mc.manager.store.IncrementServerRetry(shutdownCtx, mc.id); err != nil {
+			mc.manager.logger.Warnf("increment retry count for server %d in DB failed: %v", mc.id, err)
+		}
+		cancel()
 		return connectResultInitialFailure
 	}
 
@@ -1264,7 +1359,9 @@ func (mc *managedConnection) reconnectBackoff() bool {
 	mc.mu.Unlock()
 
 	// Notify the manager to update DB
-	_ = mc.manager.store.SetServerStatus(mc.ctx, mc.id, "reconnecting")
+	if err := mc.manager.store.SetServerStatus(mc.ctx, mc.id, "reconnecting"); err != nil {
+		mc.manager.logger.Warnf("set server %d status=reconnecting in DB failed: %v", mc.id, err)
+	}
 
 	mc.manager.emitEvent(Event{
 		Type:       EventServerReconnecting,
