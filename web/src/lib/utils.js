@@ -170,3 +170,28 @@ export function channelJoinedReason(joined, channelName, actionLabel = 'perform 
     disabled: `Join${ch} first to ${actionLabel.toLowerCase()}`,
   });
 }
+
+/**
+ * Create a focusEditForm function that scrolls to the edit form card,
+ * briefly highlights it, and focuses the query input. The returned
+ * function manages its own timers internally — subsequent calls cancel
+ * any still-pending timers from the previous call.
+ *
+ * Usage:
+ *   const focusEditForm = createEditFormFocuser();
+ *   // in your startEdit handler:
+ *   focusEditForm(formCard, queryInput, (v) => { formHighlight = v; });
+ */
+export function createEditFormFocuser() {
+  let highlightTimer = null;
+  let focusTimer = null;
+
+  return function focusEditForm(formCard, queryInput, setHighlight) {
+    if (highlightTimer) clearTimeout(highlightTimer);
+    if (focusTimer) clearTimeout(focusTimer);
+    if (formCard) formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setHighlight(true);
+    highlightTimer = setTimeout(() => { setHighlight(false); highlightTimer = null; }, 1200);
+    focusTimer = setTimeout(() => { queryInput?.focus(); focusTimer = null; }, 400);
+  };
+}

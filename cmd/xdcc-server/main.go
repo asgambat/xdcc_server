@@ -222,7 +222,7 @@ func runServer(configPath, dbPath string, pprof bool) error {
 
 	// ── HTTP API ─────────────────────────────────────────────────────────
 	apiHandler := api.New(st, ircMgr, queueMgr, searchAgg, sseHub,
-		logBroadcaster, cfg, configPath, srvLogger, met, sseDebugLogger)
+		logBroadcaster, cfg, configPath, srvLogger, met, sseDebugLogger, Version)
 
 	router := apiHandler.Router()
 

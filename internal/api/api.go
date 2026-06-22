@@ -44,6 +44,7 @@ type API struct {
 	SseDebugLogger   *logging.Logger // separate logger for SSE debug (avoids feedback loop with LogBroadcaster)
 	Metrics          *metrics.Collector
 	StartTime        time.Time
+	Version          string                      // server version, set at build time via ldflags (-X main.Version=…)
 	MsgRateLimiter   atomic.Pointer[RateLimiter] // per-IP rate limiter for send-message (atomic for concurrent access)
 }
 
@@ -80,12 +81,11 @@ type QueueManager interface {
 	Unsubscribe(ch chan queue.Event)
 }
 
-// New creates a new API handler container.
 func New(st *store.SQLiteStore, ircMgr IRCManager, queueMgr QueueManager,
 	searchAgg *searchagg.Aggregator, sseHub *sse.Hub,
 	logBroadcaster *logging.LogBroadcaster,
 	cfg *config.Config, configPath string, logger *logging.Logger, met *metrics.Collector,
-	sseDebugLogger *logging.Logger) *API {
+	sseDebugLogger *logging.Logger, version string) *API {
 	// Build the rate limiter from config defaults. It is lazily re-created
 	// when config reloads via the handler (the API struct is replaced).
 	api := &API{
@@ -101,6 +101,7 @@ func New(st *store.SQLiteStore, ircMgr IRCManager, queueMgr QueueManager,
 		SseDebugLogger:   sseDebugLogger,
 		Metrics:          met,
 		StartTime:        time.Now(),
+		Version:          version,
 	}
 	// Build the rate limiter from config defaults.
 	if cfg.IRC.MessageRateLimit > 0 && cfg.IRC.MessageRateWindowSec > 0 {

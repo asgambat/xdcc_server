@@ -2,13 +2,18 @@
   import { onMount } from 'svelte';
   import { presets, watchlists, addToast, navigateToSearch } from '../lib/stores.js';
   import { PresetsAPI, WatchlistsAPI } from '../lib/api.js';
-  import { normalizeSize } from '../lib/utils.js';
+  import { normalizeSize, createEditFormFocuser } from '../lib/utils.js';
   import Modal from './Modal.svelte';
 
 
   let loading = $state(true);
   let editingId = $state(null);
   let form = $state({ name: '', query: '', providers: [], min_size: '', max_size: '' });
+  let formCard = $state(null);
+  let queryInput = $state(null);
+  let formHighlight = $state(false);
+
+  const focusEditForm = createEditFormFocuser();
 
   // --- Create watchlist from preset modal state ---
   let showWlModal = $state(false);
@@ -25,6 +30,8 @@
 
   function startEdit(preset) {
     editingId = preset.id;
+    // Scroll to the edit form at the top of the page, highlight it, and focus the query input
+    focusEditForm(formCard, queryInput, (v) => { formHighlight = v; });
     form = {
       name: preset.name || '',
       query: preset.query || '',
@@ -157,7 +164,7 @@
 {#if loading}
   <div class="spinner"></div>
 {:else}
-  <div class="card mb-2">
+  <div class="card mb-2" class:card-highlight={formHighlight} bind:this={formCard}>
     <div class="card-header">
       <span class="card-title">{editingId ? 'Edit Preset' : 'Create Preset'}</span>
     </div>
@@ -168,7 +175,7 @@
       </div>
       <div class="form-group">
         <label class="form-label" for="preset-query">Query</label>
-        <input id="preset-query" class="form-input" bind:value={form.query} placeholder="e.g. Ubuntu 24.04" />
+        <input id="preset-query" class="form-input" bind:value={form.query} bind:this={queryInput} placeholder="e.g. Ubuntu 24.04" />
       </div>
     </div>
     <div class="form-row">

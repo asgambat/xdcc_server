@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import { currentView, toasts, sseStatus, stats, status, config, downloads, servers, hasAdminToken, setAdminToken, getAdminToken, onAuthFailure, startTokenExpiryCheck, stopTokenExpiryCheck, theme, SYSTEM_VIEWS } from './lib/stores.js';
+  import { currentView, toasts, sseStatus, stats, status, version, config, downloads, servers, hasAdminToken, setAdminToken, getAdminToken, onAuthFailure, startTokenExpiryCheck, stopTokenExpiryCheck, theme, SYSTEM_VIEWS } from './lib/stores.js';
   import { sseClient, SystemAPI, DownloadsAPI, ServersAPI } from './lib/api.js';
   import { debounce, escapeHtml } from './lib/utils.js';
   import Sidebar from './components/Sidebar.svelte';
@@ -158,12 +158,13 @@
 
     // Load initial data
     try {
-      const [statsData, statusData, cfg, dls, srvs] = await Promise.all([
+      const [statsData, statusData, cfg, dls, srvs, ver] = await Promise.all([
         SystemAPI.stats().catch(() => null),
         SystemAPI.status().catch(() => null),
         SystemAPI.config().catch(() => null),
         DownloadsAPI.list().catch(() => []),
         ServersAPI.list().catch(() => []),
+        SystemAPI.version().catch(() => null),
       ]);
       if (dls?.downloads || dls) downloads.set(dls?.downloads || dls);
       if (srvs) servers.set(srvs);
@@ -179,6 +180,7 @@
           document.documentElement.setAttribute('data-theme', statusData.ui_theme);
         }
       }
+      if (ver && ver.version) version.set(ver.version);
       if (cfg) {
         config.set(cfg);
       }

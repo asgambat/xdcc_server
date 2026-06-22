@@ -72,7 +72,7 @@ func newTestAPI(t *testing.T) *testAPI {
 
 	met := metrics.New()
 	sseDebugLogger := logging.New(logging.LevelDebug, "", 0)
-	api := New(st, nil, nil, agg, hub, nil, cfg, "", apiLogger, met, sseDebugLogger)
+	api := New(st, nil, nil, agg, hub, nil, cfg, "", apiLogger, met, sseDebugLogger, "0.9.5-test")
 
 	router := api.Router()
 
@@ -148,9 +148,57 @@ func TestVersion(t *testing.T) {
 	}
 
 	var resp map[string]string
-	_ = json.NewDecoder(w.Body).Decode(&resp)
-	if resp["version"] == "" {
-		t.Errorf("expected version to be set, got empty")
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["version"] != "0.9.5-test" {
+		t.Errorf("expected version \"0.9.5-test\", got %q", resp["version"])
+	}
+	if resp["min_compatible_client_version"] != "0.9.5-test" {
+		t.Errorf("expected min_compatible_client_version \"0.9.5-test\", got %q", resp["min_compatible_client_version"])
+	}
+}
+
+// TestVersion_FallbackEmpty verifies the handler reports "dev" when the API
+// struct's Version field is empty (e.g. test fixtures that bypass the wiring).
+func TestVersion_FallbackEmpty(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "empty-version.db")
+	if err := copyFile(templateDBPath, dbPath); err != nil {
+		t.Fatalf("copying template DB: %v", err)
+	}
+	apiLogger := logging.New(logging.LevelDebug, "", 0)
+	st, err := store.NewSQLiteStore(dbPath, 2000, apiLogger)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer st.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.Security.AdminToken = testAdminToken
+	hub := sse.NewHub(10)
+	defer hub.Close()
+	agg := searchagg.New(st, &cfg.Search, apiLogger)
+	defer agg.Stop()
+	met := metrics.New()
+
+	api := New(st, nil, nil, agg, hub, nil, cfg, "", apiLogger, met, apiLogger, "")
+	router := api.Router()
+
+	req := httptest.NewRequest("GET", "/api/version", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["version"] != "dev" {
+		t.Errorf("expected fallback version \"dev\", got %q", resp["version"])
 	}
 }
 

@@ -2,15 +2,17 @@
   import { onMount } from 'svelte';
   import { watchlists, addToast, navigateToSearch } from '../lib/stores.js';
   import { WatchlistsAPI, DownloadsAPI } from '../lib/api.js';
-  import { escapeHtml } from '../lib/utils.js';
+  import { escapeHtml, createEditFormFocuser } from '../lib/utils.js';
   import Modal from './Modal.svelte';
 
   let loading = $state(true);
   let editingId = $state(null);
   let form = $state({ name: '', query: '', interval_minutes: 60, providers: [], min_size: '', max_size: '', notify_enabled: true, auto_enqueue: false, enabled: true });
   let formCard = $state(null);
+  let queryInput = $state(null);
   let formHighlight = $state(false);
-  let highlightTimer = $state(null);
+
+  const focusEditForm = createEditFormFocuser();
 
   // --- Results modal state ---
   let showResultsModal = $state(false);
@@ -43,11 +45,8 @@
 
   function startEdit(w) {
     editingId = w.id;
-    // Scroll to the edit form at the top of the page and highlight it briefly
-    if (formCard) formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    formHighlight = true;
-    if (highlightTimer) clearTimeout(highlightTimer);
-    highlightTimer = setTimeout(() => { formHighlight = false; highlightTimer = null; }, 1200);
+    // Scroll to the edit form at the top of the page, highlight it, and focus the query input
+    focusEditForm(formCard, queryInput, (v) => { formHighlight = v; });
     form = {
       name: w.name || '',
       query: w.query || '',
@@ -183,7 +182,7 @@
       </div>
       <div class="form-group">
         <label class="form-label" for="wl-form-query">Query</label>
-        <input id="wl-form-query" class="form-input" bind:value={form.query} placeholder="e.g. Ubuntu 24.04" />
+        <input id="wl-form-query" class="form-input" bind:value={form.query} bind:this={queryInput} placeholder="e.g. Ubuntu 24.04" />
       </div>
       <div class="form-group">
         <label class="form-label" for="wl-form-interval">Interval (minutes)</label>

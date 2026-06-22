@@ -44,9 +44,13 @@ func (a *API) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // =========================================================================
 
 func (a *API) handleVersion(w http.ResponseWriter, r *http.Request) {
+	v := a.Version
+	if v == "" {
+		v = "dev"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"version":                       "0.2.0",
-		"min_compatible_client_version": "0.2.0",
+		"version":                       v,
+		"min_compatible_client_version": v,
 	})
 }
 

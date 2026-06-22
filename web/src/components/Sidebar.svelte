@@ -1,7 +1,6 @@
 <script>
-  import { currentView, downloadsBadge, hasAdminToken, SYSTEM_VIEWS } from '../lib/stores.js';
+  import { currentView, downloadsBadge, hasAdminToken, version, SYSTEM_VIEWS } from '../lib/stores.js';
   import { createEventDispatcher } from 'svelte';
-
   export let sidebarOpen;
   export let toggleSidebar;
 
@@ -34,7 +33,12 @@
   <div class="sidebar-header">
     <div class="logo-group">
       <div class="sidebar-logo">⚡</div>
-      <div class="sidebar-title">XDCC Manager</div>
+      <div class="sidebar-titles">
+        <div class="sidebar-title">XDCC Manager</div>
+        {#if $version}
+          <div class="sidebar-version" title="Server version">v{$version}</div>
+        {/if}
+      </div>
     </div>
     <button class="hamburger" onclick={toggleSidebar} aria-label="Close sidebar">✕</button>
   </div>
@@ -111,7 +115,20 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 1.1rem; flex-shrink: 0;
   }
-  .sidebar-title { font-size: 1rem; font-weight: 600; white-space: nowrap; }
+  .sidebar-titles {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    min-width: 0;
+  }
+  .sidebar-version {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+  }
   .sidebar-nav { flex: 1; overflow-y: auto; padding: 0.75rem 0; }
   .nav-section {
     padding: 0.5rem 1.25rem 0.25rem;
