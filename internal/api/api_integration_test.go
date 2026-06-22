@@ -186,7 +186,7 @@ func TestVersion_FallbackEmpty(t *testing.T) {
 	api := New(st, nil, nil, agg, hub, nil, cfg, "", apiLogger, met, apiLogger, "")
 	router := api.Router()
 
-	req := httptest.NewRequest("GET", "/api/version", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
