@@ -59,7 +59,7 @@ type SQLiteStore struct {
 // serializes writes internally but supports concurrent reads. A value of
 // MaxParallelTotal+1 (capped at 10) ensures active download progress
 // callbacks don't starve other operations (enqueue, pause, etc.).
-func NewSQLiteStore(dbPath string, busyTimeoutMs int, maxOpenConns int, log *logging.Logger) (*SQLiteStore, error) {
+func NewSQLiteStore(dbPath string, busyTimeoutMs, maxOpenConns int, log *logging.Logger) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening SQLite database: %w", err)

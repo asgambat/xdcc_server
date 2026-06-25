@@ -269,7 +269,7 @@ func (m *Manager) reconcileChannelLogLoop() {
 	// a config update that lands between the read and the first tick is
 	// missed. This is acceptable because the ticker fires every 30s, so
 	// the change is picked up on the next tick at worst. If this becomes
-	// an issue, initialize lastRev = 0 to force a reconcilation on the
+	// an issue, initialize lastRev = 0 to force a reconciliation on the
 	// first tick instead.
 	lastRev := m.cfg.GetConfigRevision()
 	ticker := time.NewTicker(30 * time.Second)
