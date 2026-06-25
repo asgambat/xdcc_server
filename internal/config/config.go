@@ -1162,6 +1162,12 @@ func (c *Config) cloneLocked() *Config {
 // fn must not call back into c (e.g. via c.Clone or c.Replace) — it should
 // only mutate the passed *Config value. Calling back would deadlock because
 // mu is held for the entire duration.
+//
+// WARNING: fn runs under mu.Lock(), which blocks all other readers and
+// writers of Config. fn must NOT perform any I/O, blocking operations,
+// or slow computation. Keep it limited to cheap field assignments.
+// If you need to add I/O (e.g. validation, persistence), do it BEFORE
+// calling SnapshotAndApply, not inside fn.
 func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1178,6 +1184,9 @@ func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
 
 	// Inline field-by-field copy from Replace — cannot call Replace because
 	// it would deadlock trying to acquire mu.Lock() again.
+	// IMPORTANT: when adding a new top-level Config field, add it both
+	// here AND in Replace() below. If they diverge, SnapshotAndApply will
+	// silently drop the new field on live config updates.
 	c.IRC = post.IRC
 	c.HTTP = post.HTTP
 	c.Security = post.Security
@@ -1196,6 +1205,14 @@ func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
 // The mutex fields of c are preserved. other must be a local (non-shared) Config value
 // built in a single goroutine before calling Replace. It is passed by pointer
 // to avoid copying the embedded mutex when calling.
+//
+// NOTE: Replace does NOT bump the config revision counter (revision).
+// The revision is only incremented on disk writes (Save, SaveRaw,
+// ApplyPartial). If you call Replace without subsequently persisting,
+// components polling GetConfigRevision() will not detect the change.
+// When called inside SnapshotAndApply's fn (the typical pattern), this is
+// safe because the caller always follows with ApplyPartial which saves
+// and bumps the revision.
 func (c *Config) Replace(other *Config) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

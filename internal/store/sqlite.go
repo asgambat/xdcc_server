@@ -54,17 +54,25 @@ type SQLiteStore struct {
 // NewSQLiteStore creates a new SQLiteStore and runs migrations.
 // The log parameter is used for warning messages (e.g. corrupted rows).
 // A nil logger is tolerated and falls back to a silent discard.
-func NewSQLiteStore(dbPath string, busyTimeoutMs int, log *logging.Logger) (*SQLiteStore, error) {
+// NewSQLiteStore creates a new SQLiteStore with the given configuration.
+// maxOpenConns controls the connection pool size — with WAL mode, SQLite
+// serializes writes internally but supports concurrent reads. A value of
+// MaxParallelTotal+1 (capped at 10) ensures active download progress
+// callbacks don't starve other operations (enqueue, pause, etc.).
+func NewSQLiteStore(dbPath string, busyTimeoutMs int, maxOpenConns int, log *logging.Logger) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening SQLite database: %w", err)
 	}
 
 	// Configure connection pool — SQLite serializes writes but supports
-	// concurrent reads with WAL mode. 3 connections allow up to 2 reads
-	// to proceed while a write is in progress.
-	db.SetMaxOpenConns(3)
-	db.SetMaxIdleConns(3)
+	// concurrent reads with WAL mode. The pool size is set to accommodate
+	// concurrent progress callbacks + room for other DB operations.
+	if maxOpenConns < 1 {
+		maxOpenConns = 3
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
 
 	// Enable WAL mode for better concurrent read performance
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {

@@ -40,18 +40,18 @@ func (c *Client) handleDCC(text, sourceHost string) {
 }
 
 func (c *Client) handleDCCSend(parts []string, sourceHost string) {
+	// Capture pack once at handler entry (fix 2.19) so all references within
+	// this function use the same snapshot even if packIdxVal advances.
+	pack := c.currentPack()
+
 	if len(parts) < 5 {
-		c.logf("Malformed DCC SEND: %v", parts)
+		c.noticef("Malformed DCC SEND (bot=%s pack=%d): %v", pack.Bot, pack.PackNumber, parts)
 		return
 	}
 	filename := parts[1]
 	ipNum := parts[2]
 	port := parts[3]
 	sizeStr := parts[4]
-
-	// Capture pack once at handler entry (fix 2.19) so all references within
-	// this function use the same snapshot even if packIdxVal advances.
-	pack := c.currentPack()
 
 	// Passive DCC: the bot reports IP 0.0.0.0 (NAT/firewall scenario).
 	// Fall back to the source hostname from the IRC CTCP event, or to the
@@ -121,6 +121,7 @@ func (c *Client) startDownload(addr string, appendMode bool) {
 	path := pack.GetFilepath()
 	f, err := os.OpenFile(path, flag, 0o644)
 	if err != nil {
+		c.noticef("Cannot open download file %s (bot=%s pack=%d): %v", path, pack.Bot, pack.PackNumber, err)
 		c.finishWithError(fmt.Errorf("cannot open file: %w", err))
 		return
 	}
@@ -128,6 +129,7 @@ func (c *Client) startDownload(addr string, appendMode bool) {
 	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
 	if err != nil {
 		f.Close()
+		c.noticef("DCC connection failed to %s (bot=%s pack=%d): %v", addr, pack.Bot, pack.PackNumber, err)
 		c.finishWithError(fmt.Errorf("DCC connection failed: %w", err))
 		return
 	}
@@ -159,6 +161,8 @@ func (c *Client) startDownloadAppend() {
 	peerAddr := c.ps.peerAddr
 	c.ps.mu.Unlock()
 	if peerAddr == "" {
+		pack := c.currentPack()
+		c.noticef("DCC resume failed: no peer address (bot=%s pack=%d)", pack.Bot, pack.PackNumber)
 		c.finishWithError(ErrDownloadFailed)
 		return
 	}
@@ -171,10 +175,18 @@ func (c *Client) startDownloadAppend() {
 // When the connection closes (EOF) the defer block decides success/failure by
 // comparing progress to the expected file size.
 func (c *Client) receiveData() {
-	// Capture downloadDone locally so the throttle select does not
-	// dynamically read c.ps.downloadDone, which resetForPack() replaces
-	// between packs.
-	downloadDone := c.ps.downloadDone
+	// Capture packState locally so the entire function uses a consistent
+	// snapshot. This prevents "sync: unlock of unlocked mutex" panics when
+	// resetForPack() replaces c.ps in another goroutine (e.g. stallWatcher
+	// triggers finishWithError → waitForCurrentPack returns → retry →
+	// resetForPack) while this goroutine's defer is still running.
+	//
+	// Same safety argument as ackSender and progressPrinter: resetForPack()
+	// closes the old downloadDone channel, which unblocks any pending
+	// select on it. The captured packState remains valid for reading fields
+	// even after c.ps is replaced — channels are closed, not freed.
+	ps := c.ps
+	downloadDone := ps.downloadDone
 
 	// Pre-create throttle timer to avoid per-chunk allocations on long downloads.
 	var throttleTimer *time.Timer
@@ -189,33 +201,80 @@ func (c *Client) receiveData() {
 		if throttleTimer != nil {
 			throttleTimer.Stop()
 		}
-		c.ps.mu.Lock()
-		c.ps.downloading = false
-		if c.ps.dccFile != nil {
-			c.ps.dccFile.Close()
+		ps.mu.Lock()
+		ps.downloading = false
+		if ps.dccFile != nil {
+			ps.dccFile.Close()
 		}
-		if c.ps.dccConn != nil {
-			c.ps.dccConn.Close()
-			c.ps.dccConn = nil
+		if ps.dccConn != nil {
+			ps.dccConn.Close()
+			ps.dccConn = nil
 		}
-		size := c.ps.filesize
-		c.ps.mu.Unlock()
+		size := ps.filesize
+		ps.mu.Unlock()
 
-		prog := atomic.LoadInt64(&c.ps.progress)
-		if prog >= size {
+		prog := atomic.LoadInt64(&ps.progress)
+		if prog >= size && size > 0 {
+			// Clear any previously recorded error (e.g. ErrTimeout from
+			// stallWatcher) when all bytes have been received. The stall
+			// watcher may have fired while the bot was sending the last
+			// chunk but before the TCP connection was closed, setting
+			// downloadError to ErrTimeout. Since we have the full file,
+			// this is a clean success.
+			//
+			// NOTE: this is safe because prog >= size guarantees we
+			// received every byte the bot advertised. If size were
+			// misinterpreted (e.g. bot reports wrong size), the file
+			// could be truncated yet still pass here — but there is no
+			// way to detect that without an external checksum.
+			ps.mu.Lock()
+			if ps.downloadError != nil {
+				c.noticef("Download complete (%d/%d bytes) — overriding previous error: %v", prog, size, ps.downloadError)
+				ps.downloadError = nil
+			}
+			ps.mu.Unlock()
 			c.logf("Download complete")
-			c.finishSuccess()
+			elapsed := time.Since(ps.downStartTime)
+			speedStr := formatSpeed(float64(size) / elapsed.Seconds())
+			c.noticef("File %s downloaded successfully in %s at %s",
+				c.currentPack().GetFilename(),
+				formatDuration(elapsed),
+				speedStr)
+			// Complete on the captured packState (ps), not c.ps, to
+			// avoid operating on a packState that resetForPack() may
+			// have already replaced (e.g. stall → retry race).
+			ps.downloadDoneOnce.Do(func() {
+				close(ps.downloadDone)
+			})
+		} else if prog >= size {
+			// Both are zero — no data was transferred. This is unlikely
+			// for XDCC (bots rarely send zero-byte packs) but is a
+			// valid edge case that should not be treated as an error.
+			c.logf("Download complete (zero-byte file)")
+			ps.downloadDoneOnce.Do(func() {
+				close(ps.downloadDone)
+			})
 		} else {
-			c.logf("Download incomplete: got %d of %d bytes", prog, size)
-			c.finishWithError(ErrDownloadFailed)
+			c.noticef("Download incomplete: got %d of %d bytes (bot=%s pack=%d)", prog, size, c.currentPack().Bot, c.currentPack().PackNumber)
+			// Record the error on the captured packState so it's
+			// visible to the caller (downloadPackAtIndex) even if
+			// resetForPack() has already replaced c.ps.
+			ps.mu.Lock()
+			if ps.downloadError == nil {
+				ps.downloadError = ErrDownloadFailed
+			}
+			ps.mu.Unlock()
+			ps.downloadDoneOnce.Do(func() {
+				close(ps.downloadDone)
+			})
 		}
 	}()
 
 	// Take a local reference to dccConn under lock to avoid a data race:
 	// stallWatcher may concurrently set c.ps.dccConn = nil under c.ps.mu.
-	c.ps.mu.Lock()
-	conn := c.ps.dccConn
-	c.ps.mu.Unlock()
+	ps.mu.Lock()
+	conn := ps.dccConn
+	ps.mu.Unlock()
 	if conn == nil {
 		return
 	}
@@ -227,23 +286,23 @@ func (c *Client) receiveData() {
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			c.ps.mu.Lock()
-			_, werr := c.ps.dccFile.Write(buf[:n])
-			c.ps.mu.Unlock()
+			ps.mu.Lock()
+			_, werr := ps.dccFile.Write(buf[:n])
+			ps.mu.Unlock()
 			if werr != nil {
-				c.logf("Write error: %v", werr)
+				c.noticef("Write error (bot=%s pack=%d): %v", c.currentPack().Bot, c.currentPack().PackNumber, werr)
 				return
 			}
-			atomic.AddInt64(&c.ps.progress, int64(n))
-			c.ps.lastActivity.Store(time.Now().UnixNano())
+			atomic.AddInt64(&ps.progress, int64(n))
+			ps.lastActivity.Store(time.Now().UnixNano())
 
 			if c.opts.ThrottleBytes > 0 {
-				c.ps.mu.Lock()
-				delta := time.Since(c.ps.dccTimestamp).Seconds()
+				ps.mu.Lock()
+				delta := time.Since(ps.dccTimestamp).Seconds()
 				chunkTime := float64(n) / float64(c.opts.ThrottleBytes)
 				sleepTime := chunkTime - delta
-				c.ps.dccTimestamp = time.Now()
-				c.ps.mu.Unlock()
+				ps.dccTimestamp = time.Now()
+				ps.mu.Unlock()
 				if sleepTime > 0 {
 					throttleTimer.Reset(time.Duration(sleepTime * float64(time.Second)))
 					select {
@@ -266,6 +325,11 @@ func (c *Client) ackSender() {
 	// dynamically read c.ps, which resetForPack() replaces between packs.
 	// Without this, the goroutine could block forever on the new packState's
 	// channels after c.ps is replaced (goroutine leak).
+	//
+	// This is safe because resetForPack() closes the old downloadDone
+	// channel, which unblocks the select below. The captured packState
+	// fields (ackQueue, downloadDone) remain valid for reading even after
+	// c.ps is replaced — the channels are closed, not garbage-collected.
 	ps := c.ps
 	ackQueue := ps.ackQueue
 	downloadDone := ps.downloadDone
@@ -294,7 +358,13 @@ func (c *Client) ackSender() {
 // transfers ≤ 4 GiB, and 8 bytes for larger files (extended DCC ACK, RFC 2571).
 // If the queue is full the ACK is dropped — the next chunk will enqueue a fresh one.
 func (c *Client) enqueueACK() {
-	prog := atomic.LoadInt64(&c.ps.progress)
+	// Capture packState locally — this is called from receiveData which
+	// already captured its own ps, but enqueueACK is a separate method
+	// and c.ps may have been replaced by resetForPack() by the time
+	// receiveData calls this (receiveData captures ps for its own
+	// use but c.ps is still read here).
+	ps := c.ps
+	prog := atomic.LoadInt64(&ps.progress)
 	var ack []byte
 	if prog >= 0 && prog <= 0xFFFFFFFF {
 		ack = make([]byte, 4)
@@ -304,7 +374,7 @@ func (c *Client) enqueueACK() {
 		binary.BigEndian.PutUint64(ack, uint64(prog))
 	}
 	select {
-	case c.ps.ackQueue <- ack:
+	case ps.ackQueue <- ack:
 	default:
 	}
 }
@@ -312,6 +382,9 @@ func (c *Client) enqueueACK() {
 func (c *Client) progressPrinter() {
 	// Capture packState and its channels locally so the goroutine does not
 	// dynamically read c.ps, which resetForPack() replaces between packs.
+	//
+	// Same safety argument as ackSender: resetForPack() closes the old
+	// downloadDone channel, which unblocks any pending select.
 	ps := c.ps
 	downloadDone := ps.downloadDone
 	downloadStarted := ps.downloadStarted
@@ -401,15 +474,19 @@ func (c *Client) progressPrinter() {
 // stallWatcher monitors transfer progress. On stall it closes the DCC
 // connection (not the IRC connection) so the download can be retried.
 func (c *Client) stallWatcher() {
+	// Capture packState locally so the goroutine does not dynamically read
+	// c.ps, which resetForPack() replaces between packs. Same safety
+	// argument as ackSender and progressPrinter.
+	ps := c.ps
 	stall := time.Duration(c.opts.StallTimeout) * time.Second
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.ps.downloadDone:
+		case <-ps.downloadDone:
 			return
 		case <-ticker.C:
-			last := c.ps.lastActivity.Load()
+			last := ps.lastActivity.Load()
 			if last == 0 {
 				continue
 			}
@@ -417,12 +494,12 @@ func (c *Client) stallWatcher() {
 			if idle >= stall {
 				c.noticef("Transfer stalled for %s (no data received), aborting",
 					idle.Round(time.Second))
-				c.ps.mu.Lock()
-				if c.ps.dccConn != nil {
-					c.ps.dccConn.Close()
-					c.ps.dccConn = nil
+				ps.mu.Lock()
+				if ps.dccConn != nil {
+					ps.dccConn.Close()
+					ps.dccConn = nil
 				}
-				c.ps.mu.Unlock()
+				ps.mu.Unlock()
 				c.finishWithError(ErrTimeout)
 				return
 			}

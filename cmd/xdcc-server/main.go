@@ -91,7 +91,17 @@ func runServer(configPath, dbPath string, pprof bool) error {
 	srvLogger.Infof("database: %s", dbPath)
 
 	// ── Initialize store and run migrations ─────────────────────────────
-	st, err := store.NewSQLiteStore(dbPath, cfg.Storage.BusyTimeoutMs, srvLogger)
+	// Connection pool: MaxParallelTotal+1 so progress callbacks don't starve
+	// other operations. Cap at 10 to avoid overwhelming SQLite.
+	maxOpenConns := cfg.Download.MaxParallelTotal + 1
+	if maxOpenConns > 10 {
+		maxOpenConns = 10
+	}
+	if maxOpenConns < 1 {
+		maxOpenConns = 1
+	}
+	srvLogger.Infof("database max connections: %d (parallel downloads: %d)", maxOpenConns, cfg.Download.MaxParallelTotal)
+	st, err := store.NewSQLiteStore(dbPath, cfg.Storage.BusyTimeoutMs, maxOpenConns, srvLogger)
 	if err != nil {
 		return fmt.Errorf("initializing database: %w", err)
 	}

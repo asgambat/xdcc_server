@@ -110,12 +110,19 @@ func runDownload(
 	logger.Printf("✓ [download %d] Transfer complete — moving from temp to destination (file=%s)",
 		rec.ID, rec.Filename)
 
-	// Verify the file exists
-	if _, err := os.Stat(srcPath); err != nil {
+	// Verify the file exists in the temp directory
+	fileInfo, err := os.Stat(srcPath)
+	if err != nil {
+		logger.Printf("✗ [download %d] Downloaded file not found at %s: %v", rec.ID, srcPath, err)
 		result.Error = fmt.Errorf("downloaded file not found at %s: %w", srcPath, err)
 		completeFn(result)
 		return
 	}
+
+	// Log file size for debugging move failures
+	srcSize := fileInfo.Size()
+	logger.Printf("✓ [download %d] Temp file verified: %s (%s)",
+		rec.ID, srcPath, entities.HumanReadableBytes(srcSize))
 
 	// --- Move to destination directory ---
 	// Use discovered filename from pack if the record's filename is still empty
@@ -174,17 +181,61 @@ func runDownload(
 	}
 
 	// Ensure destination directory exists
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		result.Error = fmt.Errorf("creating destination directory: %w", err)
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		logger.Printf("✗ [download %d] Failed to create destination directory %s: %v", rec.ID, destDir, err)
+		result.Error = fmt.Errorf("creating destination directory %s: %w", destDir, err)
 		completeFn(result)
 		return
 	}
 
-	// Move the file (rename works within same filesystem; fall back to copy+delete)
-	if err := os.Rename(srcPath, destPath); err != nil {
-		// Cross-filesystem move: copy then delete
-		if err := copyFile(srcPath, destPath); err != nil {
-			result.Error = fmt.Errorf("moving file to destination: %w", err)
+	// Move the file from temp to destination with retries.
+	// On some filesystems (NFS, network mounts, busy disks), the rename
+	// may fail transiently. Retry up to 3 times with a short delay before
+	// falling back to copy+delete, which also retries.
+	var moveErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			logger.Printf("→ [download %d] Retry %d/3 moving temp file to destination", rec.ID, attempt+1)
+		}
+
+		moveErr = os.Rename(srcPath, destPath)
+		if moveErr == nil {
+			break
+		}
+
+		// Check if the rename may have partially succeeded despite
+		// returning an error: if the source is gone and the destination
+		// exists, assume the move completed.
+		if _, statErr2 := os.Stat(srcPath); os.IsNotExist(statErr2) {
+			if _, statErr := os.Stat(destPath); statErr == nil {
+				logger.Printf("✓ [download %d] File already at destination (previous move succeeded)", rec.ID)
+				moveErr = nil
+				break
+			}
+		}
+	}
+
+	if moveErr != nil {
+		// Cross-filesystem move: copy then delete, with retries
+		logger.Printf("→ [download %d] os.Rename failed (%v) — falling back to copy+delete", rec.ID, moveErr)
+		var copyErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				logger.Printf("→ [download %d] Retry copy attempt %d/2", rec.ID, attempt+1)
+			}
+			copyErr = copyFile(srcPath, destPath)
+			if copyErr == nil {
+				break
+			}
+		}
+		if copyErr != nil {
+			logger.Printf("✗ [download %d] Failed to move file from temp to dest: rename=%v, copy=%v — file left at %s",
+				rec.ID, moveErr, copyErr, srcPath)
+			result.Error = fmt.Errorf("moving file to destination: rename=%w, copy=%w (file left at %s)",
+				moveErr, copyErr, srcPath)
 			completeFn(result)
 			return
 		}
@@ -192,6 +243,8 @@ func runDownload(
 			logger.Printf("warning: failed to remove temp file %s after copy: %v", srcPath, err)
 		}
 	}
+
+	logger.Printf("✓ [download %d] File moved: %s → %s", rec.ID, srcPath, destPath)
 
 	result.FilePath = destPath
 	result.Error = nil

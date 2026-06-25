@@ -730,6 +730,10 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 	// the DCC data transfer time is measured (excluding WHOIS/JOIN/XDCC).
 	var startTime time.Time
 
+	// Last progress DB write time for dynamic throttling.
+	// Tracked per-download so a slow download doesn't starve others.
+	var lastProgressWrite time.Time
+
 	// Prepare worker config — snapshot download config once to avoid repeated
 	// locking and ensure consistent values throughout the download.
 	dlSnap := qm.cfg.GetDownloadConfig()
@@ -766,19 +770,14 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 			default:
 			}
 
-			// Update store (status is NOT set here — MarkDownloadStarted
-			// already set it before this callback began).
-			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
-			if err := qm.store.UpdateDownloadProgress(storeCtx, d.ID, bytesReceived, int64(speedBPS)); err != nil {
-				qm.log.Warnf("update download %d progress in DB failed: %v", d.ID, err)
-			}
-
 			// Snapshot pack fields via thread-safe getters to avoid data races
 			// with the IRC DCC handler that writes to the pack concurrently.
 			packFilename := pack.GetFilename()
 			packSize := pack.GetSize()
 
-			// Emit progress event
+			// Emit progress event first (always, for UI responsiveness).
+			// This is decoupled from the DB write below so the UI stays
+			// smooth even when throttling database updates.
 			qm.emitEvent(Event{
 				Type:          EventDownloadProgress,
 				DownloadID:    d.ID,
@@ -787,6 +786,29 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				SpeedBPS:      speedBPS,
 				Filename:      packFilename,
 			})
+
+			// Dynamic throttle: reduce DB write frequency when many
+			// downloads are active. This prevents progress callbacks
+			// from saturating the connection pool and starving other
+			// operations (enqueue, pause, etc.).
+			qm.mu.RLock()
+			activeCount := qm.globalCount
+			qm.mu.RUnlock()
+
+			throttleInterval := progressThrottleInterval(activeCount)
+			if time.Since(lastProgressWrite) < throttleInterval {
+				return
+			}
+			lastProgressWrite = time.Now()
+
+			// Update store (status is NOT set here — MarkDownloadStarted
+			// already set it before this callback began).
+			// Cancel context immediately after use — defer would accumulate one
+			// context per callback invocation until the download finishes.
+			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+			if err := qm.store.UpdateDownloadProgress(storeCtx, d.ID, bytesReceived, int64(speedBPS)); err != nil {
+				qm.log.Warnf("update download %d progress in DB failed: %v", d.ID, err)
+			}
 
 			// If we discovered filename/size from the pack, update store and emit metadata event.
 			// Only emit once (when metadataEmitted is still false) to avoid redundant SSE events.
@@ -802,7 +824,6 @@ func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
 				})
 				metadataEmitted = true
 			}
-
 			cancelStoreCtx()
 		}
 
@@ -1103,4 +1124,24 @@ func (qm *Manager) handleFallback(original store.DownloadRecord, result workerRe
 // For now, it returns the configured max_rate_bps directly.
 func (qm *Manager) GetEffectiveMaxRate() int64 {
 	return qm.cfg.GetMaxRateBPS()
+}
+
+// progressThrottleInterval returns the minimum interval between DB progress
+// writes based on how many downloads are currently active. The intent is to
+// prevent progress callbacks from saturating the SQLite connection pool when
+// many downloads run concurrently, while keeping the UI responsive via SSE events.
+//
+// Thresholds:
+//   - ≤3 active:   no throttle (every tick, ~1s)
+//   - 4–8 active:  write every 2s
+//   - >8 active:   write every 3s
+func progressThrottleInterval(activeCount int) time.Duration {
+	switch {
+	case activeCount <= 3:
+		return 0
+	case activeCount <= 8:
+		return 2 * time.Second
+	default:
+		return 3 * time.Second
+	}
 }

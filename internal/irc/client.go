@@ -627,6 +627,22 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 		}
 	}
 
+	// ErrAlreadyDownloaded means the file already exists in tmp with the
+	// correct size. This is a success — the caller should move it to the
+	// destination directory.
+	if errors.Is(err, ErrAlreadyDownloaded) {
+		c.ps.mu.Lock()
+		filename := c.ps.packFilename
+		filesize := c.ps.packSize
+		c.ps.mu.Unlock()
+		c.infof("File already downloaded (retry) — reporting as success for move from temp to dest")
+		return PackResult{
+			FilePath: pack.GetFilepath(),
+			Filename: filename,
+			FileSize: filesize,
+		}
+	}
+
 	switch {
 	case errors.Is(err, ErrPackAlreadyReq):
 		c.noticef("Bot %s says pack already requested, waiting 60s before retry (attempt %d/3)", pack.Bot, retryCount+1)
@@ -721,25 +737,12 @@ func (c *Client) waitForCurrentPack() error {
 // Finish helpers
 // ---------------------------------------------------------------------------
 
-// finishSuccess records a successful download. Does NOT close the IRC
-// connection so subsequent packs can reuse it.
-func (c *Client) finishSuccess() {
-	elapsed := time.Since(c.ps.downStartTime)
-	speedStr := formatSpeed(float64(c.ps.filesize) / elapsed.Seconds())
-	fmt.Printf("\nFile %s downloaded successfully in %s at %s\n",
-		c.currentPack().GetFilename(),
-		formatDuration(elapsed),
-		speedStr)
-	c.ps.downloadDoneOnce.Do(func() {
-		close(c.ps.downloadDone)
-	})
-}
-
 // finishWithNotice stores a bot notice and then calls finishWithError.
 func (c *Client) finishWithNotice(err error, notice string) {
-	c.ps.mu.Lock()
-	c.ps.lastBotNotice = notice
-	c.ps.mu.Unlock()
+	ps := c.ps
+	ps.mu.Lock()
+	ps.lastBotNotice = notice
+	ps.mu.Unlock()
 	c.finishWithError(err)
 }
 
@@ -747,13 +750,17 @@ func (c *Client) finishWithNotice(err error, notice string) {
 // connection so the session can retry or continue with the next pack.
 // The first error wins: subsequent calls are ignored (sync.Once guards the channel close).
 func (c *Client) finishWithError(err error) {
-	c.ps.mu.Lock()
-	if c.ps.downloadError == nil {
-		c.ps.downloadError = err
+	// Capture packState locally to prevent "unlock of unlocked mutex" panic
+	// and ensure downloadDone is closed on the correct packState when
+	// resetForPack() replaces c.ps in another goroutine.
+	ps := c.ps
+	ps.mu.Lock()
+	if ps.downloadError == nil {
+		ps.downloadError = err
 	}
-	c.ps.mu.Unlock()
-	c.ps.downloadDoneOnce.Do(func() {
-		close(c.ps.downloadDone)
+	ps.mu.Unlock()
+	ps.downloadDoneOnce.Do(func() {
+		close(ps.downloadDone)
 	})
 }
 

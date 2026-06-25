@@ -47,7 +47,7 @@ func newTestAPI(t *testing.T) *testAPI {
 	// Open the copied database through NewSQLiteStore (sets up WAL, foreign keys,
 	// connection pool). Migrate() is NOT called because the template already has
 	// all migrations applied — it would be a fast no-op anyway.
-	st, err := store.NewSQLiteStore(dbPath, 2000, apiLogger)
+	st, err := store.NewSQLiteStore(dbPath, 2000, 3, apiLogger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestVersion_FallbackEmpty(t *testing.T) {
 		t.Fatalf("copying template DB: %v", err)
 	}
 	apiLogger := logging.New(logging.LevelDebug, "", 0)
-	st, err := store.NewSQLiteStore(dbPath, 2000, apiLogger)
+	st, err := store.NewSQLiteStore(dbPath, 2000, 3, apiLogger)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

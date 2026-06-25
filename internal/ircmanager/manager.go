@@ -265,6 +265,12 @@ func (m *Manager) Stop() {
 func (m *Manager) reconcileChannelLogLoop() {
 	defer close(m.chlogReconcileExited)
 
+	// NOTE: reading lastRev at goroutine start creates a tiny window where
+	// a config update that lands between the read and the first tick is
+	// missed. This is acceptable because the ticker fires every 30s, so
+	// the change is picked up on the next tick at worst. If this becomes
+	// an issue, initialize lastRev = 0 to force a reconcilation on the
+	// first tick instead.
 	lastRev := m.cfg.GetConfigRevision()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

@@ -225,25 +225,6 @@ func (c *Client) registerHandlers() {
 		pack := c.currentPack()
 		notice := e.Last()
 		msg := strings.ToLower(notice)
-		// These are standard IRC server ident/hostname check messages — suppress in quiet mode.
-		quietFiltered := []string{
-			"looking up your hostname",
-			"checking ident",
-			"couldn't resolve your hostname",
-			"no ident response",
-		}
-		isQuietFiltered := false
-		for _, f := range quietFiltered {
-			if strings.Contains(msg, f) {
-				isQuietFiltered = true
-				break
-			}
-		}
-		if isQuietFiltered {
-			c.logf("Bot notice: %s", notice)
-		} else {
-			c.noticef("Bot notice: %s", notice)
-		}
 
 		// Try to extract pack filename and size from the notice.
 		// This is important for manual downloads where filename/size aren't known upfront.
@@ -262,21 +243,47 @@ func (c *Client) registerHandlers() {
 			c.ps.mu.Unlock()
 		}
 
+		// Check for failure-class notices first. These get categorized logs
+		// that include the notice text — no need for a separate raw log.
 		alreadyReqMsgs := []string{"you already requested", "richiesto questo pack!"}
 		blockedMsgs := []string{"xdcc send negato", "numero pack errato", "invalid pack number",
 			"gli slots sono occupati", "denied"}
 
 		for _, s := range alreadyReqMsgs {
 			if strings.Contains(msg, s) {
+				c.noticef("Bot %s says pack already requested (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
 				c.finishWithNotice(ErrPackAlreadyReq, notice)
 				return
 			}
 		}
 		for _, s := range blockedMsgs {
 			if strings.Contains(msg, s) {
+				c.noticef("Bot %s denied XDCC request (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
 				c.finishWithNotice(ErrBotDenied, notice)
 				return
 			}
+		}
+
+		// Raw notice log for non-failure messages (informational notices,
+		// transfer progress, etc.). Quiet-filtered server checks use logf
+		// (verbose only), everything else uses noticef.
+		quietFiltered := []string{
+			"looking up your hostname",
+			"checking ident",
+			"couldn't resolve your hostname",
+			"no ident response",
+		}
+		isQuietFiltered := false
+		for _, f := range quietFiltered {
+			if strings.Contains(msg, f) {
+				isQuietFiltered = true
+				break
+			}
+		}
+		if isQuietFiltered {
+			c.logf("Bot notice: %s", notice)
+		} else {
+			c.noticef("Bot notice: %s", notice)
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
