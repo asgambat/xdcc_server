@@ -312,7 +312,7 @@ func (c *Client) receiveData() {
 					}
 				}
 			}
-			c.enqueueACK()
+			c.enqueueACK(ps)
 		}
 		if err != nil {
 			return
@@ -357,13 +357,10 @@ func (c *Client) ackSender() {
 // counter and queues it for the ackSender goroutine. The packet is 4 bytes for
 // transfers ≤ 4 GiB, and 8 bytes for larger files (extended DCC ACK, RFC 2571).
 // If the queue is full the ACK is dropped — the next chunk will enqueue a fresh one.
-func (c *Client) enqueueACK() {
-	// Capture packState locally — this is called from receiveData which
-	// already captured its own ps, but enqueueACK is a separate method
-	// and c.ps may have been replaced by resetForPack() by the time
-	// receiveData calls this (receiveData captures ps for its own
-	// use but c.ps is still read here).
-	ps := c.ps
+//
+// The caller must pass its captured packState to avoid a data race on c.ps,
+// which resetForPack() can replace concurrently.
+func (c *Client) enqueueACK(ps *packState) {
 	prog := atomic.LoadInt64(&ps.progress)
 	var ack []byte
 	if prog >= 0 && prog <= 0xFFFFFFFF {
