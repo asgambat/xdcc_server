@@ -48,7 +48,8 @@ type Logger struct {
 	mu    sync.Mutex
 	files map[string]*channelFile
 
-	stopCh chan struct{} // closed by Close() to stop the sync goroutine
+	stopCh    chan struct{} // closed by Close() to stop the sync goroutine
+	closeOnce sync.Once     // ensures Close() is idempotent
 }
 
 // channelFile holds the per-channel state: the open file handle and its
@@ -279,13 +280,10 @@ func (l *Logger) Close() error {
 	if l == nil {
 		return nil
 	}
-	// Stop the background sync goroutine first (idempotent via close).
-	select {
-	case <-l.stopCh:
-		// Already closed.
-	default:
+	// Stop the background sync goroutine first (idempotent via sync.Once).
+	l.closeOnce.Do(func() {
 		close(l.stopCh)
-	}
+	})
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

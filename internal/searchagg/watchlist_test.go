@@ -3,6 +3,7 @@ package searchagg
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -573,6 +574,76 @@ func TestWatchlistInFlight_Dedup(t *testing.T) {
 
 	// Cleanup
 	agg.watchlistInFlight.Delete(wlID)
+}
+
+// ===========================================================================
+// NotifyEnabled guard tests
+// ===========================================================================
+
+// TestRunWatchlist_NotifyDisabledSkipsCallback verifies that the external
+// notification callback is NOT invoked when NotifyEnabled=false.
+func TestRunWatchlist_NotifyDisabledSkipsCallback(t *testing.T) {
+	ms := &trackedWatchlistStore{}
+	agg := newTestAggregator(ms)
+
+	var callbackCount int32
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int) {
+		atomic.AddInt32(&callbackCount, 1)
+	})
+
+	wl := store.Watchlist{
+		ID:              1,
+		Name:            "test-wl",
+		Query:           "anything",
+		IntervalMinutes: 5,
+		NotifyEnabled:   false,
+		Enabled:         true,
+		AutoEnqueue:     false,
+	}
+
+	_, err := agg.RunWatchlist(context.Background(), wl)
+	if err != nil {
+		t.Fatalf("RunWatchlist: %v", err)
+	}
+	if atomic.LoadInt32(&callbackCount) != 0 {
+		t.Errorf("callback called %d times; expected 0 (NotifyEnabled=false)", callbackCount)
+	}
+}
+
+// TestRunWatchlist_NotifyEnabledNoNewPacks verifies that the callback
+// is NOT invoked when NotifyEnabled=true but there are no new packs.
+// This confirms the guard condition works end-to-end: all conditions
+// (NotifyEnabled, HasChanges, len(NewPacks)>0) must be satisfied.
+func TestRunWatchlist_NotifyEnabledNoNewPacks(t *testing.T) {
+	ms := &trackedWatchlistStore{}
+	agg := newTestAggregator(ms)
+
+	var callbackCount int32
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int) {
+		atomic.AddInt32(&callbackCount, 1)
+	})
+
+	// Use a non-empty LastMatchFingerprint so HasChanges logic evaluates
+	// the fingerprint-change path (else-if branch). With no search engines
+	// configured, the search returns empty packs → NewPacks = 0.
+	wl := store.Watchlist{
+		ID:                   2,
+		Name:                 "test-wl-2",
+		Query:                "anything",
+		IntervalMinutes:      5,
+		NotifyEnabled:        true,
+		Enabled:              true,
+		AutoEnqueue:          false,
+		LastMatchFingerprint: "old-fingerprint",
+	}
+
+	_, err := agg.RunWatchlist(context.Background(), wl)
+	if err != nil {
+		t.Fatalf("RunWatchlist: %v", err)
+	}
+	if atomic.LoadInt32(&callbackCount) != 0 {
+		t.Errorf("callback called %d times; expected 0 (no new packs)", callbackCount)
+	}
 }
 
 // TestWatchlistInFlight_ReentrancyGuard verifies the LoadOrStore/Delete

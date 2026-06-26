@@ -214,8 +214,8 @@ func (a *Aggregator) runWatchlistSafely(wl store.Watchlist) {
 		a.log.Infof("watchlist %q: found %d new packs (enqueued %d)",
 			wl.Name, newPacks, enqueued)
 
-		// Notify via SSE about new enqueued downloads
-		if enqueued > 0 && wl.AutoEnqueue {
+		// Notify via SSE about new enqueued downloads (respect notify_enabled).
+		if enqueued > 0 && wl.AutoEnqueue && wl.NotifyEnabled {
 			a.notifyWatchlistResults(wl.Name, result.NewPacks)
 		}
 

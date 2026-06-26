@@ -1076,6 +1076,48 @@ func TestCurrentSchemaVersion(t *testing.T) {
 }
 
 // ===========================================================================
+// Migration smoke test
+// ===========================================================================
+
+func TestMigrations_DownloadsIndexes(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	rows, err := s.DB().QueryContext(context.Background(),
+		`SELECT name FROM sqlite_master
+		 WHERE type='index' AND tbl_name='downloads'
+		 ORDER BY name`)
+	if err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	defer rows.Close()
+
+	want := map[string]bool{
+		"idx_downloads_status":         false,
+		"idx_downloads_channel":        false,
+		"idx_downloads_bot_server":     false,
+		"idx_downloads_status_channel": false,
+		"idx_downloads_filename":       false,
+		"idx_downloads_bot":            false,
+		"idx_downloads_completed_at":   false,
+		"idx_downloads_lower_filename": false,
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		delete(want, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	for name := range want {
+		t.Errorf("missing index: %s", name)
+	}
+}
+
+// ===========================================================================
 // Export / Import
 // ===========================================================================
 

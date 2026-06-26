@@ -15,10 +15,10 @@ updated by the executor that lands each plan.
 |------|-------|----------|--------|------------|--------|
 | 001  | Make `channellog.Logger.Close` idempotent under concurrent calls | P1 | S | — | TODO |
 | 002  | Restore `build:all` to build all four binaries | P1 | S | — | TODO |
-| 003  | Add SQLite indexes for `downloads` history filters and `FilenamesExist` dedup | P1 | S | — | TODO |
+| 003  | Add SQLite indexes for `downloads` history filters and `FilenamesExist` dedup | P1 | S | — | DONE |
 | 004  | Require admin-token auth on the `/api/events` SSE stream | P1 | S | — | TODO |
-| 005  | Complete `.env.example` with all configuration variables | P1 | S | — | TODO |
-| 006  | Honor the `notify_enabled` column when delivering watchlist notifications | P2 | S | — | TODO |
+| 005  | Complete `.env.example` with all configuration variables | P1 | S | — | DONE |
+| 006  | Honor the `notify_enabled` column when delivering watchlist notifications | P2 | S | — | DONE |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED (with one-line reason)` | `REJECTED (with one-line rationale — finding fixed independently or approach abandoned)`.
 
