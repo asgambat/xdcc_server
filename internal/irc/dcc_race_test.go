@@ -55,7 +55,7 @@ func setupRaceTest() *raceTestHarness {
 		downloadStartedOnce: &sync.Once{},
 		ackQueue:            make(chan []byte, ackQueueBufSize),
 	}
-	h.client.ps = h.ps
+	h.client.ps.Store(h.ps)
 
 	// ── Pipe (DCC connection) ──────────────────────────────────
 	h.clientConn, h.serverConn = net.Pipe()
@@ -86,7 +86,8 @@ func setupRaceTest() *raceTestHarness {
 
 // cleanup releases all resources held by the harness.
 func (h *raceTestHarness) cleanup() {
-	h.client.ps.downloadDoneOnce.Do(func() { close(h.client.ps.downloadDone) })
+	oldPs := h.client.ps.Load()
+	oldPs.downloadDoneOnce.Do(func() { close(oldPs.downloadDone) })
 	h.tmpFile.Close()
 	os.Remove(h.tmpName)
 	h.clientConn.Close()
@@ -191,7 +192,7 @@ func TestReceiveDataNoPanicOnResetForPack(t *testing.T) {
 			}
 
 			// c.ps should now point to a different packState.
-			if h.client.ps == h.ps {
+			if h.client.ps.Load() == h.ps {
 				t.Errorf("iter %d: c.ps not replaced by spammer", i)
 			}
 		}()

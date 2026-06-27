@@ -34,7 +34,7 @@ func (c *Client) registerHandlers() {
 		// advance to the next pack before this handler finishes, so all references
 		// within the handler must use this snapshot to avoid mis-attributing events.
 		pack := c.currentPack()
-		ps := c.ps
+		ps := c.ps.Load()
 		flags := ps.snapshotDecisionFlags()
 		c.infof("WHOIS response completed for %s", pack.Bot)
 		if flags.messageSent {
@@ -125,7 +125,7 @@ func (c *Client) registerHandlers() {
 		}
 		// Capture current pack once at handler entry (fix 2.19).
 		pack := c.currentPack()
-		ps := c.ps
+		ps := c.ps.Load()
 		rawChannels := e.Params[len(e.Params)-1]
 		c.infof("WHOIS response: bot is in channels: %s", rawChannels)
 
@@ -175,7 +175,7 @@ func (c *Client) registerHandlers() {
 			return
 		}
 		pack := c.currentPack()
-		ps := c.ps
+		ps := c.ps.Load()
 		flags := ps.snapshotDecisionFlags()
 		ch := strings.ToLower(e.Params[0])
 		c.conn.joinedChannels[ch] = true
@@ -223,7 +223,7 @@ func (c *Client) registerHandlers() {
 	cuid = c.conn.irc.Handlers.Add(girc.NOTICE, func(client *girc.Client, e girc.Event) {
 		// Capture current pack once at handler entry (fix 2.19).
 		pack := c.currentPack()
-		ps := c.ps // capture ps to avoid race with resetForPack()
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 		notice := e.Last()
 		msg := strings.ToLower(notice)
 
@@ -300,14 +300,14 @@ func (c *Client) registerHandlers() {
 		if !strings.EqualFold(e.Params[1], pack.Bot) {
 			return // 401 for a different nick, not our bot
 		}
-		ps := c.ps // capture ps to avoid race with resetForPack()
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 		c.noticef("Bot '%s' not found on server", pack.Bot)
 		c.finishWithErrorPS(ps, ErrBotNotFound)
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
 	cuid = c.conn.irc.Handlers.Add(girc.ERROR, func(client *girc.Client, e girc.Event) {
-		ps := c.ps // capture ps to avoid race with resetForPack()
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 		c.noticef("IRC error: %s", e.Last())
 		c.finishWithErrorPS(ps, ErrUnrecoverable)
 	})

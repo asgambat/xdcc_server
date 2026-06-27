@@ -187,7 +187,7 @@ type Client struct {
 	packIdxVal atomic.Int32
 
 	// Per-pack state (replaced via resetForPack between packs)
-	ps *packState
+	ps atomic.Pointer[packState]
 }
 
 // ---------------------------------------------------------------------------
@@ -217,15 +217,16 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 	if logger == nil {
 		logger = defaultLogger()
 	}
-	return &Client{
+	c := &Client{
 		ctx:       ctx,
 		packs:     packs,
 		opts:      opts,
 		verbosity: verbosity,
 		logger:    logger,
 		conn:      &Connection{},
-		ps:        &packState{}, // non-nil so methods like SetAlreadyJoinedChannels are safe before resetForPack
-	}, nil
+	}
+	c.ps.Store(&packState{}) // non-nil so methods like SetAlreadyJoinedChannels are safe before resetForPack
+	return c, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -365,9 +366,10 @@ func (c *Client) DownloadAll() []PackResult {
 // LastBotNotice returns the last NOTICE received from the bot for the
 // current pack. Safe to call after DownloadAll returns.
 func (c *Client) LastBotNotice() string {
-	c.ps.mu.Lock()
-	defer c.ps.mu.Unlock()
-	return c.ps.lastBotNotice
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.lastBotNotice
 }
 
 // Cleanup removes all handlers registered by this Client from the girc.Client.
@@ -546,21 +548,22 @@ func (c *Client) resetForPack() {
 	// Close the previous pack's state before creating a new one.
 	// This unblocks any goroutines still reading from the old channels
 	// (e.g. ackSender, progressPrinter, stallWatcher).
-	if c.ps != nil {
-		c.ps.mu.Lock()
-		if c.ps.dccConn != nil {
-			c.ps.dccConn.Close()
-			c.ps.dccConn = nil
+	oldPs := c.ps.Load()
+	if oldPs != nil {
+		oldPs.mu.Lock()
+		if oldPs.dccConn != nil {
+			oldPs.dccConn.Close()
+			oldPs.dccConn = nil
 		}
-		if c.ps.dccFile != nil {
-			c.ps.dccFile.Close()
-			c.ps.dccFile = nil
+		if oldPs.dccFile != nil {
+			oldPs.dccFile.Close()
+			oldPs.dccFile = nil
 		}
-		c.ps.mu.Unlock()
+		oldPs.mu.Unlock()
 
-		if c.ps.downloadDone != nil && c.ps.downloadDoneOnce != nil {
-			c.ps.downloadDoneOnce.Do(func() {
-				close(c.ps.downloadDone)
+		if oldPs.downloadDone != nil && oldPs.downloadDoneOnce != nil {
+			oldPs.downloadDoneOnce.Do(func() {
+				close(oldPs.downloadDone)
 			})
 		}
 	}
@@ -573,13 +576,13 @@ func (c *Client) resetForPack() {
 
 	// Allocate a fresh packState per pack so that sync.Once instances are
 	// independent and no stale values leak between packs.
-	c.ps = &packState{
+	c.ps.Store(&packState{
 		downloadDone:        make(chan struct{}),
 		downloadDoneOnce:    &sync.Once{},
 		downloadStarted:     make(chan struct{}),
 		downloadStartedOnce: &sync.Once{},
 		ackQueue:            make(chan []byte, ackQueueBufSize),
-	}
+	})
 }
 
 func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
@@ -616,10 +619,11 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	if err == nil {
 		// Return discovered filename and size (may be empty/0 if not yet known).
 		// Read under lock to avoid data race with the NOTICE handler.
-		c.ps.mu.Lock()
-		filename := c.ps.packFilename
-		filesize := c.ps.packSize
-		c.ps.mu.Unlock()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		filename := ps.packFilename
+		filesize := ps.packSize
+		ps.mu.Unlock()
 		return PackResult{
 			FilePath: pack.GetFilepath(),
 			Filename: filename,
@@ -631,10 +635,11 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	// correct size. This is a success — the caller should move it to the
 	// destination directory.
 	if errors.Is(err, ErrAlreadyDownloaded) {
-		c.ps.mu.Lock()
-		filename := c.ps.packFilename
-		filesize := c.ps.packSize
-		c.ps.mu.Unlock()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		filename := ps.packFilename
+		filesize := ps.packSize
+		ps.mu.Unlock()
 		c.infof("File already downloaded (retry) — reporting as success for move from temp to dest")
 		return PackResult{
 			FilePath: pack.GetFilepath(),
@@ -665,9 +670,10 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	}
 
 	c.noticef("Giving up on pack #%d (bot %s) after error: %v", pack.PackNumber, pack.Bot, err)
-	c.ps.mu.Lock()
-	notice := c.ps.lastBotNotice
-	c.ps.mu.Unlock()
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	notice := ps.lastBotNotice
+	ps.mu.Unlock()
 	return PackResult{Error: err, LastBotNotice: notice}
 }
 
@@ -679,12 +685,13 @@ func (c *Client) waitForCurrentPack() error {
 	c.infof("Waiting up to %v for DCC transfer to start (bot=%s, pack=%d)", connectTimeout, pack.Bot, pack.PackNumber)
 
 	select {
-	case <-c.ps.downloadStarted:
+	case <-c.ps.Load().downloadStarted:
 		c.infof("DCC transfer started for bot %s", pack.Bot)
-	case <-c.ps.downloadDone:
-		c.ps.mu.Lock()
-		downloadErr := c.ps.downloadError
-		c.ps.mu.Unlock()
+	case <-c.ps.Load().downloadDone:
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		downloadErr := ps.downloadError
+		ps.mu.Unlock()
 		c.infof("Download finished with error for bot %s: %v", pack.Bot, downloadErr)
 		return downloadErr
 	case <-c.ctx.Done():
@@ -695,9 +702,10 @@ func (c *Client) waitForCurrentPack() error {
 		// IRC connection died before transfer started; treat as timeout so
 		// downloadPackAtIndex will reconnect and retry.
 		c.infof("IRC connection lost while waiting for DCC from bot %s: %v", pack.Bot, err)
-		c.ps.mu.Lock()
-		downloadErr := c.ps.downloadError
-		c.ps.mu.Unlock()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		downloadErr := ps.downloadError
+		ps.mu.Unlock()
 		if err != nil && downloadErr == nil {
 			if isConnectError(err) {
 				return fmt.Errorf("%w: %v", ErrServerUnreachable, err)
@@ -718,18 +726,20 @@ func (c *Client) waitForCurrentPack() error {
 		go c.stallWatcher()
 	}
 	select {
-	case <-c.ps.downloadDone:
+	case <-c.ps.Load().downloadDone:
 	case <-c.ctx.Done():
-		c.ps.mu.Lock()
-		if c.ps.dccConn != nil {
-			c.ps.dccConn.Close()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		if ps.dccConn != nil {
+			ps.dccConn.Close()
 		}
-		c.ps.mu.Unlock()
+		ps.mu.Unlock()
 		c.finishWithError(ErrCancelled)
 	}
-	c.ps.mu.Lock()
-	downloadErr := c.ps.downloadError
-	c.ps.mu.Unlock()
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	downloadErr := ps.downloadError
+	ps.mu.Unlock()
 	return downloadErr
 }
 
@@ -769,7 +779,7 @@ func (c *Client) finishWithErrorPS(ps *packState, err error) {
 // Safe to call from the download goroutine (sequential with resetForPack).
 // IRC handler goroutines MUST use finishWithErrorPS with a captured packState.
 func (c *Client) finishWithError(err error) {
-	c.finishWithErrorPS(c.ps, err)
+	c.finishWithErrorPS(c.ps.Load(), err)
 }
 
 // ---------------------------------------------------------------------------

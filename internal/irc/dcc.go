@@ -43,7 +43,7 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 	// Capture pack once at handler entry (fix 2.19) so all references within
 	// this function use the same snapshot even if packIdxVal advances.
 	pack := c.currentPack()
-	ps := c.ps // capture ps to avoid race with resetForPack()
+	ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 
 	if len(parts) < 5 {
 		c.noticef("Malformed DCC SEND (bot=%s pack=%d): %v", pack.Bot, pack.PackNumber, parts)
@@ -108,7 +108,7 @@ func (c *Client) handleDCCAccept(parts []string) {
 	if len(parts) < 4 {
 		return
 	}
-	ps := c.ps // capture ps to avoid race with resetForPack()
+	ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 	c.debugf("DCC ACCEPT: resuming download")
 	c.startDownloadAppend(ps)
 }
@@ -187,7 +187,7 @@ func (c *Client) receiveData() {
 	// closes the old downloadDone channel, which unblocks any pending
 	// select on it. The captured packState remains valid for reading fields
 	// even after c.ps is replaced — channels are closed, not freed.
-	ps := c.ps
+	ps := c.ps.Load()
 	downloadDone := ps.downloadDone
 
 	// Pre-create throttle timer to avoid per-chunk allocations on long downloads.
@@ -332,7 +332,7 @@ func (c *Client) ackSender() {
 	// channel, which unblocks the select below. The captured packState
 	// fields (ackQueue, downloadDone) remain valid for reading even after
 	// c.ps is replaced — the channels are closed, not garbage-collected.
-	ps := c.ps
+	ps := c.ps.Load()
 	ackQueue := ps.ackQueue
 	downloadDone := ps.downloadDone
 	for {
@@ -384,7 +384,7 @@ func (c *Client) progressPrinter() {
 	//
 	// Same safety argument as ackSender: resetForPack() closes the old
 	// downloadDone channel, which unblocks any pending select.
-	ps := c.ps
+	ps := c.ps.Load()
 	downloadDone := ps.downloadDone
 	downloadStarted := ps.downloadStarted
 
@@ -476,7 +476,7 @@ func (c *Client) stallWatcher() {
 	// Capture packState locally so the goroutine does not dynamically read
 	// c.ps, which resetForPack() replaces between packs. Same safety
 	// argument as ackSender and progressPrinter.
-	ps := c.ps
+	ps := c.ps.Load()
 	stall := time.Duration(c.opts.StallTimeout) * time.Second
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
