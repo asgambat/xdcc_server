@@ -219,8 +219,9 @@ func (h *Hub) EventsSince(lastEventID int64) []Event {
 	// Compute how many events are newer than lastEventID. Event IDs are
 	// sequential, so we can calculate the count and starting offset directly
 	// instead of iterating the entire buffer.
-	// nextID is the next ID to assign, so the newest event has ID nextID-1.
-	count := int(h.nextID - lastEventID - 1)
+	// nextID holds the last assigned ID (AddInt64 returns the new value),
+	// so the count of events with ID > lastEventID is nextID - lastEventID.
+	count := int(h.nextID - lastEventID)
 	if count <= 0 {
 		return nil
 	}
