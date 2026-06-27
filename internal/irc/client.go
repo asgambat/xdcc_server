@@ -737,23 +737,24 @@ func (c *Client) waitForCurrentPack() error {
 // Finish helpers
 // ---------------------------------------------------------------------------
 
-// finishWithNotice stores a bot notice and then calls finishWithError.
-func (c *Client) finishWithNotice(err error, notice string) {
-	ps := c.ps
+// finishWithNotice stores a bot notice and then calls finishWithErrorPS.
+// Callers from IRC handler goroutines MUST pass their locally captured
+// packState to avoid a data race with resetForPack().
+func (c *Client) finishWithNotice(ps *packState, err error, notice string) {
 	ps.mu.Lock()
 	ps.lastBotNotice = notice
 	ps.mu.Unlock()
-	c.finishWithError(err)
+	c.finishWithErrorPS(ps, err)
 }
 
-// finishWithError records a download error. Does NOT close the IRC
-// connection so the session can retry or continue with the next pack.
-// The first error wins: subsequent calls are ignored (sync.Once guards the channel close).
-func (c *Client) finishWithError(err error) {
-	// Capture packState locally to prevent "unlock of unlocked mutex" panic
-	// and ensure downloadDone is closed on the correct packState when
-	// resetForPack() replaces c.ps in another goroutine.
-	ps := c.ps
+// finishWithErrorPS records a download error on the specified packState.
+// Does NOT close the IRC connection so the session can retry or continue
+// with the next pack. The first error wins: subsequent calls are ignored
+// (sync.Once guards the channel close).
+//
+// Callers from IRC handler goroutines MUST pass their locally captured
+// packState to avoid a data race with resetForPack(), which replaces c.ps.
+func (c *Client) finishWithErrorPS(ps *packState, err error) {
 	ps.mu.Lock()
 	if ps.downloadError == nil {
 		ps.downloadError = err
@@ -762,6 +763,13 @@ func (c *Client) finishWithError(err error) {
 	ps.downloadDoneOnce.Do(func() {
 		close(ps.downloadDone)
 	})
+}
+
+// finishWithError records a download error on the current packState.
+// Safe to call from the download goroutine (sequential with resetForPack).
+// IRC handler goroutines MUST use finishWithErrorPS with a captured packState.
+func (c *Client) finishWithError(err error) {
+	c.finishWithErrorPS(c.ps, err)
 }
 
 // ---------------------------------------------------------------------------

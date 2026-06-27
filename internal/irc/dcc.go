@@ -43,6 +43,7 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 	// Capture pack once at handler entry (fix 2.19) so all references within
 	// this function use the same snapshot even if packIdxVal advances.
 	pack := c.currentPack()
+	ps := c.ps // capture ps to avoid race with resetForPack()
 
 	if len(parts) < 5 {
 		c.noticef("Malformed DCC SEND (bot=%s pack=%d): %v", pack.Bot, pack.PackNumber, parts)
@@ -72,10 +73,10 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 
 	pack.SetFilename(filename, false)
 
-	c.ps.mu.Lock()
-	c.ps.filesize = filesize
-	c.ps.peerAddr = peerAddr
-	c.ps.mu.Unlock()
+	ps.mu.Lock()
+	ps.filesize = filesize
+	ps.peerAddr = peerAddr
+	ps.mu.Unlock()
 
 	c.debugf("DCC SEND: file=%s addr=%s size=%s", filename, peerAddr, entities.HumanReadableBytes(filesize))
 
@@ -88,10 +89,10 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 		if pos >= filesize {
 			c.noticef("File already fully downloaded (local: %s >= remote: %s), skipping",
 				entities.HumanReadableBytes(pos), entities.HumanReadableBytes(filesize))
-			c.finishWithError(ErrAlreadyDownloaded)
+			c.finishWithErrorPS(ps, ErrAlreadyDownloaded)
 			return
 		}
-		atomic.StoreInt64(&c.ps.progress, pos)
+		atomic.StoreInt64(&ps.progress, pos)
 		resumeParam := fmt.Sprintf("%q %s %d", filename, port, pos)
 		c.debugf("Resuming download from %s / %s",
 			entities.HumanReadableBytes(pos), entities.HumanReadableBytes(filesize))
@@ -100,18 +101,19 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 		return
 	}
 
-	c.startDownload(peerAddr, false)
+	c.startDownload(ps, peerAddr, false)
 }
 
 func (c *Client) handleDCCAccept(parts []string) {
 	if len(parts) < 4 {
 		return
 	}
+	ps := c.ps // capture ps to avoid race with resetForPack()
 	c.debugf("DCC ACCEPT: resuming download")
-	c.startDownloadAppend()
+	c.startDownloadAppend(ps)
 }
 
-func (c *Client) startDownload(addr string, appendMode bool) {
+func (c *Client) startDownload(ps *packState, addr string, appendMode bool) {
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	if appendMode {
 		flag = os.O_APPEND | os.O_WRONLY
@@ -122,7 +124,7 @@ func (c *Client) startDownload(addr string, appendMode bool) {
 	f, err := os.OpenFile(path, flag, 0o644)
 	if err != nil {
 		c.noticef("Cannot open download file %s (bot=%s pack=%d): %v", path, pack.Bot, pack.PackNumber, err)
-		c.finishWithError(fmt.Errorf("cannot open file: %w", err))
+		c.finishWithErrorPS(ps, fmt.Errorf("cannot open file: %w", err))
 		return
 	}
 
@@ -130,43 +132,43 @@ func (c *Client) startDownload(addr string, appendMode bool) {
 	if err != nil {
 		f.Close()
 		c.noticef("DCC connection failed to %s (bot=%s pack=%d): %v", addr, pack.Bot, pack.PackNumber, err)
-		c.finishWithError(fmt.Errorf("DCC connection failed: %w", err))
+		c.finishWithErrorPS(ps, fmt.Errorf("DCC connection failed: %w", err))
 		return
 	}
 
-	c.ps.mu.Lock()
-	c.ps.dccFile = f
-	c.ps.dccConn = conn
-	c.ps.downStartTime = time.Now()
-	c.ps.dccTimestamp = time.Now()
-	c.ps.downloading = true
-	size := c.ps.filesize
-	c.ps.mu.Unlock()
+	ps.mu.Lock()
+	ps.dccFile = f
+	ps.dccConn = conn
+	ps.downStartTime = time.Now()
+	ps.dccTimestamp = time.Now()
+	ps.downloading = true
+	size := ps.filesize
+	ps.mu.Unlock()
 
 	c.debugf("Starting download (append=%v) to %s", appendMode, path)
 	c.infof("Downloading %s → %s", entities.HumanReadableBytes(size), path)
 
-	c.ps.downloadStartedOnce.Do(func() {
-		close(c.ps.downloadStarted)
+	ps.downloadStartedOnce.Do(func() {
+		close(ps.downloadStarted)
 	})
-	c.ps.lastActivity.Store(time.Now().UnixNano())
+	ps.lastActivity.Store(time.Now().UnixNano())
 
 	go c.ackSender()
 	go c.progressPrinter()
 	go c.receiveData()
 }
 
-func (c *Client) startDownloadAppend() {
-	c.ps.mu.Lock()
-	peerAddr := c.ps.peerAddr
-	c.ps.mu.Unlock()
+func (c *Client) startDownloadAppend(ps *packState) {
+	ps.mu.Lock()
+	peerAddr := ps.peerAddr
+	ps.mu.Unlock()
 	if peerAddr == "" {
 		pack := c.currentPack()
 		c.noticef("DCC resume failed: no peer address (bot=%s pack=%d)", pack.Bot, pack.PackNumber)
-		c.finishWithError(ErrDownloadFailed)
+		c.finishWithErrorPS(ps, ErrDownloadFailed)
 		return
 	}
-	c.startDownload(peerAddr, true)
+	c.startDownload(ps, peerAddr, true)
 }
 
 // receiveData reads incoming bytes from the DCC TCP connection and writes them
@@ -497,7 +499,7 @@ func (c *Client) stallWatcher() {
 					ps.dccConn = nil
 				}
 				ps.mu.Unlock()
-				c.finishWithError(ErrTimeout)
+				c.finishWithErrorPS(ps, ErrTimeout)
 				return
 			}
 		}

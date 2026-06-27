@@ -223,24 +223,25 @@ func (c *Client) registerHandlers() {
 	cuid = c.conn.irc.Handlers.Add(girc.NOTICE, func(client *girc.Client, e girc.Event) {
 		// Capture current pack once at handler entry (fix 2.19).
 		pack := c.currentPack()
+		ps := c.ps // capture ps to avoid race with resetForPack()
 		notice := e.Last()
 		msg := strings.ToLower(notice)
 
 		// Try to extract pack filename and size from the notice.
 		// This is important for manual downloads where filename/size aren't known upfront.
 		if filename, size := parsePackInfoFromNotice(notice); filename != "" || size > 0 {
-			c.ps.mu.Lock()
-			if filename != "" && c.ps.packFilename == "" {
-				c.ps.packFilename = filename
+			ps.mu.Lock()
+			if filename != "" && ps.packFilename == "" {
+				ps.packFilename = filename
 				pack.SetFilename(filename, true)
 				c.infof("Bot notice: discovered filename=%s", filename)
 			}
-			if size > 0 && c.ps.packSize == 0 {
-				c.ps.packSize = size
+			if size > 0 && ps.packSize == 0 {
+				ps.packSize = size
 				pack.SetSize(size)
 				c.infof("Bot notice: discovered size=%s", entities.HumanReadableBytes(size))
 			}
-			c.ps.mu.Unlock()
+			ps.mu.Unlock()
 		}
 
 		// Check for failure-class notices first. These get categorized logs
@@ -252,14 +253,14 @@ func (c *Client) registerHandlers() {
 		for _, s := range alreadyReqMsgs {
 			if strings.Contains(msg, s) {
 				c.noticef("Bot %s says pack already requested (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
-				c.finishWithNotice(ErrPackAlreadyReq, notice)
+				c.finishWithNotice(ps, ErrPackAlreadyReq, notice)
 				return
 			}
 		}
 		for _, s := range blockedMsgs {
 			if strings.Contains(msg, s) {
 				c.noticef("Bot %s denied XDCC request (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
-				c.finishWithNotice(ErrBotDenied, notice)
+				c.finishWithNotice(ps, ErrBotDenied, notice)
 				return
 			}
 		}
@@ -299,14 +300,16 @@ func (c *Client) registerHandlers() {
 		if !strings.EqualFold(e.Params[1], pack.Bot) {
 			return // 401 for a different nick, not our bot
 		}
+		ps := c.ps // capture ps to avoid race with resetForPack()
 		c.noticef("Bot '%s' not found on server", pack.Bot)
-		c.finishWithError(ErrBotNotFound)
+		c.finishWithErrorPS(ps, ErrBotNotFound)
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
 	cuid = c.conn.irc.Handlers.Add(girc.ERROR, func(client *girc.Client, e girc.Event) {
+		ps := c.ps // capture ps to avoid race with resetForPack()
 		c.noticef("IRC error: %s", e.Last())
-		c.finishWithError(ErrUnrecoverable)
+		c.finishWithErrorPS(ps, ErrUnrecoverable)
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 }
