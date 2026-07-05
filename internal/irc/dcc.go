@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"xdcc_server/internal/entities"
+
+	"github.com/lrstanley/girc"
 )
 
 // bufPool reduces GC pressure for the 4 KB read buffer allocated on each
@@ -24,14 +26,14 @@ var bufPool = sync.Pool{
 	New: func() any { return &dccBuffer{data: make([]byte, 4096)} },
 }
 
-func (c *Client) handleDCC(text, sourceHost string) {
+func (c *Client) handleDCC(client *girc.Client, text, sourceHost string) {
 	parts := splitDCC(text)
 	if len(parts) == 0 {
 		return
 	}
 	switch strings.ToUpper(parts[0]) {
 	case "SEND":
-		c.handleDCCSend(parts, sourceHost)
+		c.handleDCCSend(client, parts, sourceHost)
 	case "ACCEPT":
 		c.handleDCCAccept(parts)
 	default:
@@ -39,7 +41,7 @@ func (c *Client) handleDCC(text, sourceHost string) {
 	}
 }
 
-func (c *Client) handleDCCSend(parts []string, sourceHost string) {
+func (c *Client) handleDCCSend(client *girc.Client, parts []string, sourceHost string) {
 	// Capture pack once at handler entry (fix 2.19) so all references within
 	// this function use the same snapshot even if packIdxVal advances.
 	pack := c.currentPack()
@@ -97,7 +99,7 @@ func (c *Client) handleDCCSend(parts []string, sourceHost string) {
 		c.debugf("Resuming download from %s / %s",
 			entities.HumanReadableBytes(pos), entities.HumanReadableBytes(filesize))
 		c.logf("Sending DCC RESUME: %s", resumeParam)
-		c.conn.irc.Cmd.SendCTCP(pack.Bot, "DCC", "RESUME "+resumeParam)
+		client.Cmd.SendCTCP(pack.Bot, "DCC", "RESUME "+resumeParam)
 		return
 	}
 

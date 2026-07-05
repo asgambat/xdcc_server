@@ -144,7 +144,9 @@ func (c *Client) registerHandlers() {
 				continue
 			}
 			ps.setWhoisFoundChannels(true)
+			c.conn.joinedChannelsMu.RLock()
 			alreadyIn := c.conn.joinedChannels[ch]
+			c.conn.joinedChannelsMu.RUnlock()
 			if alreadyIn {
 				c.infof("Already in channel %s, skipping JOIN", part)
 				// Still record the channel on the pack for speed tracking.
@@ -178,7 +180,9 @@ func (c *Client) registerHandlers() {
 		ps := c.ps.Load()
 		flags := ps.snapshotDecisionFlags()
 		ch := strings.ToLower(e.Params[0])
+		c.conn.joinedChannelsMu.Lock()
 		c.conn.joinedChannels[ch] = true
+		c.conn.joinedChannelsMu.Unlock()
 		c.infof("✓ Joined channel: %s", e.Params[0])
 		if !flags.messageSent {
 			if flags.needsJoin {
@@ -209,7 +213,9 @@ func (c *Client) registerHandlers() {
 		if ctcp.Source != nil {
 			sourceHost = ctcp.Source.Host
 		}
-		c.handleDCC(ctcp.Text, sourceHost)
+		// Pass client to handleDCC instead of reading c.conn.irc,
+		// which may be concurrently reassigned by reconnect().
+		c.handleDCC(client, ctcp.Text, sourceHost)
 	})
 
 	// NOTICE from bot.
@@ -315,11 +321,16 @@ func (c *Client) registerHandlers() {
 }
 
 // removeHandlers removes all handlers previously registered by this client
-// from the girc.Client. This prevents accumulation of duplicate handlers when
-// multiple downloads share the same persistent IRC connection.
+// from the girc.Client. Uses handlersRegisteredOn (the client where handlers
+// were actually registered) rather than c.conn.irc, which may have already
+// been reassigned to a new client by SetExistingClient or reconnect().
 func (c *Client) removeHandlers() {
+	if c.conn.handlersRegisteredOn == nil {
+		c.conn.handlerCUIDs = nil
+		return
+	}
 	for _, cuid := range c.conn.handlerCUIDs {
-		c.conn.irc.Handlers.Remove(cuid)
+		c.conn.handlersRegisteredOn.Handlers.Remove(cuid)
 	}
 	c.conn.handlerCUIDs = nil
 }

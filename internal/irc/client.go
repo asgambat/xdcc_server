@@ -136,8 +136,9 @@ func (ps *packState) markMessageSent() bool {
 // packs; they represent the persistent connection lifecycle.
 type Connection struct {
 	irc                  *girc.Client
-	ircErrCh             chan error      // receives error from irc.Connect() goroutine
-	connectedCh          chan struct{}   // closed on CONNECTED event
+	ircErrCh             chan error    // receives error from irc.Connect() goroutine
+	connectedCh          chan struct{} // closed on CONNECTED event
+	joinedChannelsMu     sync.RWMutex
 	joinedChannels       map[string]bool // channels joined in this connection (cleared on reconnect)
 	handlersRegisteredOn *girc.Client    // which girc.Client handlers are currently bound to
 	connectTime          time.Time
@@ -241,17 +242,20 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 // Must be called before DownloadAll().
 func (c *Client) SetExistingClient(irc *girc.Client) {
 	c.conn.usingExistingConn = true
-	c.conn.irc = irc
-	c.conn.connectedCh = make(chan struct{})
-	c.conn.joinedChannels = make(map[string]bool)
-	c.conn.ircErrCh = make(chan error, 1)
 
-	// Always remove previously registered handlers before registering new ones,
-	// even when reusing the same girc.Client. This prevents accumulation of
-	// duplicate handlers across multiple downloads on persistent connections.
+	// Remove old handlers BEFORE reassigning c.conn.irc so that
+	// removeHandlers() operates on handlersRegisteredOn (the old client),
+	// not the new one where the CUIDs don't exist.
 	if c.conn.handlersRegisteredOn != nil {
 		c.removeHandlers()
 	}
+
+	c.conn.irc = irc
+	c.conn.connectedCh = make(chan struct{})
+	c.conn.joinedChannelsMu.Lock()
+	c.conn.joinedChannels = make(map[string]bool)
+	c.conn.joinedChannelsMu.Unlock()
+	c.conn.ircErrCh = make(chan error, 1)
 
 	c.registerHandlers()
 	c.conn.handlersRegisteredOn = irc
@@ -265,10 +269,11 @@ func (c *Client) SetExistingClient(irc *girc.Client) {
 //
 // Must be called after SetExistingClient and before DownloadAll().
 func (c *Client) SetAlreadyJoinedChannels(channels []string) {
-	// No lock needed: called before DownloadAll() starts any goroutines.
+	c.conn.joinedChannelsMu.Lock()
 	for _, ch := range channels {
 		c.conn.joinedChannels[strings.ToLower(ch)] = true
 	}
+	c.conn.joinedChannelsMu.Unlock()
 }
 
 // DownloadAll downloads all packs sequentially, reusing the IRC connection
@@ -417,7 +422,9 @@ func (c *Client) connect() error {
 		}
 
 		c.conn.connectedCh = make(chan struct{})
+		c.conn.joinedChannelsMu.Lock()
 		c.conn.joinedChannels = make(map[string]bool)
+		c.conn.joinedChannelsMu.Unlock()
 		c.conn.ircErrCh = make(chan error, 1)
 
 		c.conn.irc = girc.New(girc.Config{
@@ -489,12 +496,20 @@ func (c *Client) reconnect() error {
 				if newClient == c.conn.handlersRegisteredOn {
 					c.infof("Persistent connection still alive, reusing existing handlers")
 					c.conn.irc = newClient
+					c.conn.joinedChannelsMu.Lock()
 					c.conn.joinedChannels = make(map[string]bool)
+					c.conn.joinedChannelsMu.Unlock()
 					return nil
 				}
 				c.infof("Persistent connection re-established, re-binding handlers")
+				// Remove old handlers from the old client before switching
+				// to the new one, otherwise they accumulate on the persistent
+				// connection across reconnects.
+				c.removeHandlers()
 				c.conn.irc = newClient
+				c.conn.joinedChannelsMu.Lock()
 				c.conn.joinedChannels = make(map[string]bool)
+				c.conn.joinedChannelsMu.Unlock()
 				c.registerHandlers()
 				c.conn.handlersRegisteredOn = newClient
 				return nil

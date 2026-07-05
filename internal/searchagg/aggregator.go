@@ -58,6 +58,11 @@ type Aggregator struct {
 	// watchlistInFlight tracks which watchlist IDs are currently being
 	// executed, preventing concurrent runs of the same watchlist.
 	watchlistInFlight sync.Map
+
+	// watchlistWg tracks in-flight watchlist goroutines so Stop() can
+	// wait for them to complete before returning. This prevents the
+	// store from being closed while a watchlist is still writing to it.
+	watchlistWg sync.WaitGroup
 }
 
 // New creates a new search Aggregator.
@@ -107,8 +112,24 @@ func (a *Aggregator) Start(ctx context.Context) error {
 // Stop stops the cache cleanup and stats-flush goroutines.
 func (a *Aggregator) Stop() {
 	if a.cancel != nil {
-		a.cancel()
-		<-a.done           // wait for cleanupLoop
+		a.cancel() // signal all loops + in-flight watchlists to stop
+		<-a.done   // wait for cleanupLoop
+
+		// Wait for in-flight watchlist goroutines with a timeout.
+		// Each watchlist runs HTTP searches (bounded by providerTimeout,
+		// default 5s) and SQLite operations (bounded by busy timeout).
+		// A 60s deadline prevents indefinite blocking in pathological cases.
+		done := make(chan struct{})
+		go func() {
+			a.watchlistWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			a.log.Warnf("timed out waiting for watchlist goroutines to finish")
+		}
+
 		close(a.statsCh)   // signal statsFlushLoop to drain and exit
 		<-a.statsFlushDone // wait for final flush
 	}
@@ -202,7 +223,18 @@ func (a *Aggregator) runWatchlistSafely(wl store.Watchlist) {
 	}
 	defer a.watchlistInFlight.Delete(wl.ID)
 
-	ctx := context.Background()
+	// Use a.ctx so that Stop() cancels in-flight HTTP/DB operations,
+	// and track this goroutine so Stop() waits for it to finish.
+	// Defensive nil guard: in normal operation a.ctx is always set by Start(),
+	// but if this were ever called before Start(), fall back to Background.
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	a.watchlistWg.Add(1)
+	defer a.watchlistWg.Done()
+
 	result, err := a.RunWatchlist(ctx, wl)
 	if err != nil {
 		a.log.Warnf("watchlist %q failed: %v", wl.Name, err)
