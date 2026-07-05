@@ -729,6 +729,81 @@ func TestRunDueWatchlists_FirstRun(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// serializeWatchlistResults
+// ===========================================================================
+
+func TestSerializeWatchlistResults_Empty(t *testing.T) {
+	got := serializeWatchlistResults(nil)
+	if got != "[]" {
+		t.Errorf("expected '[]' for nil packs, got %q", got)
+	}
+
+	got = serializeWatchlistResults([]*entities.XDCCPack{})
+	if got != "[]" {
+		t.Errorf("expected '[]' for empty packs, got %q", got)
+	}
+}
+
+func TestSerializeWatchlistResults_Single(t *testing.T) {
+	srv := entities.NewIrcServerWithPort("irc.test.net", 6667)
+	pack := entities.NewXDCCPack(srv, "TestBot", 42)
+	pack.SetFilename("test.mkv", true)
+	pack.SetSize(123456789)
+
+	packs := []*entities.XDCCPack{pack}
+	got := serializeWatchlistResults(packs)
+
+	if !contains(got, "TestBot") {
+		t.Errorf("expected JSON to contain 'TestBot', got %q", got)
+	}
+	if !contains(got, "test.mkv") {
+		t.Errorf("expected JSON to contain 'test.mkv', got %q", got)
+	}
+	if !contains(got, "xdcc send #42") {
+		t.Errorf("expected JSON to contain 'xdcc send #42', got %q", got)
+	}
+	if !contains(got, "123456789") {
+		t.Errorf("expected JSON to contain size, got %q", got)
+	}
+}
+
+func TestSerializeWatchlistResults_Multiple(t *testing.T) {
+	srv := entities.NewIrcServerWithPort("irc.test.net", 6667)
+
+	p1 := entities.NewXDCCPack(srv, "BotA", 1)
+	p1.SetFilename("a.mkv", true)
+	p1.SetSize(100)
+
+	p2 := entities.NewXDCCPack(srv, "BotB", 2)
+	p2.SetFilename("b.mkv", true)
+	p2.SetSize(200)
+
+	packs := []*entities.XDCCPack{p1, p2}
+	got := serializeWatchlistResults(packs)
+
+	// Should be a valid JSON array with 2 items
+	if !contains(got, "[{") || !contains(got, "}]") {
+		t.Errorf("expected JSON array beginning and ending, got %q", got)
+	}
+	if !contains(got, "BotA") || !contains(got, "BotB") {
+		t.Errorf("expected both bots in JSON, got %q", got)
+	}
+}
+
+// =========================================================================
+// helpers
+// =========================================================================
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRunDueWatchlists_IntervalElapsed verifies that a watchlist whose
 // interval has elapsed since last check is dispatched.
 func TestRunDueWatchlists_IntervalElapsed(t *testing.T) {

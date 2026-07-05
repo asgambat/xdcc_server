@@ -1727,3 +1727,133 @@ func TestApplyPartial_FallbackOnNonScalar(t *testing.T) {
 		t.Error("expected 'ciao' in config after saveUnlocked fallback")
 	}
 }
+
+// =========================================================================
+// copyFile
+// =========================================================================
+
+func TestCopyFileConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		content := []byte("hello world from config copyFile")
+		if err := os.WriteFile(src, content, 0o644); err != nil {
+			t.Fatalf("writing source: %v", err)
+		}
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile: %v", err)
+		}
+
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatalf("reading destination: %v", err)
+		}
+		if string(got) != string(content) {
+			t.Errorf("content mismatch: got %q, want %q", string(got), string(content))
+		}
+
+		// When destination didn't exist, permissions default to 0o644
+		dstInfo, _ := os.Stat(dst)
+		if dstInfo.Mode().Perm() != 0o644 {
+			t.Errorf("expected default permissions 0o644, got %v", dstInfo.Mode().Perm())
+		}
+	})
+
+	t.Run("SourceNotFound", func(t *testing.T) {
+		t.Parallel()
+		err := copyFile("/nonexistent/config_file.bin", "/tmp/out.bin")
+		if err == nil {
+			t.Fatal("expected error for non-existent source")
+		}
+	})
+
+	t.Run("PreservesExistingPermissions", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		_ = os.WriteFile(src, []byte("new content"), 0o644)
+		_ = os.WriteFile(dst, []byte("old content will be overwritten"), 0o600)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if string(got) != "new content" {
+			t.Errorf("expected 'new content', got %q", string(got))
+		}
+
+		// Config's copyFile preserves existing destination permissions (0o600)
+		dstInfo, _ := os.Stat(dst)
+		if dstInfo.Mode().Perm() != 0o600 {
+			t.Errorf("expected preserved permissions 0o600, got %v", dstInfo.Mode().Perm())
+		}
+	})
+
+	t.Run("EmptyFile", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		_ = os.WriteFile(src, []byte{}, 0o644)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile empty file: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if len(got) != 0 {
+			t.Errorf("expected empty destination, got %d bytes", len(got))
+		}
+	})
+
+	t.Run("BinaryContent", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		data := make([]byte, 1024)
+		for i := range data {
+			data[i] = byte(i % 256)
+		}
+		_ = os.WriteFile(src, data, 0o644)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile binary: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if len(got) != len(data) {
+			t.Errorf("expected %d bytes, got %d", len(data), len(got))
+		}
+		for i := range data {
+			if got[i] != data[i] {
+				t.Errorf("byte mismatch at offset %d: got %d, want %d", i, got[i], data[i])
+				break
+			}
+		}
+	})
+
+	t.Run("DestinationInNonexistentDir", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		_ = os.WriteFile(src, []byte("data"), 0o644)
+		dst := filepath.Join(tmpDir, "nonexistent", "dst.bin")
+
+		err := copyFile(src, dst)
+		if err == nil {
+			t.Fatal("expected error when destination directory doesn't exist")
+		}
+	})
+}

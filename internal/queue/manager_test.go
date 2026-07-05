@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -1279,4 +1281,192 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// =========================================================================
+// Helper functions
+// =========================================================================
+
+func TestSlotKey(t *testing.T) {
+	tests := []struct {
+		server, channel, bot string
+		want                 string
+	}{
+		{"irc.test.com", "#xdcc", "TestBot", "irc.test.com|#xdcc"},
+		{"irc.test.com", "#XDCC", "TestBot", "irc.test.com|#xdcc"},
+		{"irc.test.com", "no-hash", "Bot", "irc.test.com|#no-hash"},
+		{"irc.test.com", "", "TestBot", "irc.test.com|~whois|TestBot"},
+		{"irc.test.com", "", "OtherBot", "irc.test.com|~whois|OtherBot"},
+		{"server2.com", "#chan", "BotX", "server2.com|#chan"},
+	}
+	for _, tt := range tests {
+		got := slotKey(tt.server, tt.channel, tt.bot)
+		if got != tt.want {
+			t.Errorf("slotKey(%q, %q, %q) = %q, want %q", tt.server, tt.channel, tt.bot, got, tt.want)
+		}
+	}
+}
+
+func TestProgressThrottleInterval(t *testing.T) {
+	tests := []struct {
+		active int
+		want   time.Duration
+	}{
+		{0, 0},
+		{1, 0},
+		{3, 0},
+		{4, 2 * time.Second},
+		{5, 2 * time.Second},
+		{8, 2 * time.Second},
+		{9, 3 * time.Second},
+		{20, 3 * time.Second},
+	}
+	for _, tt := range tests {
+		got := progressThrottleInterval(tt.active)
+		if got != tt.want {
+			t.Errorf("progressThrottleInterval(%d) = %v, want %v", tt.active, got, tt.want)
+		}
+	}
+}
+
+func TestGetEffectiveMaxRate(t *testing.T) {
+	qm, _ := newTestQM(t)
+	rate := qm.GetEffectiveMaxRate()
+	if rate != 0 {
+		t.Errorf("expected 0 (default), got %d", rate)
+	}
+}
+
+// =========================================================================
+// copyFile
+// =========================================================================
+
+func TestCopyFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		content := []byte("hello world copy file test")
+		if err := os.WriteFile(src, content, 0o644); err != nil {
+			t.Fatalf("writing source: %v", err)
+		}
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile: %v", err)
+		}
+
+		// Verify destination exists and content matches
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatalf("reading destination: %v", err)
+		}
+		if string(got) != string(content) {
+			t.Errorf("content mismatch: got %q, want %q", string(got), string(content))
+		}
+
+		// Verify permissions preserved
+		dstInfo, _ := os.Stat(dst)
+		srcInfo, _ := os.Stat(src)
+		if dstInfo.Mode() != srcInfo.Mode() {
+			t.Errorf("permission mismatch: dst=%v, src=%v", dstInfo.Mode(), srcInfo.Mode())
+		}
+	})
+
+	t.Run("SourceNotFound", func(t *testing.T) {
+		t.Parallel()
+		err := copyFile("/nonexistent/file.bin", "/tmp/out.bin")
+		if err == nil {
+			t.Fatal("expected error for non-existent source")
+		}
+	})
+
+	t.Run("DestinationInNonexistentDir", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		_ = os.WriteFile(src, []byte("data"), 0o644)
+		dst := filepath.Join(tmpDir, "nonexistent", "dst.bin")
+
+		err := copyFile(src, dst)
+		if err == nil {
+			t.Fatal("expected error when destination directory doesn't exist")
+		}
+	})
+
+	t.Run("OverwriteExisting", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		_ = os.WriteFile(src, []byte("new content"), 0o644)
+		_ = os.WriteFile(dst, []byte("old content will be overwritten"), 0o600)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if string(got) != "new content" {
+			t.Errorf("expected 'new content', got %q", string(got))
+		}
+
+		// Note: O_TRUNC truncates but doesn't change existing file permissions.
+		// Permissions from OpenFile are only applied on O_CREATE (new files).
+		dstInfo, _ := os.Stat(dst)
+		if dstInfo.Mode().Perm() != 0o600 {
+			t.Errorf("expected permissions 0o600 (unchanged from pre-existing), got %v", dstInfo.Mode().Perm())
+		}
+	})
+
+	t.Run("EmptyFile", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		_ = os.WriteFile(src, []byte{}, 0o644)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile empty file: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if len(got) != 0 {
+			t.Errorf("expected empty destination, got %d bytes", len(got))
+		}
+	})
+
+	t.Run("LargeFile", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		src := filepath.Join(tmpDir, "src.bin")
+		dst := filepath.Join(tmpDir, "dst.bin")
+
+		// Create a 1MB file
+		data := make([]byte, 1024*1024)
+		for i := range data {
+			data[i] = byte(i % 256)
+		}
+		_ = os.WriteFile(src, data, 0o644)
+
+		if err := copyFile(src, dst); err != nil {
+			t.Fatalf("copyFile large file: %v", err)
+		}
+
+		got, _ := os.ReadFile(dst)
+		if len(got) != len(data) {
+			t.Errorf("expected %d bytes, got %d", len(data), len(got))
+		}
+		for i := range data {
+			if got[i] != data[i] {
+				t.Errorf("byte mismatch at offset %d: got %d, want %d", i, got[i], data[i])
+				break
+			}
+		}
+	})
 }

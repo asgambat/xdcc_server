@@ -439,3 +439,108 @@ func TestReconcileChannels_EmptyLogger(t *testing.T) {
 		t.Errorf("expected 0 files, got %d", n)
 	}
 }
+
+// =========================================================================
+// sanitizeForLog
+// =========================================================================
+
+func TestSanitizeForLog(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"plain text", "plain text"},
+		{"line1\nline2", "line1 line2"},
+		{"line1\r\nline2", "line1 line2"},
+		{"line1\rline2", "line1 line2"},
+		{"", ""},
+		{"no newlines", "no newlines"},
+	}
+	for _, tt := range tests {
+		got := sanitizeForLog(tt.in)
+		if got != tt.want {
+			t.Errorf("sanitizeForLog(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// =========================================================================
+// Close
+// =========================================================================
+
+func TestClose_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	l, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Close multiple times — should not panic.
+	if err := l.Close(); err != nil {
+		t.Errorf("first Close: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("third Close: %v", err)
+	}
+}
+
+func TestClose_ClosesAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	l, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	l.Log("#chan1", "alice", KindMessage, "hi")
+	l.Log("#chan2", "bob", KindMessage, "hey")
+	l.LogPrivate("irc.test.com", "carol", "secret")
+
+	// Verify files were written.
+	for _, name := range []string{"#chan1.log", "#chan2.log", "private.log"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected %s to exist before close", name)
+		}
+	}
+
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After close, the files map should be empty.
+	l.mu.Lock()
+	n := len(l.files)
+	l.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected 0 files after Close, got %d", n)
+	}
+}
+
+// =========================================================================
+// LogPrivate truncation
+// =========================================================================
+
+func TestLogPrivate_TruncatesLongMessage(t *testing.T) {
+	dir := t.TempDir()
+	l, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer l.Close()
+
+	longMsg := strings.Repeat("B", 5000)
+	l.LogPrivate("irc.example.com", "bob", longMsg)
+
+	path := filepath.Join(dir, "private.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	s := string(data)
+	if len(s) > 4200 {
+		t.Errorf("expected truncated private log line, got length %d", len(s))
+	}
+}

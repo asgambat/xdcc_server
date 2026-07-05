@@ -439,3 +439,411 @@ func TestRunContextCancellation(t *testing.T) {
 
 	// Should exit cleanly without panicking
 }
+
+// ---------------------------------------------------------------------------
+// NewWebhookNotifier
+// ---------------------------------------------------------------------------
+
+func TestNewWebhookNotifier_Valid(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:            "webhook",
+		WebhookEndpoint: "https://hooks.example.com/xdcc",
+		WebhookToken:    "BearerSecret",
+		Events:          []string{"download_completed"},
+	}
+	w := NewWebhookNotifier(cfg)
+	if w == nil {
+		t.Fatal("expected non-nil WebhookNotifier")
+	}
+	if w.endpoint != "https://hooks.example.com/xdcc" {
+		t.Errorf("expected endpoint, got %q", w.endpoint)
+	}
+	if w.token != "BearerSecret" {
+		t.Errorf("expected token, got %q", w.token)
+	}
+	if len(w.events) != 1 {
+		t.Errorf("expected 1 event, got %d", len(w.events))
+	}
+}
+
+func TestNewWebhookNotifier_WrongType(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:            "ntfy",
+		WebhookEndpoint: "https://hooks.example.com",
+	}
+	w := NewWebhookNotifier(cfg)
+	if w != nil {
+		t.Fatal("expected nil for wrong type")
+	}
+}
+
+func TestNewWebhookNotifier_EmptyEndpoint(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:            "webhook",
+		WebhookEndpoint: "",
+	}
+	w := NewWebhookNotifier(cfg)
+	if w != nil {
+		t.Fatal("expected nil for empty endpoint")
+	}
+}
+
+func TestNewWebhookNotifier_NoToken(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:            "webhook",
+		WebhookEndpoint: "https://hooks.example.com",
+	}
+	w := NewWebhookNotifier(cfg)
+	if w == nil {
+		t.Fatal("expected non-nil WebhookNotifier even without token")
+	}
+	if w.token != "" {
+		t.Errorf("expected empty token, got %q", w.token)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewNtfyNotifier
+// ---------------------------------------------------------------------------
+
+func TestNewNtfyNotifier_Valid(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:         "ntfy",
+		NtfyEndpoint: "https://ntfy.sh/mytopic",
+		NtfyToken:    "tk_abc123",
+		Events:       []string{"download_completed", "download_failed"},
+	}
+	n := NewNtfyNotifier(cfg)
+	if n == nil {
+		t.Fatal("expected non-nil NtfyNotifier")
+	}
+	if n.endpoint != "https://ntfy.sh/mytopic" {
+		t.Errorf("expected endpoint, got %q", n.endpoint)
+	}
+	if n.token != "tk_abc123" {
+		t.Errorf("expected token, got %q", n.token)
+	}
+	if len(n.events) != 2 {
+		t.Errorf("expected 2 events, got %d", len(n.events))
+	}
+}
+
+func TestNewNtfyNotifier_WrongType(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:         "webhook",
+		NtfyEndpoint: "https://ntfy.sh/topic",
+	}
+	n := NewNtfyNotifier(cfg)
+	if n != nil {
+		t.Fatal("expected nil for wrong type")
+	}
+}
+
+func TestNewNtfyNotifier_EmptyEndpoint(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:         "ntfy",
+		NtfyEndpoint: "",
+	}
+	n := NewNtfyNotifier(cfg)
+	if n != nil {
+		t.Fatal("expected nil for empty endpoint")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewPushoverNotifier
+// ---------------------------------------------------------------------------
+
+func TestNewPushoverNotifier_Valid(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:          "pushover",
+		PushoverToken: "abc123",
+		PushoverUser:  "userkey",
+		Events:        []string{"download_completed"},
+	}
+	p := NewPushoverNotifier(cfg)
+	if p == nil {
+		t.Fatal("expected non-nil PushoverNotifier")
+	}
+	if p.token != "abc123" {
+		t.Errorf("expected token, got %q", p.token)
+	}
+	if p.user != "userkey" {
+		t.Errorf("expected user, got %q", p.user)
+	}
+	if len(p.events) != 1 {
+		t.Errorf("expected 1 event, got %d", len(p.events))
+	}
+}
+
+func TestNewPushoverNotifier_WrongType(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:          "webhook",
+		PushoverToken: "abc",
+		PushoverUser:  "user",
+	}
+	p := NewPushoverNotifier(cfg)
+	if p != nil {
+		t.Fatal("expected nil for wrong type")
+	}
+}
+
+func TestNewPushoverNotifier_MissingToken(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:         "pushover",
+		PushoverUser: "userkey",
+	}
+	p := NewPushoverNotifier(cfg)
+	if p != nil {
+		t.Fatal("expected nil when token is empty")
+	}
+}
+
+func TestNewPushoverNotifier_MissingUser(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:          "pushover",
+		PushoverToken: "abc123",
+	}
+	p := NewPushoverNotifier(cfg)
+	if p != nil {
+		t.Fatal("expected nil when user is empty")
+	}
+}
+
+func TestNewPushoverNotifier_DefaultEndpoint(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:          "pushover",
+		PushoverToken: "abc",
+		PushoverUser:  "user",
+		// PushoverEndpoint not set → should default to api.pushover.net
+	}
+	p := NewPushoverNotifier(cfg)
+	if p == nil {
+		t.Fatal("expected non-nil PushoverNotifier")
+	}
+	if p.endpoint != "https://api.pushover.net/1/messages.json" {
+		t.Errorf("expected default Pushover endpoint, got %q", p.endpoint)
+	}
+}
+
+func TestNewPushoverNotifier_CustomEndpoint(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:             "pushover",
+		PushoverToken:    "abc",
+		PushoverUser:     "user",
+		PushoverEndpoint: "https://custom.pushover.example.com",
+	}
+	p := NewPushoverNotifier(cfg)
+	if p == nil {
+		t.Fatal("expected non-nil PushoverNotifier")
+	}
+	if p.endpoint != "https://custom.pushover.example.com" {
+		t.Errorf("expected custom endpoint, got %q", p.endpoint)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewEmailNotifier
+// ---------------------------------------------------------------------------
+
+func TestNewEmailNotifier_Valid(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPPort: 587,
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com",
+		Events:   []string{"download_completed"},
+	}
+	e := NewEmailNotifier(cfg)
+	if e == nil {
+		t.Fatal("expected non-nil EmailNotifier")
+	}
+	if e.host != "smtp.example.com" {
+		t.Errorf("expected host, got %q", e.host)
+	}
+	if e.port != 587 {
+		t.Errorf("expected port 587, got %d", e.port)
+	}
+	if e.from != "bot@example.com" {
+		t.Errorf("expected from, got %q", e.from)
+	}
+	if len(e.to) != 1 || e.to[0] != "admin@example.com" {
+		t.Errorf("expected to=[admin@example.com], got %v", e.to)
+	}
+	if len(e.events) != 1 {
+		t.Errorf("expected 1 event, got %d", len(e.events))
+	}
+}
+
+func TestNewEmailNotifier_WrongType(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "webhook",
+		SMTPHost: "smtp.example.com",
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com",
+	}
+	e := NewEmailNotifier(cfg)
+	if e != nil {
+		t.Fatal("expected nil for wrong type")
+	}
+}
+
+func TestNewEmailNotifier_MissingHost(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com",
+	}
+	e := NewEmailNotifier(cfg)
+	if e != nil {
+		t.Fatal("expected nil when host is empty")
+	}
+}
+
+func TestNewEmailNotifier_MissingFrom(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPTo:   "admin@example.com",
+	}
+	e := NewEmailNotifier(cfg)
+	if e != nil {
+		t.Fatal("expected nil when from is empty")
+	}
+}
+
+func TestNewEmailNotifier_MissingTo(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPFrom: "bot@example.com",
+	}
+	e := NewEmailNotifier(cfg)
+	if e != nil {
+		t.Fatal("expected nil when to is empty")
+	}
+}
+
+func TestNewEmailNotifier_DefaultPort(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com",
+		// SMTPPort not set
+	}
+	e := NewEmailNotifier(cfg)
+	if e == nil {
+		t.Fatal("expected non-nil EmailNotifier")
+	}
+	if e.port != 587 {
+		t.Errorf("expected default port 587, got %d", e.port)
+	}
+}
+
+func TestNewEmailNotifier_DefaultTLSMode(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com",
+		// SMTPTLS not set
+	}
+	e := NewEmailNotifier(cfg)
+	if e == nil {
+		t.Fatal("expected non-nil EmailNotifier")
+	}
+	if e.tlsMode != "starttls" {
+		t.Errorf("expected default tlsMode 'starttls', got %q", e.tlsMode)
+	}
+}
+
+func TestNewEmailNotifier_RecipientParsing(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:     "email",
+		SMTPHost: "smtp.example.com",
+		SMTPFrom: "bot@example.com",
+		SMTPTo:   "admin@example.com, , user@example.com,",
+	}
+	e := NewEmailNotifier(cfg)
+	if e == nil {
+		t.Fatal("expected non-nil EmailNotifier")
+	}
+	if len(e.to) != 2 {
+		t.Errorf("expected 2 parsed recipients (blank trimmed), got %d: %v", len(e.to), e.to)
+	}
+}
+
+func TestNewEmailNotifier_WithUsername(t *testing.T) {
+	cfg := config.NotificationConfig{
+		Type:         "email",
+		SMTPHost:     "smtp.example.com",
+		SMTPPort:     465,
+		SMTPUsername: "user",
+		SMTPPassword: "pass",
+		SMTPFrom:     "bot@example.com",
+		SMTPTo:       "admin@example.com",
+		SMTPTLS:      "ssl",
+	}
+	e := NewEmailNotifier(cfg)
+	if e == nil {
+		t.Fatal("expected non-nil EmailNotifier")
+	}
+	if e.username != "user" {
+		t.Errorf("expected username 'user', got %q", e.username)
+	}
+	if e.password != "pass" {
+		t.Errorf("expected password 'pass', got %q", e.password)
+	}
+	if e.port != 465 {
+		t.Errorf("expected port 465, got %d", e.port)
+	}
+	if e.tlsMode != "ssl" {
+		t.Errorf("expected tlsMode 'ssl', got %q", e.tlsMode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// smtpAuth
+// ---------------------------------------------------------------------------
+
+func TestSmtpAuth_NoUsername(t *testing.T) {
+	e := &EmailNotifier{username: ""}
+	auth := e.smtpAuth()
+	if auth != nil {
+		t.Fatal("expected nil auth when no username")
+	}
+}
+
+func TestSmtpAuth_StartTLS(t *testing.T) {
+	e := &EmailNotifier{
+		username: "user",
+		password: "pass",
+		host:     "smtp.example.com",
+		tlsMode:  "starttls",
+	}
+	auth := e.smtpAuth()
+	if auth == nil {
+		t.Fatal("expected non-nil auth for starttls")
+	}
+}
+
+func TestSmtpAuth_NonStartTLS(t *testing.T) {
+	// SSL mode uses allowAnyTLS instead of PlainAuth
+	e := &EmailNotifier{
+		username: "user",
+		password: "pass",
+		host:     "smtp.example.com",
+		tlsMode:  "ssl",
+	}
+	auth := e.smtpAuth()
+	if auth == nil {
+		t.Fatal("expected non-nil auth for ssl mode")
+	}
+	// Should be allowAnyTLS, not smtp.PlainAuth
+	_, isAllowAny := auth.(*allowAnyTLS)
+	if !isAllowAny {
+		t.Errorf("expected *allowAnyTLS for non-starttls mode, got %T", auth)
+	}
+}

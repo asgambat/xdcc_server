@@ -563,3 +563,120 @@ func containerLower(s, substr string) bool {
 	}
 	return false
 }
+
+// ===========================================================================
+// normalizeWords
+// ===========================================================================
+
+func TestNormalizeWords(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"Anime.Show.2023", "anime show 2023"},
+		{"Anime_Show_2023", "anime show 2023"},
+		{"Anime-Show-2023", "anime show 2023"},
+		{"Mix.of.sEpArAtOrS", "mix of separators"},
+		{"  leading and trailing  ", "leading and trailing"},
+		{"multiple...dots...here", "multiple dots here"},
+		{"no_separators", "no separators"},
+		{"", ""},
+		{"Already Normalized", "already normalized"},
+	}
+	for _, tt := range tests {
+		got := normalizeWords(tt.in)
+		if got != tt.want {
+			t.Errorf("normalizeWords(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// ===========================================================================
+// filterByMinSize
+// ===========================================================================
+
+func TestFilterByMinSize(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("small.mkv", 100*1024*1024, "Bot"),    // 100 MB
+		mkPack("medium.mkv", 500*1024*1024, "Bot"),   // 500 MB
+		mkPack("large.mkv", 2*1024*1024*1024, "Bot"), // 2 GB
+		mkPack("unknown.mkv", 0, "Bot"),              // unknown size
+	}
+
+	// Filter by 500MB minimum — keeps medium (500MB), large (2GB), and
+	// unknown (0 bytes, passes because size <= 0 is treated as unknown).
+	result := filterByMinSize(packs, "500MB")
+	if len(result) != 3 {
+		t.Errorf("expected 3 results for minSize=500MB (medium, large, unknown), got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s (%d bytes)", p.GetFilename(), p.GetSize())
+		}
+	}
+
+	// Filter by invalid size string → returns all
+	result = filterByMinSize(packs, "invalid")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for invalid minSize, got %d", len(result))
+	}
+
+	// Filter by empty string → returns all
+	result = filterByMinSize(packs, "")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for empty minSize, got %d", len(result))
+	}
+}
+
+func TestFilterByMinSize_WithUnknownSizes(t *testing.T) {
+	// Packs with unknown size (0) should pass the filter (not excluded)
+	packs := []*entities.XDCCPack{
+		mkPack("unknown.mkv", 0, "Bot"),
+	}
+	result := filterByMinSize(packs, "1GB")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result (unknown size passes), got %d", len(result))
+	}
+}
+
+// ===========================================================================
+// filterByMaxSize
+// ===========================================================================
+
+func TestFilterByMaxSize(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("small.mkv", 100*1024*1024, "Bot"),    // 100 MB
+		mkPack("medium.mkv", 500*1024*1024, "Bot"),   // 500 MB
+		mkPack("large.mkv", 2*1024*1024*1024, "Bot"), // 2 GB
+		mkPack("unknown.mkv", 0, "Bot"),              // unknown size
+	}
+
+	// Filter by 1GB maximum
+	result := filterByMaxSize(packs, "1GB")
+	if len(result) != 3 {
+		t.Errorf("expected 3 results for maxSize=1GB, got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s (%d bytes)", p.GetFilename(), p.GetSize())
+		}
+	}
+
+	// Filter by invalid size string → returns all
+	result = filterByMaxSize(packs, "invalid")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for invalid maxSize, got %d", len(result))
+	}
+
+	// Filter by empty string → returns all
+	result = filterByMaxSize(packs, "")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for empty maxSize, got %d", len(result))
+	}
+}
+
+func TestFilterByMaxSize_WithUnknownSizes(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("unknown.mkv", 0, "Bot"),
+	}
+	result := filterByMaxSize(packs, "100MB")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result (unknown size passes), got %d", len(result))
+	}
+}
