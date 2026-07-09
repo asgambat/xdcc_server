@@ -15,6 +15,6 @@ func httpGet(ctx context.Context, url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "xdcc-go/1.0")
+	req.Header.Set("User-Agent", "xdcc_server/1.0")
 	return httpClient.Do(req)
 }

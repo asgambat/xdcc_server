@@ -11,6 +11,7 @@ export const providers = writable([]);
 export const config = writable(null);
 export const stats = writable(null);
 export const status = writable(null);
+export const version = writable(null);
 export const selectedDownloads = writable(new Set());
 export const sseStatus = writable('disconnected');
 export const theme = writable(localStorage.getItem('xdcc-theme') || 'dark');

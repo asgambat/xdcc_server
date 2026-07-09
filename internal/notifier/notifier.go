@@ -1,8 +1,9 @@
 // Package notifier provides external notification support for download and
-// watchlist events. It supports three notification providers:
+// watchlist events. It supports four notification providers:
 //   - webhook: generic HTTP POST with JSON payload
 //   - ntfy: push notifications via ntfy.sh (or self-hosted)
 //   - pushover: push notifications via Pushover.net
+//   - email: SMTP email notifications
 //
 // Configuration is loaded from config.yaml:
 //
@@ -20,22 +21,35 @@
 //	    pushover_token: "abc123"
 //	    pushover_user: "userkey"
 //	    events: [download_completed, download_failed, watchlist_new_results]
+//
+//	  - type: email
+//	    smtp_host: "smtp.example.com"
+//	    smtp_port: 587
+//	    smtp_username: "user"
+//	    smtp_password: "pass"
+//	    smtp_from: "sender@example.com"
+//	    smtp_to: "recipient@example.com"
+//	    events: [download_completed, download_failed, watchlist_new_results]
 package notifier
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/queue"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/queue"
 )
 
 // ---------------------------------------------------------------------------
@@ -72,6 +86,8 @@ type WatchlistEvent struct {
 	NewPacksCount int    `json:"new_packs_count"`
 	EnqueuedCount int    `json:"enqueued_count"`
 	Timestamp     string `json:"timestamp"`
+	Query         string `json:"query"`
+	SearchURL     string `json:"search_url"`
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +154,9 @@ func formatWatchlistMessage(event WatchlistEvent) notifyMessage {
 	msg := fmt.Sprintf("Watchlist %q: %d nuovi pacchetti", event.WatchlistName, event.NewPacksCount)
 	if event.EnqueuedCount > 0 {
 		msg += fmt.Sprintf(" (%d in coda)", event.EnqueuedCount)
+	}
+	if event.SearchURL != "" {
+		msg += fmt.Sprintf("\nCerca: %s", event.SearchURL)
 	}
 	return notifyMessage{
 		Title:   "Watchlist aggiornata",
@@ -208,12 +227,13 @@ func NewWebhookNotifier(cfg config.NotificationConfig) *WebhookNotifier {
 
 // webhookData is the JSON body sent to the webhook endpoint.
 type webhookData struct {
-	Data string `json:"data"`
+	Data      string `json:"data"`
+	SearchURL string `json:"search_url,omitempty"`
 }
 
 // send delivers a notification to the webhook endpoint.
-func (w *WebhookNotifier) send(ctx context.Context, message string) error {
-	body, err := json.Marshal(webhookData{Data: message})
+func (w *WebhookNotifier) send(ctx context.Context, message, searchURL string) error {
+	body, err := json.Marshal(webhookData{Data: message, SearchURL: searchURL})
 	if err != nil {
 		return fmt.Errorf("webhook: marshal payload: %w", err)
 	}
@@ -250,7 +270,7 @@ func (w *WebhookNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return w.send(ctx, nm.Message)
+	return w.send(ctx, nm.Message, "")
 }
 
 // NotifyWatchlistResults sends a webhook notification for a watchlist event.
@@ -262,7 +282,7 @@ func (w *WebhookNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return w.send(ctx, nm.Message)
+	return w.send(ctx, nm.Message, event.SearchURL)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,17 +310,20 @@ func NewNtfyNotifier(cfg config.NotificationConfig) *NtfyNotifier {
 }
 
 // publish sends a message to the ntfy endpoint with Bearer auth and priority header.
-func (n *NtfyNotifier) publish(ctx context.Context, message string) error {
+func (n *NtfyNotifier) publish(ctx context.Context, message, clickURL string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.endpoint, bytes.NewReader([]byte(message)))
 	if err != nil {
 		return fmt.Errorf("ntfy: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("User-Agent", "xdcc-server/1.0")
-	req.Header.Set("X-Title", "XDCC-go")
+	req.Header.Set("X-Title", "XDCC_server")
 	req.Header.Set("Priority", "4")
 	if n.token != "" {
 		req.Header.Set("Authorization", "Bearer "+n.token)
+	}
+	if clickURL != "" {
+		req.Header.Set("Click", clickURL)
 	}
 
 	resp, err := defaultHTTPClient.Do(req)
@@ -325,7 +348,7 @@ func (n *NtfyNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return n.publish(ctx, nm.Message)
+	return n.publish(ctx, nm.Message, "")
 }
 
 // NotifyWatchlistResults sends a ntfy notification for a watchlist event.
@@ -337,7 +360,7 @@ func (n *NtfyNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return n.publish(ctx, nm.Message)
+	return n.publish(ctx, nm.Message, event.SearchURL)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +394,7 @@ func NewPushoverNotifier(cfg config.NotificationConfig) *PushoverNotifier {
 }
 
 // send delivers a notification to the Pushover API.
-func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage) error {
+func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage, urlStr, urlTitle string) error {
 	data := map[string]string{
 		"token":   p.token,
 		"user":    p.user,
@@ -379,6 +402,12 @@ func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage) error {
 	}
 	if nm.Title != "" {
 		data["title"] = nm.Title
+	}
+	if urlStr != "" {
+		data["url"] = urlStr
+		if urlTitle != "" {
+			data["url_title"] = urlTitle
+		}
 	}
 	return sendFormPOST(ctx, p.endpoint, data)
 }
@@ -393,7 +422,7 @@ func (p *PushoverNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return p.send(ctx, nm)
+	return p.send(ctx, nm, "", "")
 }
 
 // NotifyWatchlistResults sends a Pushover notification for a watchlist event.
@@ -405,7 +434,245 @@ func (p *PushoverNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return p.send(ctx, nm)
+	return p.send(ctx, nm, event.SearchURL, "Apri ricerca")
+}
+
+// ---------------------------------------------------------------------------
+// EmailNotifier (SMTP)
+// ---------------------------------------------------------------------------
+
+// EmailNotifier sends notifications via SMTP email.
+type EmailNotifier struct {
+	host       string
+	port       int
+	username   string
+	password   string
+	from       string
+	to         []string // parsed recipients
+	tlsMode    string   // "starttls", "ssl", "none"
+	skipVerify bool
+	events     map[EventType]bool
+}
+
+// NewEmailNotifier creates an EmailNotifier from a notification config entry.
+// Returns nil if the config type is not "email" or required fields are missing.
+func NewEmailNotifier(cfg config.NotificationConfig) *EmailNotifier {
+	if cfg.Type != "email" || cfg.SMTPHost == "" || cfg.SMTPFrom == "" || cfg.SMTPTo == "" {
+		return nil
+	}
+
+	port := cfg.SMTPPort
+	if port == 0 {
+		port = 587 // default STARTTLS
+	}
+
+	tlsMode := cfg.SMTPTLS
+	if tlsMode == "" {
+		tlsMode = "starttls"
+	}
+
+	// Parse and normalize recipients
+	recipients := strings.Split(cfg.SMTPTo, ",")
+	parsed := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			parsed = append(parsed, r)
+		}
+	}
+
+	return &EmailNotifier{
+		host:       cfg.SMTPHost,
+		port:       port,
+		username:   cfg.SMTPUsername,
+		password:   cfg.SMTPPassword,
+		from:       cfg.SMTPFrom,
+		to:         parsed,
+		tlsMode:    tlsMode,
+		skipVerify: cfg.SMTPSkipVerify,
+		events:     eventsFilter(cfg.Events),
+	}
+}
+
+// send delivers an email notification.
+func (e *EmailNotifier) send(ctx context.Context, nm notifyMessage) error {
+	if len(e.to) == 0 {
+		return fmt.Errorf("email: no recipients configured")
+	}
+
+	// Build the MIME email
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("From: %s\r\n", e.from))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(e.to, ", ")))
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", nm.Title))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	buf.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
+	buf.WriteString("\r\n")
+	buf.WriteString(nm.Message)
+
+	addr := fmt.Sprintf("%s:%d", e.host, e.port)
+
+	done := make(chan error, 1)
+
+	go func() {
+		switch e.tlsMode {
+		case "ssl":
+			done <- e.sendSSL(addr, buf.Bytes())
+		case "none":
+			done <- e.sendNoTLS(addr, buf.Bytes())
+		default: // "starttls"
+			done <- e.sendSTARTTLS(addr, buf.Bytes())
+		}
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("email: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// sendSTARTTLS uses net/smtp.SendMail which automatically negotiates STARTTLS.
+func (e *EmailNotifier) sendSTARTTLS(addr string, msg []byte) error {
+	var auth smtp.Auth
+	if e.username != "" {
+		auth = smtp.PlainAuth("", e.username, e.password, e.host)
+	}
+	return smtp.SendMail(addr, auth, e.from, e.to, msg)
+}
+
+// sendSSL connects over an explicit TLS tunnel (SMTPS, typically port 465).
+func (e *EmailNotifier) sendSSL(addr string, msg []byte) error {
+	tlsCfg := &tls.Config{
+		ServerName:         e.host,
+		InsecureSkipVerify: e.skipVerify,
+	}
+
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, e.host)
+	if err != nil {
+		return fmt.Errorf("new client: %w", err)
+	}
+	defer client.Close()
+
+	return e.sendViaClient(client, msg)
+}
+
+// sendNoTLS connects over a plain TCP connection without TLS.
+func (e *EmailNotifier) sendNoTLS(addr string, msg []byte) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, e.host)
+	if err != nil {
+		return fmt.Errorf("new client: %w", err)
+	}
+	defer client.Close()
+
+	return e.sendViaClient(client, msg)
+}
+
+// allowAnyTLS implements smtp.Auth, wrapping PlainAuth but skipping the TLS
+// check. This is needed because smtp.PlainAuth refuses to authenticate on
+// connections that did NOT negotiate STARTTLS — but our sendSSL path
+// connects via tls.Dial before smtp.NewClient, so ServerInfo.TLS is false
+// even though the connection is encrypted.
+type allowAnyTLS struct {
+	user, pass, host string
+}
+
+func (a *allowAnyTLS) Start(server *smtp.ServerInfo) (mech string, resp []byte, err error) {
+	resp = []byte(a.user + "\x00" + a.user + "\x00" + a.pass)
+	return "PLAIN", resp, nil
+}
+
+func (a *allowAnyTLS) Next(fromServer []byte, more bool) ([]byte, error) {
+	return nil, nil
+}
+
+// smtpAuth returns the appropriate smtp.Auth for the current TLS mode.
+func (e *EmailNotifier) smtpAuth() smtp.Auth {
+	if e.username == "" {
+		return nil
+	}
+	if e.tlsMode == "starttls" {
+		return smtp.PlainAuth("", e.username, e.password, e.host)
+	}
+	return &allowAnyTLS{user: e.username, pass: e.password, host: e.host}
+}
+
+// sendViaClient performs SMTP MAIL, RCPT, DATA, and QUIT on an established client.
+func (e *EmailNotifier) sendViaClient(client *smtp.Client, msg []byte) error {
+	// Authenticate if credentials are provided
+	if auth := e.smtpAuth(); auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("auth: %w", err)
+		}
+	}
+
+	// MAIL FROM
+	if err := client.Mail(e.from); err != nil {
+		return fmt.Errorf("mail from: %w", err)
+	}
+
+	// RCPT TO for each recipient
+	for _, r := range e.to {
+		if err := client.Rcpt(r); err != nil {
+			return fmt.Errorf("rcpt %s: %w", r, err)
+		}
+	}
+
+	// DATA (message body)
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("data: %w", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		w.Close()
+		return fmt.Errorf("write body: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close body: %w", err)
+	}
+
+	return client.Quit()
+}
+
+// Notify sends an email notification for a download event.
+func (e *EmailNotifier) Notify(evt queue.Event) error {
+	notifType := mapQueueEvent(evt.Type)
+	if notifType == "" || !interested(e.events, notifType) {
+		return nil
+	}
+
+	nm := formatDownloadMessage(evt)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return e.send(ctx, nm)
+}
+
+// NotifyWatchlistResults sends an email notification for a watchlist event.
+func (e *EmailNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
+	if !interested(e.events, EventWatchlistNewResults) {
+		return nil
+	}
+
+	nm := formatWatchlistMessage(event)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return e.send(ctx, nm)
 }
 
 // ---------------------------------------------------------------------------
@@ -434,41 +701,100 @@ func mapQueueEvent(evtType queue.EventType) EventType {
 type Manager struct {
 	notifiers []Notifier
 	logger    *logging.Logger
+	baseURL   string
+}
+
+// isEnabled returns true if the notification config is enabled.
+// nil (unset) defaults to enabled = true.
+func isEnabled(cfg *config.NotificationConfig) bool {
+	return cfg.Enabled == nil || *cfg.Enabled
+}
+
+// validEvents lists the known event types for validation.
+var validEvents = map[string]bool{
+	string(EventDownloadCompleted):   true,
+	string(EventDownloadFailed):      true,
+	string(EventWatchlistNewResults): true,
 }
 
 // NewManager creates a Manager from notification configs.
 // Config entries with unsupported types are silently skipped.
-func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manager {
+// Config entries with enabled=false are skipped.
+// baseURL is the public-facing URL used to construct search links in notifications.
+func NewManager(cfgs []config.NotificationConfig, baseURL string, logger *logging.Logger) *Manager {
 	var notifiers []Notifier
+	// Tracks whether any *successfully constructed* provider covers
+	// watchlist_new_results — used to warn at startup when base_url is empty.
+	// Updated strictly inside each case arm after append, so a constructor
+	// returning nil (e.g. empty endpoint) does not trigger a misleading warn.
+	var watchlistProviderEnabled bool
 
 	for _, cfg := range cfgs {
+		// Skip if explicitly disabled
+		if !isEnabled(&cfg) {
+			logger.Warnf("notifier: provider %q is disabled via enabled: false, skipping", cfg.Type)
+			continue
+		}
+
+		// Warn about unknown events in the config
+		for _, e := range cfg.Events {
+			if !validEvents[e] {
+				logger.Warnf("notifier: %q provider has unknown event %q, will be ignored", cfg.Type, e)
+			}
+		}
+
 		switch cfg.Type {
 		case "webhook":
 			n := NewWebhookNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added webhook (%d events) → %s", len(cfg.Events), cfg.WebhookEndpoint)
 			}
 		case "ntfy":
 			n := NewNtfyNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added ntfy (%d events) → %s", len(cfg.Events), cfg.NtfyEndpoint)
 			}
 		case "pushover":
 			n := NewPushoverNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added pushover (%d events) → user=%s", len(cfg.Events), cfg.PushoverUser)
+			}
+		case "email":
+			n := NewEmailNotifier(cfg)
+			if n != nil {
+				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
+				logger.Infof("notifier: added email (%d events) → %s", len(cfg.Events), cfg.SMTPFrom)
 			}
 		default:
 			logger.Warnf("notifier: unknown type %q, skipping", cfg.Type)
 		}
 	}
 
+	if baseURL != "" {
+		logger.Infof("notifier: base URL for notification links: %s", baseURL)
+	} else if watchlistProviderEnabled {
+		logger.Warnf("notifier: http.base_url is empty; watchlist notifications will fire but will NOT include direct search links (the \"Cerca: <url>\" line). Set http.base_url in config.yaml or XDCC_HTTP_BASE_URL env var to enable them.")
+	}
+
 	return &Manager{
 		notifiers: notifiers,
 		logger:    logger,
+		baseURL:   baseURL,
 	}
 }
 
@@ -492,11 +818,17 @@ func (m *Manager) Run(ctx context.Context, ch <-chan queue.Event, wg *sync.WaitG
 	}
 }
 
-// dispatch sends an event to all notifiers concurrently.
+// dispatch sends an event to all notifiers concurrently and waits for
+// all notifications to complete before returning. This ensures that
+// goroutines don't outlive the caller (especially during drainEvents
+// at shutdown) and prevents unbounded goroutine accumulation.
 func (m *Manager) dispatch(evt queue.Event) {
+	var wg sync.WaitGroup
 	for _, n := range m.notifiers {
 		n := n
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := n.Notify(evt); err != nil {
 				m.logger.Errorf("notifier: notification failed for download %d: %v", evt.DownloadID, err)
 			} else {
@@ -504,6 +836,7 @@ func (m *Manager) dispatch(evt queue.Event) {
 			}
 		}()
 	}
+	wg.Wait()
 }
 
 // drainEvents drains remaining events during shutdown.
@@ -522,10 +855,17 @@ func (m *Manager) drainEvents(ch <-chan queue.Event) {
 	}
 }
 
-// NotifyWatchlistResults sends a watchlist notification to all notifiers.
-func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
+// NotifyWatchlistResults sends a watchlist notification to all notifiers
+// and waits for all to complete before returning. The query parameter is used
+// to construct a search URL linking back to the web UI.
+func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int, query string) {
 	if len(m.notifiers) == 0 {
 		return
+	}
+
+	var searchURL string
+	if m.baseURL != "" && query != "" {
+		searchURL = fmt.Sprintf("%s/#search?q=%s", m.baseURL, url.QueryEscape(query))
 	}
 
 	event := WatchlistEvent{
@@ -533,18 +873,24 @@ func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 		NewPacksCount: newPacks,
 		EnqueuedCount: enqueued,
 		Timestamp:     time.Now().Format(time.RFC3339),
+		Query:         query,
+		SearchURL:     searchURL,
 	}
 
+	var wg sync.WaitGroup
 	for _, n := range m.notifiers {
 		n := n
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := n.NotifyWatchlistResults(event); err != nil {
 				m.logger.Errorf("notifier: watchlist notification failed for %q: %v", name, err)
 			} else {
-				m.logger.Debugf("notifier: watchlist notification sent for %q (%d new packs)", name, newPacks)
+				m.logger.Infof("notifier: watchlist notification sent for %q (%d new packs)", name, newPacks)
 			}
 		}()
 	}
+	wg.Wait()
 }
 
 // Notifiers returns the list of configured notifiers (for introspection).

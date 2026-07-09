@@ -7,35 +7,37 @@
 *.dll
 *.so
 *.dylib
-xdcc-server
-xdcc-browser
-bin/
+/xdcc-server
+/xdcc-browser
+/bin/
 
 # Test binary, built with `go test -c`
 *.test
 
 # Code coverage profiles and other test artifacts
 *.out
-coverage.*
-*.coverprofile
-profile.cov
+/coverage.*
+/*.coverprofile
+/profile.cov
 
 # Dependency directories
-web/dist
-web/node_modules
+/web/dist/
+/web/node_modules/
 
 
 # Go workspace file
-go.work
-go.work.sum
+/go.work
+/go.work.sum
 
 # env file
-.env
+/.env
 
 # Editor/IDE
 # .idea/
 # .vscode/
 
 #misc
-downloads/
-.task/
+/downloads/
+/db/
+/.task/
+.wrongstack/

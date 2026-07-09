@@ -19,7 +19,7 @@ func (s *SQLiteStore) RecoverDownloadsOnStartup(ctx context.Context) ([]Download
 	// Find all downloads stuck in 'downloading' status
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE status = 'downloading'`,
 	)

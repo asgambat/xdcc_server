@@ -12,8 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/searchagg"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/searchagg"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================
@@ -28,14 +28,18 @@ func (a *API) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	opts := searchagg.SearchOptions{
-		Query:    q.Get("q"),
-		Prefix:   q.Get("prefix"),
-		Bot:      q.Get("bot"),
-		Compact:  q.Get("compact") == "true",
-		MinSize:  q.Get("min_size"),
-		MaxSize:  q.Get("max_size"),
-		Page:     1,
-		PageSize: 50,
+		Query:     q.Get("q"),
+		Prefix:    q.Get("prefix"),
+		Bot:       q.Get("bot"),
+		Compact:   q.Get("compact") == "true",
+		VideoOnly: q.Get("video_only") == "true",
+		AudioOnly: q.Get("audio_only") == "true",
+		BooksOnly: q.Get("books_only") == "true",
+		ZipOnly:   q.Get("zip_only") == "true",
+		MinSize:   q.Get("min_size"),
+		MaxSize:   q.Get("max_size"),
+		Page:      1,
+		PageSize:  50,
 	}
 	if ext := q.Get("ext"); ext != "" {
 		opts.Ext = strings.Split(ext, ",")
@@ -435,6 +439,11 @@ func (a *API) handleUpdateWatchlist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When the user manually edits and saves a watchlist (Update button),
+	// reset the results counter to 0 so the UI reflects a fresh state.
+	// (RunWatchlist preserves results on no-changes; this is the explicit reset.)
+	_ = a.Store.SetWatchlistChecked(r.Context(), id, "", "[]")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -780,12 +789,13 @@ func whoisBotOnServer(ctx context.Context, ircMgr IRCManager, serverID int64, bo
 	}
 
 	// Handler for RPL_WHOISUSER — bot exists on this server
+	// IRC format: :server 311 ourNick targetNick user host * :realname
+	// girc includes the recipient (ourNick) as Params[0]; the bot is Params[1].
 	cuid := client.Handlers.Add(girc.RPL_WHOISUSER, func(cl *girc.Client, e girc.Event) {
 		if len(e.Params) < 2 {
 			return
 		}
-		// Params: [nick, user, host, real name]
-		whoisNick := e.Params[0]
+		whoisNick := e.Params[1]
 		if strings.EqualFold(whoisNick, bot) {
 			sendReply(whoisNick)
 		}
@@ -793,12 +803,13 @@ func whoisBotOnServer(ctx context.Context, ircMgr IRCManager, serverID int64, bo
 	defer client.Handlers.Remove(cuid)
 
 	// Handler for ERR_NOSUCHNICK — bot not found on this server (no such nick)
+	// IRC format: :server 401 ourNick targetNick :No such nick/channel
+	// girc includes the recipient (ourNick) as Params[0]; the target is Params[1].
 	cuid2 := client.Handlers.Add(girc.ERR_NOSUCHNICK, func(cl *girc.Client, e girc.Event) {
 		if len(e.Params) < 2 {
 			return
 		}
-		// Params: [nick, "No such nick"]
-		if strings.EqualFold(e.Params[0], bot) {
+		if strings.EqualFold(e.Params[1], bot) {
 			sendReply("")
 		}
 	})

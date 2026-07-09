@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/diskmon"
-	"xdcc-go/internal/entities"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/pubsub"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/diskmon"
+	"xdcc_server/internal/entities"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/pubsub"
+	"xdcc_server/internal/store"
 )
 
 // slotKey builds the compound key used in channelSlots to enforce
@@ -58,11 +59,12 @@ type Manager struct {
 	dispatchMu sync.Mutex
 	// activeJobs tracks currently running downloads: download ID → cancel function
 	activeJobs map[int64]context.CancelFunc
-	// channelSlots tracks which (server, channel) pairs currently have an active download.
+	// channelSlots tracks which (server, channel) pairs currently have an active
+	// or reserved dispatch slot.
 	// Key format: "serverAddress|normalizedChannel" so different channels on the
 	// same server can download in parallel.
 	channelSlots map[string]int64 // "server|channel" → download ID
-	// globalCount is the number of currently active downloads
+	// globalCount is the number of active or reserved dispatch slots.
 	globalCount int
 
 	// event subscriber hub
@@ -72,6 +74,8 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	// closing prevents new dispatch/enqueue while Stop is in progress.
+	closing atomic.Bool
 
 	// Track active download goroutines for clean shutdown
 	downloadWg sync.WaitGroup
@@ -166,8 +170,8 @@ func (qm *Manager) Start() error {
 	// cleanly shut it down even during the startup delay.
 	go qm.monitorLoop()
 
-	if qm.cfg.Download.StartupDelayMinutes > 0 {
-		delay := time.Duration(qm.cfg.Download.StartupDelayMinutes) * time.Minute
+	if delayMin := qm.cfg.GetStartupDelayMinutes(); delayMin > 0 {
+		delay := time.Duration(delayMin) * time.Minute
 		qm.log.Infof("queue manager: delaying dispatch by %v to allow IRC connections to establish", delay)
 		qm.startupTimer = time.AfterFunc(delay, func() {
 			close(qm.startupReady)
@@ -183,6 +187,16 @@ func (qm *Manager) Start() error {
 
 // Stop cancels all active downloads and stops the monitor.
 func (qm *Manager) Stop() {
+	// Mark manager as closing first so Enqueue/tryDispatch reject new work.
+	// If Stop was already called, return immediately.
+	if qm.closing.Swap(true) {
+		return
+	}
+
+	// Wait for any in-flight tryDispatch to complete before stopping timers
+	// and monitors. This reduces races between shutdown and new starts.
+	qm.waitForDispatchBarrier()
+
 	// Stop the startup timer so the delayed dispatch callback doesn't fire
 	// after shutdown has begun, calling tryDispatch() outside the lifecycle.
 	if qm.startupTimer != nil {
@@ -291,6 +305,10 @@ func (qm *Manager) emitEvent(evt Event) {
 // packMessage is the raw XDCC message (e.g. "xdcc send #123").
 // The caller should already have validated it.
 func (qm *Manager) Enqueue(d store.DownloadRecord) (int64, error) {
+	if qm.closing.Load() {
+		return 0, fmt.Errorf("queue manager is shutting down")
+	}
+
 	// Normalize channel (if provided)
 	// Channel is optional - if empty, WHOIS will discover it during download
 	d.Channel = xdccirc.NormalizeChannel(d.Channel)
@@ -305,15 +323,20 @@ func (qm *Manager) Enqueue(d store.DownloadRecord) (int64, error) {
 	if qm.diskMon != nil {
 		_, _, low, err := qm.diskMon.Check()
 		if err == nil && low {
+			minDisk := qm.cfg.GetMinDiskSpace()
 			return 0, fmt.Errorf("insufficient disk space: %s available, need %s",
-				diskmon.FormatBytes(qm.cfg.Download.MinDiskSpace),
-				diskmon.FormatBytes(qm.cfg.Download.MinDiskSpace))
+				diskmon.FormatBytes(minDisk),
+				diskmon.FormatBytes(minDisk))
 		}
 	}
 
 	// Set default priority
 	if d.Priority == 0 {
 		d.Priority = 100
+	}
+
+	if qm.closing.Load() {
+		return 0, fmt.Errorf("queue manager is shutting down")
 	}
 
 	id, err := qm.store.EnqueueDownload(qm.ctx, d)
@@ -354,16 +377,11 @@ func (qm *Manager) CancelDownload(id int64, reason string) error {
 // so callers must pass context.Background() to ensure store operations succeed.
 func (qm *Manager) cancelDownloadWithCtx(ctx context.Context, id int64, reason string) error {
 	qm.mu.Lock()
-	cancelFn, active := qm.activeJobs[id]
-	if active {
-		delete(qm.activeJobs, id)
-		qm.globalCount--
-	}
+	cancelFn, active := qm.removeActiveJobLocked(id)
 	qm.mu.Unlock()
 
 	if active {
 		cancelFn()
-		qm.releaseChannelSlot(id)
 		qm.log.Infof("cancelled active download %d: %s", id, reason)
 	}
 
@@ -375,7 +393,9 @@ func (qm *Manager) cancelDownloadWithCtx(ctx context.Context, id int64, reason s
 
 	// If it was active but not yet completed, mark it as queued for retry
 	if active && d.Status == store.DownloadStatusDownloading {
-		_ = qm.store.RequeueDownload(ctx, id)
+		if err := qm.store.RequeueDownload(ctx, id); err != nil {
+			qm.log.Warnf("requeue download %d in DB failed: %v", id, err)
+		}
 	}
 
 	return nil
@@ -385,11 +405,7 @@ func (qm *Manager) cancelDownloadWithCtx(ctx context.Context, id int64, reason s
 // context is cancelled (the partial file remains for potential resume).
 func (qm *Manager) PauseDownload(id int64) error {
 	qm.mu.Lock()
-	cancelFn, active := qm.activeJobs[id]
-	if active {
-		delete(qm.activeJobs, id)
-		qm.globalCount--
-	}
+	cancelFn, active := qm.removeActiveJobLocked(id)
 	qm.mu.Unlock()
 
 	if active {
@@ -399,12 +415,6 @@ func (qm *Manager) PauseDownload(id int64) error {
 	err := qm.store.MarkDownloadPaused(qm.ctx, id)
 	if err != nil {
 		return err
-	}
-
-	// Release channel slot unconditionally when active — do not depend on
-	// GetDownload succeeding, which could leave the slot occupied forever.
-	if active {
-		qm.releaseChannelSlot(id)
 	}
 
 	qm.emitEvent(Event{
@@ -433,21 +443,11 @@ func (qm *Manager) ResumeDownload(id int64) error {
 // RemoveDownload removes a download from the queue entirely.
 func (qm *Manager) RemoveDownload(id int64) error {
 	qm.mu.Lock()
-	cancelFn, active := qm.activeJobs[id]
-	if active {
-		delete(qm.activeJobs, id)
-		qm.globalCount--
-	}
+	cancelFn, active := qm.removeActiveJobLocked(id)
 	qm.mu.Unlock()
 
 	if active {
 		cancelFn()
-	}
-
-	// Release channel slot unconditionally when active — do not depend on
-	// GetDownload succeeding, which could leave the slot occupied forever.
-	if active {
-		qm.releaseChannelSlot(id)
 	}
 
 	err := qm.store.DeleteDownload(qm.ctx, id)
@@ -531,6 +531,10 @@ func (qm *Manager) tryDispatch() {
 	qm.dispatchMu.Lock()
 	defer qm.dispatchMu.Unlock()
 
+	if qm.closing.Load() {
+		return
+	}
+
 	// Check if we're shutting down
 	select {
 	case <-qm.ctx.Done():
@@ -566,7 +570,7 @@ func (qm *Manager) tryDispatch() {
 		}
 	}
 
-	maxParallel := qm.cfg.Download.MaxParallelTotal
+	maxParallel := qm.cfg.GetMaxParallelTotal()
 	if maxParallel < 1 {
 		maxParallel = 5
 	}
@@ -587,6 +591,10 @@ func (qm *Manager) tryDispatch() {
 	}
 
 	for _, d := range queue {
+		if qm.closing.Load() {
+			return
+		}
+
 		if d.Status != store.DownloadStatusQueued {
 			continue
 		}
@@ -599,45 +607,91 @@ func (qm *Manager) tryDispatch() {
 		// unknown, the bot name is used as discriminator.
 		sk := slotKey(d.ServerAddress, d.Channel, d.Bot)
 
-		qm.mu.RLock()
-		_, channelBusy := qm.channelSlots[sk]
-		qm.mu.RUnlock()
+		// Reserve slot and global parallel budget atomically before any
+		// potentially slow operation (DB write / goroutine start). This closes
+		// the check-then-act window between dispatch decision and activation.
+		reserved := false
+		channelBusy := false
+		qm.mu.Lock()
+		if qm.globalCount >= maxParallel {
+			activeCount = qm.globalCount
+		} else if _, channelBusy = qm.channelSlots[sk]; channelBusy {
+			activeCount = qm.globalCount
+		} else {
+			qm.channelSlots[sk] = d.ID
+			qm.globalCount++
+			activeCount = qm.globalCount
+			reserved = true
+		}
+		qm.mu.Unlock()
 
-		if channelBusy {
-			qm.log.Debugf("dispatch: slot [%s] BUSY — download %d (%s/%s bot=%s) waiting",
-				sk, d.ID, d.ServerAddress, d.Channel, d.Bot)
-			continue // This (server, channel) pair already has an active download
+		if !reserved {
+			if activeCount >= maxParallel {
+				break
+			}
+			if channelBusy {
+				qm.log.Debugf("dispatch: slot [%s] BUSY — download %d (%s/%s bot=%s) waiting",
+					sk, d.ID, d.ServerAddress, d.Channel, d.Bot)
+			}
+			continue // Slot occupied or global limit reached while dispatching.
 		}
 
-		qm.log.Debugf("dispatch: slot [%s] FREE — starting download %d (%s/%s bot=%s)",
+		qm.log.Debugf("dispatch: slot [%s] RESERVED — starting download %d (%s/%s bot=%s)",
 			sk, d.ID, d.ServerAddress, d.Channel, d.Bot)
 
-		// Start this download
-		qm.startDownload(d)
-		qm.mu.RLock()
-		activeCount = qm.globalCount
-		qm.mu.RUnlock()
+		if qm.closing.Load() {
+			qm.rollbackDispatchReservation(d.ID, sk)
+			return
+		}
+
+		if err := qm.startDownload(d, sk); err != nil {
+			activeCount = qm.rollbackDispatchReservation(d.ID, sk)
+			qm.log.Warnf("dispatch: failed to start download %d on slot [%s]: %v", d.ID, sk, err)
+			continue
+		}
 	}
 }
 
 // startDownload begins a download in a new goroutine.
-func (qm *Manager) startDownload(d store.DownloadRecord) {
+// The dispatch slot and global count must already be reserved by tryDispatch.
+func (qm *Manager) startDownload(d store.DownloadRecord, sk string) error {
+	if qm.closing.Load() {
+		return fmt.Errorf("queue manager is shutting down")
+	}
+
 	// Mark as downloading in store
 	if err := qm.store.MarkDownloadStarted(qm.ctx, d.ID); err != nil {
-		qm.log.Warnf("marking download %d as started: %v", d.ID, err)
-		return
+		return fmt.Errorf("marking download %d as started: %w", d.ID, err)
+	}
+
+	if qm.closing.Load() {
+		storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+		if err := qm.store.RequeueDownload(storeCtx, d.ID); err != nil {
+			qm.log.Warnf("requeue download %d in DB failed: %v", d.ID, err)
+		}
+		cancelStoreCtx()
+		return fmt.Errorf("queue manager is shutting down")
 	}
 
 	ctx, cancel := context.WithCancel(qm.ctx)
 
-	// Build compound slot key for (server, channel) tracking.
-	// When channel is unknown, bot name is used as discriminator.
-	sk := slotKey(d.ServerAddress, d.Channel, d.Bot)
-
 	qm.mu.Lock()
+	existingID, ok := qm.channelSlots[sk]
+	if !ok || existingID != d.ID {
+		qm.mu.Unlock()
+		cancel()
+		// Keep store state coherent if reservation vanished after MarkDownloadStarted.
+		storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+		if err := qm.store.RequeueDownload(storeCtx, d.ID); err != nil {
+			qm.log.Warnf("requeue download %d in DB failed: %v", d.ID, err)
+		}
+		cancelStoreCtx()
+		if !ok {
+			return fmt.Errorf("slot reservation missing for download %d (%s)", d.ID, sk)
+		}
+		return fmt.Errorf("slot reservation mismatch for download %d (%s): owner=%d", d.ID, sk, existingID)
+	}
 	qm.activeJobs[d.ID] = cancel
-	qm.channelSlots[sk] = d.ID
-	qm.globalCount++
 	qm.mu.Unlock()
 
 	qm.log.Infof("started download %d: slot [%s] acquired — %s from %s on %s/%s",
@@ -661,20 +715,35 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 	pack := entities.NewXDCCPack(server, d.Bot, packNumber)
 	pack.SetFilename(d.Filename, true)
 	pack.SetSize(d.FileSize)
-	pack.SetDirectory(qm.cfg.Download.TempDir)
+	pack.SetDirectory(qm.cfg.GetTempDir())
 
+	// metadataEmitted and startTime are intentionally confined to this worker
+	// closure. Today runDownload invokes progressFn/completeFn in a single
+	// serialized execution flow. If callback invocation becomes concurrent in
+	// future, protect these variables with a mutex/atomics.
 	// Track whether we've already emitted a metadata update for this download.
 	// This prevents redundant store writes and SSE events after the first discovery.
 	metadataEmitted := false
 
-	// Prepare worker config
+	// Record download start time for computing actual average speed.
+	// Set on the first progress callback with bytesReceived > 0 so only
+	// the DCC data transfer time is measured (excluding WHOIS/JOIN/XDCC).
+	var startTime time.Time
+
+	// Last progress DB write time for dynamic throttling.
+	// Tracked per-download so a slow download doesn't starve others.
+	var lastProgressWrite time.Time
+
+	// Prepare worker config — snapshot download config once to avoid repeated
+	// locking and ensure consistent values throughout the download.
+	dlSnap := qm.cfg.GetDownloadConfig()
 	wCfg := DownloadConfig{
-		TempDir:          qm.cfg.Download.TempDir,
-		DestDir:          qm.cfg.Download.DestDir,
-		ConflictPolicy:   qm.cfg.Download.ConflictPolicy,
-		MaxRateBPS:       qm.cfg.Download.MaxRateBPS,
-		Nickname:         qm.cfg.IRC.Nickname,
-		ChannelJoinDelay: qm.cfg.Download.ChannelJoinDelay, // from config: -1=random, 0=no delay, >0=fixed
+		TempDir:          dlSnap.TempDir,
+		DestDir:          dlSnap.DestDir,
+		ConflictPolicy:   dlSnap.ConflictPolicy,
+		MaxRateBPS:       dlSnap.MaxRateBPS,
+		Nickname:         qm.cfg.GetNickname(),
+		ChannelJoinDelay: dlSnap.ChannelJoinDelay, // from config: -1=random, 0=no delay, >0=fixed
 		Logger:           qm.log,
 		IRCManager:       qm.ircMgr, // Pass IRC Manager for persistent connections
 	}
@@ -689,38 +758,73 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 		// (e.g. by PauseDownload or RemoveDownload) to avoid racing with
 		// store status changes.
 		progressFn := func(bytesReceived, totalBytes int64, speedBPS float64) {
+			// Capture DCC transfer start on first data received. This
+			// excludes WHOIS/JOIN/XDCC overhead from the speed calculation.
+			if bytesReceived > 0 && startTime.IsZero() {
+				startTime = time.Now()
+			}
+
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
 
-			// Update store (status is NOT set here — MarkDownloadStarted
-			// already set it before this callback began).
-			_ = qm.store.UpdateDownloadProgress(qm.ctx, d.ID, bytesReceived, int64(speedBPS))
+			// Snapshot pack fields via thread-safe getters to avoid data races
+			// with the IRC DCC handler that writes to the pack concurrently.
+			packFilename := pack.GetFilename()
+			packSize := pack.GetSize()
 
-			// Emit progress event
+			// Emit progress event first (always, for UI responsiveness).
+			// This is decoupled from the DB write below so the UI stays
+			// smooth even when throttling database updates.
 			qm.emitEvent(Event{
 				Type:          EventDownloadProgress,
 				DownloadID:    d.ID,
 				ProgressBytes: bytesReceived,
 				FileSize:      totalBytes,
 				SpeedBPS:      speedBPS,
-				Filename:      pack.Filename,
+				Filename:      packFilename,
 			})
+
+			// Dynamic throttle: reduce DB write frequency when many
+			// downloads are active. This prevents progress callbacks
+			// from saturating the connection pool and starving other
+			// operations (enqueue, pause, etc.).
+			qm.mu.RLock()
+			activeCount := qm.globalCount
+			qm.mu.RUnlock()
+
+			throttleInterval := progressThrottleInterval(activeCount)
+			if time.Since(lastProgressWrite) < throttleInterval {
+				return
+			}
+			lastProgressWrite = time.Now()
+
+			// Update store (status is NOT set here — MarkDownloadStarted
+			// already set it before this callback began).
+			// Cancel context immediately after use — defer would accumulate one
+			// context per callback invocation until the download finishes.
+			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+			if err := qm.store.UpdateDownloadProgress(storeCtx, d.ID, bytesReceived, int64(speedBPS)); err != nil {
+				qm.log.Warnf("update download %d progress in DB failed: %v", d.ID, err)
+			}
 
 			// If we discovered filename/size from the pack, update store and emit metadata event.
 			// Only emit once (when metadataEmitted is still false) to avoid redundant SSE events.
-			if !metadataEmitted && pack.Filename != "" && (d.Filename == "" || strings.HasPrefix(d.Filename, "manual_download")) {
-				_ = qm.store.UpdateDownloadMetadata(qm.ctx, d.ID, pack.Filename, pack.Size)
+			if !metadataEmitted && packFilename != "" && (d.Filename == "" || strings.HasPrefix(d.Filename, "manual_download")) {
+				if err := qm.store.UpdateDownloadMetadata(storeCtx, d.ID, packFilename, packSize); err != nil {
+					qm.log.Warnf("update download %d metadata in DB failed: %v", d.ID, err)
+				}
 				qm.emitEvent(Event{
 					Type:       EventDownloadMetadataUpdate,
 					DownloadID: d.ID,
-					Filename:   pack.Filename,
-					FileSize:   pack.Size,
+					Filename:   packFilename,
+					FileSize:   packSize,
 				})
 				metadataEmitted = true
 			}
+			cancelStoreCtx()
 		}
 
 		// Completion callback
@@ -730,21 +834,24 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 			// removed it from activeJobs, skip cleanup to prevent
 			// double-decrement of globalCount and double slot release.
 			qm.mu.Lock()
-			_, stillActive := qm.activeJobs[d.ID]
-			if stillActive {
-				delete(qm.activeJobs, d.ID)
-				qm.globalCount--
-			}
+			_, stillActive := qm.removeActiveJobLocked(d.ID)
 			qm.mu.Unlock()
-			if stillActive {
-				qm.releaseChannelSlot(d.ID)
+
+			if !stillActive {
+				// Another goroutine (Pause/Remove/Cancel) already handled
+				// cleanup and set the appropriate store status. Just try
+				// to dispatch the next queued download.
+				qm.tryDispatch()
+				return
 			}
 
 			// Check if the store status was changed externally (e.g. paused,
 			// cancelled/requeued) before we overwrite it. If the user
 			// explicitly paused, cancelled, or removed the download, respect
 			// that decision.
-			current, err := qm.store.GetDownload(qm.ctx, d.ID)
+			storeCtx, cancelStoreCtx := qm.storeCtxForCallbacks()
+			defer cancelStoreCtx()
+			current, err := qm.store.GetDownload(storeCtx, d.ID)
 			if err == nil && current != nil {
 				if current.Status == store.DownloadStatusPaused ||
 					current.Status == store.DownloadStatusQueued {
@@ -759,7 +866,9 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 			if result.Error != nil {
 				// Download failed
 				errStr := result.Error.Error()
-				_ = qm.store.MarkDownloadFailed(qm.ctx, d.ID, errStr)
+				if err := qm.store.MarkDownloadFailed(storeCtx, d.ID, errStr); err != nil {
+					qm.log.Warnf("mark download %d as failed in DB: %v", d.ID, err)
+				}
 
 				qm.log.Errorf("download %d FAILED — bot=%s server=%s channel=%q file=%q error=%s",
 					d.ID, d.Bot, d.ServerAddress, d.Channel, d.Filename, errStr)
@@ -779,12 +888,14 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 				qm.handleFallback(d, result)
 			} else if result.Skipped {
 				// File was skipped because destination already exists
-				_ = qm.store.MarkDownloadSkipped(qm.ctx, d.ID)
+				if err := qm.store.MarkDownloadSkipped(storeCtx, d.ID); err != nil {
+					qm.log.Warnf("mark download %d skipped in DB failed: %v", d.ID, err)
+				}
 
 				// Use discovered filename if record filename was empty
 				skippedFilename := d.Filename
-				if skippedFilename == "" && pack.Filename != "" {
-					skippedFilename = pack.Filename
+				if skippedFilename == "" && result.Filename != "" {
+					skippedFilename = result.Filename
 				}
 
 				qm.log.Infof("download %d skipped: %s already exists at %s", d.ID, skippedFilename, result.FilePath)
@@ -800,19 +911,43 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 				})
 			} else {
 				// Download completed successfully
-				// Use discovered filename/size from pack if record was empty.
+				// Use discovered filename/size from workerResult (populated
+				// after runDownload returns, so no concurrent writes).
 				finalFilename := d.Filename
-				if finalFilename == "" && pack.Filename != "" {
-					finalFilename = pack.Filename
+				if finalFilename == "" && result.Filename != "" {
+					finalFilename = result.Filename
 				}
 				finalSize := d.FileSize
-				if finalSize == 0 && pack.Size > 0 {
-					finalSize = pack.Size
+				if finalSize == 0 && result.FileSize > 0 {
+					finalSize = result.FileSize
 				}
-				_ = qm.store.MarkDownloadCompleted(qm.ctx, d.ID, finalFilename, finalSize)
+				if err := qm.store.MarkDownloadCompleted(storeCtx, d.ID, finalFilename, finalSize); err != nil {
+					qm.log.Warnf("mark download %d completed in DB failed: %v", d.ID, err)
+				}
 
 				qm.log.Infof("download %d COMPLETED — bot=%s server=%s file=%s -> %s",
 					d.ID, d.Bot, d.ServerAddress, finalFilename, result.FilePath)
+
+				// Update channel average download speed using EMA.
+				// Use the channel from the DownloadRecord, but if it was
+				// discovered via WHOIS during the download, fall back to
+				// the channel stored on the pack object (safe: runDownload
+				// has returned, no concurrent writes).
+				ch := d.Channel
+				if ch == "" {
+					ch = pack.GetChannel()
+				}
+				// Compute actual average speed: file_size / elapsed_seconds.
+				// This is more accurate than the last instantaneous speedBPS.
+				if ch != "" && result.FileSize > 0 && !startTime.IsZero() {
+					elapsed := time.Since(startTime).Seconds()
+					if elapsed > 0 {
+						avgSpeedBPS := float64(result.FileSize) / elapsed
+						if err := qm.store.UpdateChannelAvgSpeed(storeCtx, d.ServerAddress, ch, avgSpeedBPS); err != nil {
+							qm.log.Warnf("update channel avg speed in DB failed: %v", err)
+						}
+					}
+				}
 
 				// Emit completion event with discovered filename
 				qm.emitEvent(Event{
@@ -832,22 +967,73 @@ func (qm *Manager) startDownload(d store.DownloadRecord) {
 
 		runDownload(ctx, d, pack, wCfg, progressFn, completeFn)
 	}()
+
+	return nil
 }
 
-// releaseChannelSlot removes a (server, channel) pair from the active slots
-// map if the download ID matches.
-func (qm *Manager) releaseChannelSlot(downloadID int64) {
+// waitForDispatchBarrier acquires dispatchMu and immediately releases it,
+// acting as a synchronization barrier. It blocks until any in-flight
+// tryDispatch call has returned, since each such call holds dispatchMu for
+// its entire duration. Used during Stop() to make sure no dispatch is
+// racing with shutdown cleanup.
+//
+// Extracted into its own function so that gocritic's badLock check sees a
+// proper Lock/Unlock pair with defer, while preserving the barrier
+// semantics (unlock happens immediately, not at end of Stop()).
+func (qm *Manager) waitForDispatchBarrier() {
+	qm.dispatchMu.Lock()
+	defer qm.dispatchMu.Unlock()
+}
+
+// rollbackDispatchReservation releases a previously reserved (server, channel)
+// slot and decrements the global active count if the reservation still belongs
+// to the specified download ID.
+func (qm *Manager) rollbackDispatchReservation(downloadID int64, sk string) int {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
-	// Find and remove the slot by download ID (we may not have the server
-	// address directly in some call sites, so scan all slots).
+	if existingID, ok := qm.channelSlots[sk]; ok && existingID == downloadID {
+		delete(qm.channelSlots, sk)
+		if qm.globalCount > 0 {
+			qm.globalCount--
+		}
+	}
+
+	return qm.globalCount
+}
+
+// storeCtxForCallbacks returns a context suitable for store updates emitted
+// by worker callbacks. During shutdown qm.ctx is cancelled, so use a
+// time-bounded fallback context to allow final state persistence without
+// risking indefinite blocking on an unresponsive database.
+func (qm *Manager) storeCtxForCallbacks() (context.Context, context.CancelFunc) {
+	if qm.ctx.Err() != nil {
+		return context.WithTimeout(context.Background(), 3*time.Second)
+	}
+	return qm.ctx, func() {}
+}
+
+// removeActiveJobLocked removes an active job and its reserved slot atomically.
+// qm.mu must be held by the caller.
+func (qm *Manager) removeActiveJobLocked(downloadID int64) (context.CancelFunc, bool) {
+	cancelFn, active := qm.activeJobs[downloadID]
+	if !active {
+		return nil, false
+	}
+
+	delete(qm.activeJobs, downloadID)
+	if qm.globalCount > 0 {
+		qm.globalCount--
+	}
+
 	for sk, existingID := range qm.channelSlots {
 		if existingID == downloadID {
 			delete(qm.channelSlots, sk)
-			return
+			break
 		}
 	}
+
+	return cancelFn, true
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +1048,7 @@ func (qm *Manager) releaseChannelSlot(downloadID int64) {
 //   - No auto-retry if mode is "suggest_only"
 //   - Clear tracking of fallback reason in log
 func (qm *Manager) handleFallback(original store.DownloadRecord, result workerResult) {
-	mode := qm.cfg.Download.FailFallback
+	mode := qm.cfg.GetFailFallback()
 	if mode != "auto_retry_best" {
 		qm.log.Errorf("fallback: download %d failed, mode is %q (no auto-retry); suggestion: consider alternative pack for %q",
 			original.ID, mode, original.Filename)
@@ -885,7 +1071,7 @@ func (qm *Manager) handleFallback(original store.DownloadRecord, result workerRe
 	}
 
 	// Check max retry attempts guardrail
-	maxRetries := qm.cfg.Download.MaxRetryAttempts
+	maxRetries := qm.cfg.GetMaxRetryAttempts()
 	if maxRetries < 1 {
 		maxRetries = 3
 	}
@@ -937,5 +1123,25 @@ func (qm *Manager) handleFallback(original store.DownloadRecord, result workerRe
 // This respects time-based bandwidth profiles (quiet hours).
 // For now, it returns the configured max_rate_bps directly.
 func (qm *Manager) GetEffectiveMaxRate() int64 {
-	return qm.cfg.Download.MaxRateBPS
+	return qm.cfg.GetMaxRateBPS()
+}
+
+// progressThrottleInterval returns the minimum interval between DB progress
+// writes based on how many downloads are currently active. The intent is to
+// prevent progress callbacks from saturating the SQLite connection pool when
+// many downloads run concurrently, while keeping the UI responsive via SSE events.
+//
+// Thresholds:
+//   - ≤3 active:   no throttle (every tick, ~1s)
+//   - 4–8 active:  write every 2s
+//   - >8 active:   write every 3s
+func progressThrottleInterval(activeCount int) time.Duration {
+	switch {
+	case activeCount <= 3:
+		return 0
+	case activeCount <= 8:
+		return 2 * time.Second
+	default:
+		return 3 * time.Second
+	}
 }

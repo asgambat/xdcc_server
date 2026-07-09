@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 func TestPackageCompiles(t *testing.T) {

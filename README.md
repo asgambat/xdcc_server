@@ -1,22 +1,22 @@
 <div align="center">
 
-# xdcc-go
+# xdcc_server
 
 **High-Performance XDCC Downloader for IRC**
 
 [![Go Version](https://img.shields.io/badge/Go-Required-00ADD8?logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com/)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/asgambat/xdcc-go)
-[![CI Tests](https://github.com/asgambat/xdcc-go/actions/workflows/ci.yml/badge.svg)](https://github.com/asgambat/xdcc-go/actions/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/asgambat/xdcc_server)
+[![CI Tests](https://github.com/asgambat/xdcc_server/actions/workflows/ci.yml/badge.svg)](https://github.com/asgambat/xdcc_server/actions/workflows/ci.yml)
 
 *A modern XDCC downloader with daemon server, REST API, web UI, and powerful CLI tools for IRC file transfers*
 
-[Features](#-features) •
-[Quick Start](#-quick-start) •
-[Installation](#-installation) •
-[Documentation](#-documentation) •
-[Development](#-development)
+[Features](#features) •
+[Quick Start](#quick-start) •
+[Installation](#installation) •
+[Documentation](#documentation) •
+[Development](#development)
 
 </div>
 
@@ -24,36 +24,50 @@
 
 ## 📖 Table of Contents
 
-- [Overview](#-overview)
-- [Features](#-features)
-- [Architecture](#-architecture)
-- [Quick Start](#-quick-start)
-- [Screenshots](#-screenshots)
-- [Installation](#-installation)
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+  - [Option 1: Docker](#option-1-docker-recommended)
+  - [Option 2: Pre-built Binaries](#option-2-pre-built-binaries)
+  - [Option 3: Build from Source](#option-3-build-from-source)
+- [Screenshots](#screenshots)
+- [Installation](#installation)
   - [Pre-built Binaries](#pre-built-binaries)
   - [Build from Source](#build-from-source)
   - [Docker](#docker)
-- [Usage](#-usage)
+    - [Non-Root User](#non-root-user)
+    - [Pre-built Multi-Architecture Images](#pre-built-multi-architecture-images)
+    - [Build from Source (Docker)](#build-from-source-docker)
+    - [Docker Compose](#docker-compose-production)
+    - [Building Multi-Architecture Images Locally](#building-multi-architecture-images-locally)
+- [Usage](#usage)
   - [Server Mode](#server-mode)
+  - [REST API Highlights](#rest-api-highlights)
   - [CLI Tools](#cli-tools)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Documentation](#-documentation)
+- [Configuration](#configuration)
+- [Notifications](#-notifications)
+- [Documentation](#documentation)
   - [xdcc-server](#xdcc-server)
-  - [xdcc-dl](#xdcc-dl)
-  - [xdcc-search](#xdcc-search)
-  - [xdcc-browse](#xdcc-browse)
-- [Troubleshooting](#-troubleshooting)
-  - [Common Issues](#common-issues--solutions)
+- [xdcc-dl](#xdcc-dl)
+- [xdcc-search](#xdcc-search)
+- [xdcc-browse](#xdcc-browse)
+- [Technical Details](#technical-details)
+  - [Retry Behavior](#retry-behavior)
+  - [Contract Notes](#searchpresetwatchlist-contract-notes)
+  - [Network Resilience](#network-resilience)
+- [Troubleshooting](#troubleshooting)
+  - [Common Issues](#common-issues-solutions)
   - [FAQ](#faq)
-- [Development](#-development)
-- [Contributing](#-contributing)
-- [License](#-license)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
 ## 🔍 Overview
 
-**xdcc-go** is a high-performance XDCC downloader for IRC written in pure Go. It provides both a persistent daemon server with a modern web interface and standalone command-line tools for searching, browsing, and downloading files from IRC XDCC bots.
+**xdcc_server** is a high-performance XDCC downloader for IRC written in pure Go. It provides both a persistent daemon server with a modern web interface and standalone command-line tools for searching, browsing, and downloading files from IRC XDCC bots.
 
 ### Key Highlights
 
@@ -113,11 +127,14 @@
 - Parallel provider queries with result aggregation
 - Two-tier caching (fresh: 30m, stale fallback: 24h)
 - Smart deduplication by filename, size, and bot family
-- Advanced filtering: extension, bot name, filename prefix
-- Web UI client-side filtering: filename, bot, server, and size range sliders
+- Advanced server-side filters: extension, bot name, filename prefix, media type (video/audio/books/archives), file size range, HQ mode (excludes low-quality packs), and prefix matching
+- Web UI client-side filtering: filename, bot, server, and dual range size sliders
 - Compact mode for cleaner results
-
-> Note: API/server-side filtering currently applies `q`, `prefix`, `bot`, `ext`, `providers`, `compact`, `page`, and `pageSize`. Query params like `min_size`/`max_size` are not currently applied server-side.
+- Sortable columns: filename, bot, channel, size, server
+- Adjustable page size (10/50/100/200/500 results)
+- Search history with dropdown autocomplete
+- Quick "Parse & Download" from raw IRC messages
+- Save search parameters as named presets for reuse
 
 </details>
 
@@ -189,7 +206,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         xdcc-go System                          │
+│                       xdcc_server System                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────┐     ┌───────────────┐    ┌──────────────┐     │
@@ -221,37 +238,30 @@
 
 ---
 
-## 🚀 Quick Start### Option 1: Docker (Recommended)
-The fastest way to get started. The container runs as a **non-root** user (`xdcc`, UID:GID `1000:1000`):
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
+The fastest way to get started:
 
 ```bash
-# Pull and run (when available from registry)
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:latest
-
-# Or build from source (use --user to match your host UID/GID for volume permissions)
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-docker build -t xdcc-go .
-docker run -d \
-   --name xdcc-server \
-   -p 8080:8080 \
-   -v xdcc-data:/data \
-   --user "$(id -u):$(id -g)" \
-   xdcc-go
+  ghcr.io/asgambat/xdcc_server:latest
 ```
 
 Open **http://localhost:8080** in your browser.
 
+> For building the Docker image locally, see [Build from Source (Docker)](#build-from-source-docker).
+
 ### Option 2: Pre-built Binaries
 
-Pre-compiled binaries are automatically built for every release and available on the [Releases page](https://github.com/asgambat/xdcc-go/releases).
+Pre-compiled binaries are automatically built for every release and available on the [Releases page](https://github.com/asgambat/xdcc_server/releases).
 
 **Supported Platforms:**
-- **Linux**: x86_64, ARM64, ARMv7
+- **Linux**: x86_64, ARM64
 - **macOS**: Intel (x86_64), Apple Silicon (ARM64)
 - **Windows**: x86_64, ARM64
 
@@ -270,23 +280,23 @@ Each binary is distributed as a separate archive containing:
 
 ```bash
 # Linux x86_64
-wget https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-linux-amd64.tar.gz
+wget https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-linux-amd64.tar.gz
 tar xzf xdcc-server-v1.0.0-linux-amd64.tar.gz
 chmod +x xdcc-server
 ./xdcc-server
 
 # macOS (Intel)
-curl -L https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-darwin-amd64.tar.gz | tar xz
+curl -L https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-darwin-amd64.tar.gz | tar xz
 chmod +x xdcc-server
 ./xdcc-server
 
 # macOS (Apple Silicon)
-curl -L https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-darwin-arm64.tar.gz | tar xz
+curl -L https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-darwin-arm64.tar.gz | tar xz
 chmod +x xdcc-server
 ./xdcc-server
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/asgambat/xdcc-go/releases/latest/download/xdcc-server-v1.0.0-windows-amd64.zip" -OutFile "xdcc-server.zip"
+Invoke-WebRequest -Uri "https://github.com/asgambat/xdcc_server/releases/latest/download/xdcc-server-v1.0.0-windows-amd64.zip" -OutFile "xdcc-server.zip"
 Expand-Archive xdcc-server.zip -DestinationPath .
 .\xdcc-server.exe
 ```
@@ -297,7 +307,7 @@ Each release includes a `checksums.txt` file with SHA256 hashes:
 
 ```bash
 # Linux/macOS
-wget https://github.com/asgambat/xdcc-go/releases/latest/download/checksums.txt
+wget https://github.com/asgambat/xdcc_server/releases/latest/download/checksums.txt
 sha256sum -c checksums.txt --ignore-missing
 
 # Windows (PowerShell)
@@ -307,8 +317,8 @@ Get-FileHash .\xdcc-server-*.zip -Algorithm SHA256
 ### Option 3: Build from Source
 
 ```bash
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
+git clone https://github.com/asgambat/xdcc_server
+cd xdcc_server
 
 # Using Task (recommended for development)
 task all     # Builds frontend + all binaries
@@ -371,65 +381,51 @@ go build -o xdcc-server ./cmd/xdcc-server
 
 Pre-compiled binaries are automatically built and published for every release.
 
-> **Automated Releases**: When a new version tag (e.g., `v1.0.0`) is pushed, GitHub Actions automatically:
-> 1. ✅ **Runs comprehensive test suite** (unit tests, race detector, linting, format checks)
-> 2. 🛠️ **Compiles binaries** for all supported platforms and architectures (only if tests pass)
-> 3. 🐳 **Builds multi-arch Docker images** (only if tests pass)
-> 4. 📦 **Publishes to [Releases page](https://github.com/asgambat/xdcc-go/releases)** and GitHub Container Registry
->
-> All releases are verified to pass the full test suite before publication.
+> **Automated Releases**: Releases are automatically built and published by GitHub Actions when a version tag (e.g., `v1.0.0`) is pushed. See [Development → CI/CD Pipeline](#cicd-pipeline) for details on the automated release workflow.
 
 ### Build from Source
 
 #### Using Task (Recommended)
 
-[Task](https://taskfile.dev) simplifies the build process:
+[Task](https://taskfile.dev) simplifies the build process (clone the repo first as shown in [Quick Start](#option-3-build-from-source)):
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-
-# 2. Install Task (if not already installed)
+# 1. Install Task (if not already installed)
 # macOS/Linux:
 sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 # Windows (Scoop):
 scoop install task
 # Or see: https://taskfile.dev/installation/
 
-# 3. Install dependencies
+# 2. Install dependencies
 task deps
 
-# 4. Build everything (frontend + all binaries)
+# 3. Build everything (frontend + all binaries)
 task all
 
-# 5. Binaries will be in the bin/ directory
+# 4. Binaries will be in the bin/ directory
 ls bin/
 # xdcc-server  xdcc-dl  xdcc-search  xdcc-browse
 ```
 
 #### Using Go Directly
 
-Manual build process:
+Manual build process (clone the repo first as shown in [Quick Start](#option-3-build-from-source)):
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/asgambat/xdcc-go
-cd xdcc-go
-
-# 2. Build the frontend
+# 1. Build the frontend
 cd web
 npm install
 npm run build
 cd ..
 
-# 3. Build the Go binaries
+# 2. Build the Go binaries
 go build -ldflags="-s -w" -o xdcc-server ./cmd/xdcc-server
 go build -ldflags="-s -w" -o xdcc-dl ./cmd/xdcc-dl
 go build -ldflags="-s -w" -o xdcc-search ./cmd/xdcc-search
 go build -ldflags="-s -w" -o xdcc-browse ./cmd/xdcc-browse
 
-# 4. Run the server
+# 3. Run the server
 ./xdcc-server
 ```
 
@@ -440,27 +436,8 @@ go build -ldflags="-s -w" -o xdcc-browse ./cmd/xdcc-browse
 The container runs as a **non-root** user `xdcc` with UID:GID `1000:1000` by default.
 This improves security and simplifies host volume permissions.
 
-```bash
-# Override UID/GID to match your host filesystem permissions
-docker run -d \
-  --name xdcc-server \
-  -p 8080:8080 \
-  -v xdcc-data:/data \
-  --user "1001:1001" \
-  ghcr.io/asgambat/xdcc-go:latest
-```
-
-With **docker-compose**, set the `UID` and `GID` environment variables (or create a `.env` file from `.env.example`):
-
-```bash
-# Via env vars
-UID=1001 GID=1001 docker-compose up -d
-
-# Or with .env file
-cp .env.example .env
-# Edit UID and GID in the .env file
-docker-compose up -d
-```
+To override the UID/GID, pass `--user` to `docker run` or set the `UID` and `GID`
+environment variables when using docker-compose (see [Docker Compose](#docker-compose-production) for details).
 
 > **Note:** When changing UID/GID, existing volumes may have stale permissions from
 > previous runs. Fix them with:
@@ -473,32 +450,22 @@ docker-compose up -d
 
 #### Pre-built Multi-Architecture Images
 
-Official Docker images are available on GitHub Container Registry with support for multiple architectures:
+Official Docker images are available on GitHub Container Registry with support for multiple architectures.
+Pull the latest image as shown in [Quick Start](#quick-start), or use a specific version tag:
 
 ```bash
-# Pull and run the latest version
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:latest
+  ghcr.io/asgambat/xdcc_server:v1.0.0
 
-# Or use a specific version
-docker run -d \
-  --name xdcc-server \
-  -p 8080:8080 \
-  -v xdcc-data:/data \
-  ghcr.io/asgambat/xdcc-go:v1.0.0
-
-# Access the web UI
 open http://localhost:8080
 ```
 
 **Supported Architectures:**
 - `linux/amd64` - x86_64 (Intel/AMD 64-bit)
 - `linux/arm64` - ARM 64-bit (Raspberry Pi 4, Apple Silicon, AWS Graviton)
-- `linux/arm/v7` - ARM 32-bit (Raspberry Pi 3, older ARM devices)
-
 Docker automatically pulls the correct image for your platform.
 
 **Available Tags:**
@@ -510,17 +477,17 @@ Docker automatically pulls the correct image for your platform.
 
 ```bash
 # Build the image locally (default UID:GID=1000:1000)
-docker build -t xdcc-go .
+docker build -t xdcc_server .
 
 # Build with custom UID/GID
-docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t xdcc-go .
+docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t xdcc_server .
 
 # Run the container (default non-root user)
 docker run -d \
   --name xdcc-server \
   -p 8080:8080 \
   -v xdcc-data:/data \
-  xdcc-go
+  xdcc_server
 ```
 
 The `/data` volume persists:
@@ -532,6 +499,9 @@ The database lives on a separate volume at `/var/lib/xdcc-server/db`.
 
 #### Docker Compose (Production)
 
+The container runs as a **non-root** user (`xdcc`, UID:GID `1000:1000`).
+Override UID/GID via environment variables or a `.env` file.
+
 The project includes a ready-to-use `docker-compose.yml` with separate volumes for
 database and data, and a configurable non-root user.
 
@@ -540,7 +510,7 @@ version: '3.8'
 
 services:
   xdcc-server:
-    image: ghcr.io/asgambat/xdcc-go:latest
+    image: ghcr.io/asgambat/xdcc_server:latest
     # Or build locally: build: .
     container_name: xdcc-server
     restart: unless-stopped
@@ -589,8 +559,8 @@ docker buildx create --use --name multiarch-builder
 
 # Build for multiple platforms
 docker buildx build \
-  --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  -t xdcc-go:local \
+  --platform linux/amd64,linux/arm64 \
+  -t xdcc_server:local \
   --load \
   .
 ```
@@ -613,18 +583,13 @@ xdcc-server
 xdcc-server --config /path/to/config.yaml
 
 # Override the database path (full file path)
-xdcc-server --db /data/xdcc/custom.db
+xdcc-server --db /data/xdcc/custom-name.db
 
 # Override specific settings
 xdcc-server --port 9090 --download-dir /downloads
 ```
 
-On startup, the server logs its configuration and database paths:
-
-```
-config: /etc/xdcc-server/config.yaml
-database: /var/lib/xdcc-server/db/xdcc-server.db
-```
+On startup, the server logs its configuration and database paths (see the [Flags section](#flags) under xdcc-server for details).
 
 Access the web UI at **http://localhost:8080**
 
@@ -638,16 +603,7 @@ Access the web UI at **http://localhost:8080**
 
 **Systemd Service (Linux):**
 
-```bash
-# Install as systemd service
-sudo cp examples/xdcc-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now xdcc-server
-
-# Check status
-sudo systemctl status xdcc-server
-sudo journalctl -u xdcc-server -f
-```
+For full systemd installation instructions (including user setup, permissions, and auto-start configuration), see [Documentation → xdcc-server → Systemd](#systemd-linux).
 
 ### CLI Tools
 
@@ -681,7 +637,7 @@ xdcc-dl "/msg BotName xdcc send #1-10" -o /downloads
 xdcc-dl "/msg BotName xdcc send #42" --throttle=2M
 ```
 
-For detailed usage of each tool, see the [Documentation](#-documentation) section below.
+For detailed usage of each tool, see the [Documentation](#documentation) section below.
 
 ---
 
@@ -701,6 +657,7 @@ Settings are loaded in the following order (later overrides earlier):
 |----------|---------|-------------|
 | `XDCC_HTTP_PORT` | `8080` | HTTP server port |
 | `XDCC_HTTP_BIND_ADDRESS` | `127.0.0.1` | HTTP server bind address (use `0.0.0.0` for Docker/external access) |
+| `XDCC_HTTP_BASE_URL` | *(empty)* | Public URL of the server used to build search-result links inside watchlist notifications. Required for the `Cerca: <url>` line / ntfy `Click` header / Pushover `url` field. See [Notifications](#-notifications) for the full setup walkthrough. |
 | `XDCC_IRC_NICKNAME` | `xdcc-user` | Base IRC nickname (random suffix added) |
 | `XDCC_DOWNLOAD_TEMP_DIR` | `./downloads/tmp` | Temporary directory for in-progress downloads |
 | `XDCC_DOWNLOAD_DEST_DIR` | `./downloads/complete` | Destination for completed downloads |
@@ -793,22 +750,145 @@ See `config.yaml` in the repository for the complete configuration reference.
 
 ### CLI Configuration
 
-All CLI tools support configuration via flags. Common patterns:
+All CLI tools support configuration via flags. For a complete list of available flags with defaults and descriptions, see the [xdcc-dl Flags](#flags-1) section.
 
-**Network Configuration:**
-- `--server <host:port>` — Override IRC server (bypasses auto-detection)
-- `--dns-server <host:port>` — Fallback DNS resolver (default: `8.8.8.8:53`)
-- `--fallback-channel <channel>` — Channel to join if WHOIS fails
+---
 
-**Timing Configuration:**
-- `--connect-timeout <seconds>` — Wait time for DCC initiation (default: 120)
-- `--stall-timeout <seconds>` — Abort if no progress for N seconds (default: 60)
-- `--wait-time <seconds>` — Extra delay before sending XDCC request (default: 0)
-- `--channel-join-delay <seconds>` — Delay before WHOIS (-1 = random 5-10s)
+## 🔔 Notifications
 
-**Download Configuration:**
-- `--out <path>` — Output directory or file path
-- `--throttle <rate>` — Speed limit (e.g., `512K`, `2M`, `1G`, `-1` = unlimited)
+The server can send external notifications for **download** and **watchlist** events using four providers: **webhook**, **ntfy**, **pushover**, and **email**. Each provider can be configured independently and supports an `events` filter to limit which events trigger a notification.
+
+### Supported Events
+
+| Event | Description |
+|-------|-------------|
+| `download_completed` | A download finished successfully |
+| `download_failed` | A download failed after all retries |
+| `watchlist_new_results` | A watchlist found new matching packs |
+
+If `events` is omitted, the provider reacts to **all** events listed above. Each provider can be disabled independently with `enabled: false` (default: `true`).
+
+### Watchlist Notifications with Direct Search Links
+
+When a `watchlist_new_results` event fires, the notification includes a deep link back to the web UI's Search page, pre‑filled with the watchlist's query string. This requires `http.base_url` to be set to the public URL of the server; otherwise the notification only contains the title and pack count (no clickable link).
+
+**Practical example.** Suppose `config.yaml` has:
+
+```yaml
+http:
+  base_url: "https://xs.lan.asga.uk"
+
+notifications:
+  - type: ntfy
+    ntfy_endpoint: "https://ntfy.sh/my-topic"
+    events: [watchlist_new_results]
+```
+
+…and a watchlist named `ubuntu-releases` with `Query: "ubuntu 24.04"`. When the watchlist finds new packs, the ntfy notification payload contains:
+
+```
+Title:   Watchlist aggiornata
+Message: Watchlist "ubuntu-releases": 3 nuovi pacchetti
+         Cerca: https://xs.lan.asga.uk/#search?q=ubuntu+24.04
+```
+
+plus an HTTP `Click` header set to that URL, so on the ntfy mobile app tapping the notification opens the web UI directly on a pre-filled Search screen.
+
+The `Cerca: <url>` line is also added to **email** bodies, **pushover** messages (`url` + `url_title` fields), and **webhook** payloads (`search_url` JSON field), so the same link appears regardless of provider.
+
+> **If `http.base_url` is empty** the link is silently omitted and the warning below is logged at startup:
+> ```
+> WARN notifier: http.base_url is empty; watchlist notifications will fire
+> but will NOT include direct search links. Set http.base_url in config.yaml
+> or XDCC_HTTP_BASE_URL env var to enable them.
+> ```
+> This is by design: the link is a public permalink, so the operator must opt in by declaring the public-facing URL.
+
+### Provisioning a Notification Provider
+
+The full commented-out configuration is at the bottom of `config.yaml` in the repository. Uncomment the entries you need and edit them:
+
+```yaml
+http:
+  # Public URL of the server, used to build links inside notifications.
+  # REQUIRED for watchlist search-result links to work.
+  base_url: "https://xs.lan.asga.uk"
+
+notifications:
+  # Generic webhook (Telegram bot, Slack, IFTTT, Zapier, …)
+  - type: webhook
+    enabled: true
+    webhook_endpoint: "https://hooks.example.com/notify"
+    webhook_token: "tk_optional_bearer"            # omit for unauthenticated endpoints
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # ntfy.sh (https://ntfy.sh) or any self-hosted ntfy server
+  - type: ntfy
+    enabled: true
+    ntfy_endpoint: "https://ntfy.sh/my-topic"
+    ntfy_token: "tk_optional_bearer"                # omit for public/anonymous topics
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # Pushover (https://pushover.net) — iOS/Android/desktop push
+  - type: pushover
+    enabled: true
+    pushover_token: "APP_TOKEN"
+    pushover_user: "USER_KEY"
+    pushover_endpoint: "https://api.pushover.net/1/messages.json"  # default, can be omitted
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # Email (SMTP)
+  - type: email
+    enabled: true
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587                                 # default 587 (STARTTLS)
+    smtp_username: "you@gmail.com"
+    smtp_password: "app-password"                  # use an App Password for Gmail
+    smtp_from: "you@gmail.com"
+    smtp_to: "alerts@example.com"                  # comma-separated for multiple recipients
+    smtp_tls: "starttls"                           # starttls | ssl | none
+    smtp_skip_verify: false                        # set true for self-signed certs
+    events: [download_failed]
+```
+
+### Provider-Specific Behaviour
+
+| Provider | Watchlist link delivery |
+|----------|------------------------|
+| **webhook** | Adds `search_url` field next to `data` in the JSON payload: `{"data":"<msg>", "search_url":"<url>"}`. Bearer auth via `webhook_token` (optional). |
+| **ntfy** | Adds HTTP `Click` header → opens the URL on tap in the ntfy mobile/web client. Plus `Cerca: <url>` in the body. |
+| **pushover** | Sets `url` and `url_title="Apri ricerca"` fields → one-tap navigation from the Pushover app. Plus `Cerca: <url>` in the body. |
+| **email** | Plain-text body that already includes the `Cerca: <url>` line. |
+
+### Environment Variables
+
+Two env vars are the most relevant for the search-link feature:
+
+| Variable | Example | Purpose |
+|----------|---------|---------|
+| `XDCC_HTTP_BASE_URL` | `https://xs.lan.asga.uk` | **Required** for watchlist notification links. Trailing `/` is trimmed. |
+| `XDCC_HTTP_BIND_ADDRESS` | `0.0.0.0` | If behind a reverse proxy, set this so the server is reachable. |
+
+Per-provider fields (`XDCC_*_NOTIFICATION_*`) and the existing notification env overrides are documented in `docs/CONFIG_UPDATE_PATTERN.md` and the `config.yaml` reference at the repo root. To override a single provider without editing YAML, you also typically need to set `XDCC_NOTIFICATIONS_N_TYPE` etc., but the YAML form is clearer for multi-provider setups.
+
+### Quick-Start: Watchlist Notifications via ntfy
+
+1. **Expose your server publicly** behind a reverse proxy on a known URL (e.g. `https://xs.lan.asga.uk`).
+2. **Set** `http.base_url` in `config.yaml` to that URL.
+3. **Create** an ntfy topic on `https://ntfy.sh` (or point at a self-hosted ntfy server).
+4. **Add** the provider to `config.yaml`:
+   ```yaml
+   notifications:
+     - type: ntfy
+       ntfy_endpoint: "https://ntfy.sh/your-topic"
+       events: [watchlist_new_results]
+   ```
+5. **Restart** the server. In the startup logs verify:
+   - `notifier: added ntfy (1 events) → https://ntfy.sh/your-topic` — provider loaded.
+   - `notifier: base URL for notification links: https://xs.lan.asga.uk` — URL configured.
+   - **No** warning containing `http.base_url is empty` — links will be sent.
+6. **Subscribe** to the topic from the ntfy mobile/desktop app.
+7. **Create** a watchlist in the web UI (page *Watchlists*). When it finds new packs you'll get a notification that deep-links straight to the Search page for that query.
 
 ---
 
@@ -841,7 +921,7 @@ database: /var/lib/xdcc-server/db/xdcc-server.db
 
 The database directory is automatically created if it doesn't exist.
 
-Configuration priority: **CLI flags > environment variables > config.yaml**
+Configuration priority: see [Configuration → Configuration Priority](#configuration-priority) for details.
 
 ### Systemd (Linux)
 
@@ -1007,26 +1087,16 @@ xdcc-browse <search_term> [flags]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
+xdcc-browse also supports all shared flags documented in [xdcc-dl](#flags-1) (`--server`, `--out`, `--throttle`, `--connect-timeout`, `--stall-timeout`, `--fallback-channel`, `--wait-time`, `--username`, `--channel-join-delay`, `--dns-server`, `--verbose`, `--quiet`).
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
 | `--command-server` | | *(none)* | Delegate search and download to a remote xdcc-server (e.g. `http://localhost:8080`) |
 | `--search-engine` | `-e` | `xdcc-eu` | Search engine to use: `nibl`, `xdcc-eu`, `subsplease` |
 | `--ext` | `-x` | *(none)* | Filter results by file extension(s), comma-separated (e.g. `mkv,avi,mp4`) |
 | `--bot` | `-b` | *(none)* | Filter results by bot name substring, case-insensitive (e.g. `WOND`) |
 | `--prefix` | `-p` | `false` | Keep only results whose filename starts with the search term (case-insensitive) |
-| `--server` | `-s` | *(from search)* | Override IRC server for all selected packs (`host` or `host:port`) |
-| `--out` | `-o` | `.` | Output directory or file path |
-| `--throttle` | `-t` | `-1` | Speed limit in bytes/s (e.g. `512K`, `2M`, `1G`). `-1` = unlimited |
-| `--connect-timeout` | `-C` | `120` | Seconds to wait for the bot to initiate the DCC transfer |
-| `--stall-timeout` | `-S` | `60` | Seconds of no transfer progress before aborting. `0` = disabled |
-| `--fallback-channel` | `-f` | *(none)* | IRC channel to join if WHOIS returns no channels for the bot |
-| `--wait-time` | `-w` | `0` | Extra seconds to wait before sending the XDCC request |
-| `--username` | `-u` | *(random)* | IRC nickname (a random suffix is always appended) |
-| `--channel-join-delay` | `-D` | `-1` | Seconds to wait after connecting before sending WHOIS. `-1` = random 5–10 s |
-| `--dns-server` | `-d` | `8.8.8.8:53` | Fallback DNS resolver when system DNS is blocked (`host:port`) |
 | `--compact` | `-c` | `false` | Remove duplicate results with same filename, size and bot family |
-| `--verbose` | `-v` | | Increase verbosity (repeatable: `-v`, `-vv`) |
-| `--quiet` | `-q` | | Reduce output (repeatable: `-q`, `-qq`) |
-
-> If `-q` and `-v` are used together, `-q` takes precedence and `-v` is ignored.
 
 ### Selection syntax
 
@@ -1084,8 +1154,9 @@ xdcc-browse "my show" --ext=mkv --server=94.23.150.97
 ### Search/Preset/Watchlist Contract Notes
 
 - Presets and watchlists are persisted with `filters_json` in storage.
-- Web UI fields like `min_size`, `max_size`, `providers`, and `notify` are currently not fully mapped to server-side execution for watchlist/preset runs.
-- Server-side aggregated search filtering currently uses `q`, `prefix`, `bot`, `ext`, `providers`, and `compact`.
+- Search API supports server-side filters: `q`, `prefix`, `bot`, `ext`, `compact`, `min_size`, `max_size`, `video_only`, `audio_only`, `books_only`, `zip_only`, `providers`, `page`, and `pageSize`.
+- Preset/watchlist `filters_json` stores providers, min/max size for reuse during watchlist execution.
+- The `notify` field is stored but is not currently mapped to notification delivery.
 
 ### Network Resilience
 
@@ -1281,6 +1352,37 @@ Use `--server` to override auto-detection or bypass blocked DNS.
 </details>
 
 <details>
+<summary><strong>❌ Watchlist notifications don't include the search-result link</strong></summary>
+
+**Symptoms:**
+- A watchlist correctly detects new packs and fires a notification, but the body only shows `Watchlist "<name>": N nuovi pacchetti` without the `Cerca: <url>` line.
+- ntfy notifications don't open a search page when tapped, Pushover messages are missing the `url` field, and webhooks don't include `search_url` in the JSON payload.
+- On startup you see:
+  ```
+  WARN notifier: http.base_url is empty; watchlist notifications will fire but will NOT include direct search links…
+  ```
+
+**Solutions:**
+1. **Set `http.base_url`** to the server's public URL — the link is a public permalink, so the server must opt-in by declaring the URL it is reachable at. Empty `base_url` is the default.
+   ```yaml
+   http:
+     base_url: "https://xs.lan.asga.uk"   # swap for your URL
+   ```
+2. **Or use the env var** `XDCC_HTTP_BASE_URL=https://your-public-url` (handy in Docker / systemd deployments).
+3. **Restart** the server and verify the startup log shows:
+   ```
+   notifier: base URL for notification links: https://your-public-url
+   ```
+   and that the `WARN http.base_url is empty` line is gone.
+4. Confirm the provider handling `watchlist_new_results` actually constructed (non-empty endpoint/token/user). A provider whose constructor returned nil is silently skipped and won't ever fire the notification, regardless of `base_url`.
+
+Once `base_url` is set, ntfy gets the URL in its `Click` HTTP header, pushover receives `url` + `url_title="Apri ricerca"`, webhooks get a `search_url` field next to `data`, and email bodies gain the `Cerca: <url>` line.
+
+See [Notifications → Watchlist Notifications with Direct Search Links](#-notifications) for the full setup walkthrough.
+
+</details>
+
+<details>
 <summary><strong>❌ Frontend build fails or web UI not loading</strong></summary>
 
 **Symptoms:**
@@ -1317,15 +1419,7 @@ Use `--server` to override auto-detection or bypass blocked DNS.
 
 **Where is the database stored?**
 
-The SQLite database (`xdcc-server.db`) is stored in the directory specified by `storage.db_path` in your config (default: `./db`). The directory is created automatically on server startup.
-
-**Can I change the database location?**
-Yes! Three ways:
-1. **Config file:** Set `storage.db_path: /path/to/db` in `config.yaml`
-2. **Environment variable:** `export XDCC_STORAGE_DB_PATH=/path/to/db`
-3. **CLI flag:** `xdcc-server --db /full/path/to/custom.db`
-
-The CLI flag accepts a full file path (filename included), while the config and env var specify just the directory (filename is always `xdcc-server.db`).
+See [Configuration → Database Configuration](#database-configuration) for details on database location, configuration methods, and priority.
 
 **How do I reset the database?**
 Stop the server, remove the file, and restart:
@@ -1370,7 +1464,7 @@ xdcc-server  # Will create new database automatically
    journalctl -u xdcc-server | grep "database:"
    ```
 
-4. Reset database (⚠️ deletes all data):
+4. **Reset database** (⚠️ deletes all data): Stop the server, remove the file, and restart:
    ```bash
    # Find the database path from startup logs, then:
    mv /path/to/db/xdcc-server.db /path/to/db/xdcc-server.db.backup
@@ -1387,7 +1481,7 @@ A: Yes! Use range syntax: `xdcc-dl "/msg Bot xdcc send #1-10"` or run multiple x
 **Q: How do I resume a failed download?**  
 A: The tool automatically resumes from where it left off using DCC RESUME. Just run the same command again.
 
-**Q: Can I use xdcc-go on a headless server?**  
+**Q: Can I use xdcc_server on a headless server?**  
 A: Absolutely! Run xdcc-server in server mode and access via the web UI from any device on your network.
 
 **Q: How do I search without downloading?**  
@@ -1399,8 +1493,8 @@ xdcc-search "your query" | less
 **Q: Can I automate downloads for new releases?**  
 A: Yes! Use the server's watchlist feature in the web UI, or schedule xdcc-search + xdcc-dl with cron.
 
-**Q: Does xdcc-go work with private/password-protected channels?**  
-A: Currently, xdcc-go does not support password-protected channels. This is a planned feature.
+**Q: Does xdcc_server work with private/password-protected channels?**  
+A: Currently, xdcc_server does not support password-protected channels. This is a planned feature.
 
 **Q: How do I update to the latest version?**  
 A: 
@@ -1409,13 +1503,10 @@ A:
 git pull
 task clean
 task all
-
-# Docker
-docker-compose pull
-docker-compose up -d
 ```
+For Docker, pull the latest image and restart (see [Docker Compose](#docker-compose-production) for details).
 
-**Q: Can I run xdcc-go on Raspberry Pi?**  
+**Q: Can I run xdcc_server on Raspberry Pi?**  
 A: Yes! Build for ARM64 or use the multi-architecture Docker image. It runs great on Raspberry Pi 4/5.
 
 **Q: Where are the logs stored?**  
@@ -1438,8 +1529,8 @@ XDCC_HTTP_PORT=9090 xdcc-server
 # Edit config.yaml: http.port = 9090
 ```
 
-**Q: Can I use xdcc-go with a VPN?**  
-A: Yes, xdcc-go works fine over VPN. If you experience connection issues, try using `--dns-server` flag.
+**Q: Can I use xdcc_server with a VPN?**  
+A: Yes, xdcc_server works fine over VPN. If you experience connection issues, try using `--dns-server` flag.
 
 ---
 
@@ -1447,7 +1538,7 @@ A: Yes, xdcc-go works fine over VPN. If you experience connection issues, try us
 
 ### Prerequisites
 
-- **Go** (versione minima: vedi [Installation](#-installation) → Requirements)
+- **Go** (versione minima: vedi [Installation](#installation) → Requirements)
 - **Node.js 18+** and **npm**
 - **[Task](https://taskfile.dev)** (recommended)
 - **golangci-lint** (optional, for linting)
@@ -1508,50 +1599,39 @@ task test:verbose
 
 #### Automated Testing & CI/CD
 
-The project uses GitHub Actions for automated testing and quality assurance:
+The project uses GitHub Actions for automated testing and quality assurance. See the [CI/CD Pipeline](#cicd-pipeline) section for a complete overview of the test suite, CI workflows, and release process.
 
-**Test Suite (`test.yml`)** - Reusable workflow that runs:
-- ✅ Go unit tests (`go test ./...`)
-- ✅ Race detector (`go test -race ./...`)
-- ✅ Go vet static analysis
-- ✅ Format checking (`go fmt`)
-- ✅ Linting with golangci-lint
-- ✅ Test coverage report (uploaded as artifact)
-- ✅ Frontend build verification
-
-**CI Workflow (`ci.yml`)** - Runs test suite on:
-- Push to `main` or `develop` branches
-- Pull requests to `main` or `develop`
-
-**Release Workflows** - Before building releases:
-- 🔒 **`docker-release.yml`** requires tests to pass before building Docker images
-- 🔒 **`release-binaries.yml`** requires tests to pass before building release binaries
-
-If any test fails, the release process is automatically blocked. View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc-go/actions).
+View test results and coverage reports in the [Actions tab](https://github.com/asgambat/xdcc_server/actions).
 
 ### Project Structure
 
 ```
-xdcc-go/
+xdcc_server/
 ├── cmd/                    # Command-line entry points
 │   ├── xdcc-server/       # Daemon server
 │   ├── xdcc-dl/           # Download CLI
 │   ├── xdcc-search/       # Search CLI
 │   └── xdcc-browse/       # Interactive browse CLI
 ├── internal/              # Internal packages
-│   ├── api/              # REST API handlers
-│   ├── cli/              # Shared CLI utilities
-│   ├── client/           # HTTP client for delegation
-│   ├── config/           # Configuration loading
-│   ├── downloader/       # DCC transfer logic
-│   ├── entities/         # Core domain models
+│   ├── api/              # REST API handlers (chi router)
+│   ├── bridge/           # Event forwarding (IRC/queue → SSE hub)
+│   ├── cli/              # Shared CLI utilities (verbosity)
+│   ├── client/           # HTTP client for CLI → server delegation
+│   ├── config/           # Configuration loading (YAML + env + flags)
+│   ├── diskmon/          # Disk space monitoring
+│   ├── downloader/       # DCC transfer implementation
+│   ├── entities/         # Core domain models (XDCC pack parsing)
 │   ├── irc/              # IRC client + DCC protocol
-│   ├── ircmanager/       # Multi-server connection manager
-│   ├── queue/            # Download queue orchestration
+│   ├── ircmanager/       # Multi-server persistent connection manager
+│   ├── logging/          # Structured logging with SSE broadcast
+│   ├── metrics/          # Runtime metrics collection
+│   ├── notifier/         # External notifications (webhook, ntfy, pushover)
+│   ├── pubsub/           # Generic pub/sub hub (typed event fan-out)
+│   ├── queue/            # Download queue orchestration + retry
 │   ├── search/           # Search engine implementations
-│   ├── searchagg/        # Search aggregation + caching
-│   ├── sse/              # Server-Sent Events hub
-│   └── store/            # SQLite persistence layer
+│   ├── searchagg/        # Search aggregation, caching, presets, watchlists
+│   ├── sse/              # Server-Sent Events hub + event types
+│   └── store/            # SQLite persistence (focused interfaces, migrations)
 ├── web/                   # Frontend (Svelte 5)
 │   ├── src/              # Svelte components
 │   └── dist/             # Built assets (embedded in binary)
@@ -1627,6 +1707,10 @@ task ci
 
 # This runs: deps, build, test:race, vet
 ```
+
+### Internal Architecture
+
+- **[`docs/CONFIG_UPDATE_PATTERN.md`](docs/CONFIG_UPDATE_PATTERN.md)** — recommended pattern for atomic, race-free partial config updates (`SnapshotAndApply` + `ApplyPartial`). Explains the TOCTOU window that opens if a handler calls `Clone()` twice and how the helper closes it.
 
 ### Contributing
 

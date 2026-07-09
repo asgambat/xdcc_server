@@ -13,7 +13,8 @@ WORKDIR /app/web
 
 # Copy frontend source
 COPY web/package.json web/package-lock.json* ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
 COPY web/ ./
 
@@ -34,12 +35,13 @@ WORKDIR /app
 ARG UID
 ARG GID
 
-# Install git and ca-certificates (the latter is needed to copy certs to scratch)
-RUN apk add --no-cache git ca-certificates
+# Install ca-certificates (needed to copy certs to scratch)
+RUN apk add --no-cache ca-certificates
 
 # Copy Go module files first for better layer caching
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy source code
 COPY . .
@@ -47,13 +49,9 @@ COPY . .
 # Copy pre-built frontend from stage 1 (for go:embed)
 COPY --from=frontend-builder /app/web/dist ./web/dist
 
-# Build all binaries with static linking for the target platform
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/xdcc-dl ./cmd/xdcc-dl && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/xdcc-search ./cmd/xdcc-search && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/xdcc-browse ./cmd/xdcc-browse && \
+# Build only xdcc-server (the only binary needed at runtime in the scratch image)
+# Use BuildKit cache mount to speed up iterative rebuilds
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -o /out/xdcc-server ./cmd/xdcc-server
 
@@ -86,7 +84,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 # Copy user/group files so the xdcc user can be resolved by name
 COPY --from=builder /etc/passwd /etc/group /etc/
 
-# Copy all binaries in a single layer
+# Copy the xdcc-server binary
 COPY --from=builder /out/ /usr/local/bin/
 
 # Copy default config with correct ownership so the non-root user can save config changes
@@ -105,7 +103,7 @@ EXPOSE 8080
 # to copy permissions on first mount — see COPY --chown above)
 VOLUME ["/data", "/var/lib/xdcc-server/db"]
 
-# Default config: use /data for all persistent files
+# Default config: use /data for all persistent files and var/lib for db files
 ENV XDCC_HTTP_PORT=8080 \
     XDCC_DOWNLOAD_TEMP_DIR=/data/downloads/tmp \
     XDCC_DOWNLOAD_DEST_DIR=/data/downloads/complete \

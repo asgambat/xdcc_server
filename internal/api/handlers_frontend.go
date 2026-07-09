@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	"xdcc-go/web"
+	"xdcc_server/web"
 )
 
 // frontendFS is the embedded frontend filesystem, rooted at "dist".

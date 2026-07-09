@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // ---------------------------------------------------------------------------

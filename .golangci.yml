@@ -1,4 +1,4 @@
-# golangci-lint configuration for xdcc-go
+# golangci-lint configuration for xdcc_server
 # See https://golangci-lint.run/usage/configuration/
 #
 # Run with: golangci-lint run ./...
@@ -93,6 +93,7 @@ linters-settings:
       - "ifElseChain"      # Often too noisy
       - "hugeParam"        # Many false positives
       - "rangeValCopy"     # Style preference, not correctness
+      - "unnecessaryDefer" # Conflicts with badLock on barrier patterns (Lock+defer Unlock)
 
 # Linters to enable
 linters:

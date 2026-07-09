@@ -10,7 +10,7 @@ services:
         # Override via environment or .env file:  UID=1001 GID=1001 docker-compose up
         UID: ${UID:-1000}
         GID: ${GID:-1000}
-    # image: ghcr.io/asgambat/xdcc-go:latest
+    # image: ghcr.io/asgambat/xdcc_server:latest
 
     container_name: xdcc-server
     restart: unless-stopped

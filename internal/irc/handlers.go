@@ -6,8 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"xdcc_server/internal/entities"
+
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/entities"
 )
 
 func (c *Client) registerHandlers() {
@@ -29,11 +30,17 @@ func (c *Client) registerHandlers() {
 
 	// End of WHOIS: decide whether to send XDCC now or wait for JOIN.
 	cuid = c.conn.irc.Handlers.Add(girc.RPL_ENDOFWHOIS, func(client *girc.Client, e girc.Event) {
-		c.infof("WHOIS response completed for %s", c.currentPack().Bot)
-		if c.ps.messageSent.Load() {
+		// Capture the current pack once at handler entry (fix 2.19): packIdxVal may
+		// advance to the next pack before this handler finishes, so all references
+		// within the handler must use this snapshot to avoid mis-attributing events.
+		pack := c.currentPack()
+		ps := c.ps.Load()
+		flags := ps.snapshotDecisionFlags()
+		c.infof("WHOIS response completed for %s", pack.Bot)
+		if flags.messageSent {
 			return
 		}
-		if c.ps.needsJoin.Load() {
+		if flags.needsJoin {
 			// We sent a JOIN; wait for the JOIN event to trigger XDCC.
 			// But add a safety timeout: if the server doesn't re-emit JOIN
 			// (e.g. because we were already in the channel via an auto-join),
@@ -44,35 +51,44 @@ func (c *Client) registerHandlers() {
 			// In burst scenarios this prevents transient goroutine accumulation.
 			c.infof("Waiting for JOIN confirmation before sending XDCC request (fallback in 5s)")
 
-			// Reset the reusable timer to 5s. Stop and drain first in case
-			// a stale value remains from a previous pack or a second WHOIS
-			// fires for the same pack (rare but safe to handle).
+			// Reset the reusable timer to 5s under timerMu (fix 2.20): the
+			// timer is shared between this handler goroutine and the download
+			// goroutine (resetForPack), so all accesses must be serialized.
+			// Capture the channel inside the lock so the goroutine below uses
+			// a stable reference even if the timer is later reset/replaced.
+			c.conn.timerMu.Lock()
 			if c.conn.whoisFallbackTimer == nil {
 				c.conn.whoisFallbackTimer = time.NewTimer(5 * time.Second)
 			} else {
-				c.stopWhoisFallbackTimer()
+				c.stopWhoisFallbackTimerUnlocked()
 				c.conn.whoisFallbackTimer.Reset(5 * time.Second)
 			}
+			timerC := c.conn.whoisFallbackTimer.C
+			c.conn.timerMu.Unlock()
 
+			// Capture downloadDone and ps locally: resetForPack replaces c.ps,
+			// so reading c.ps.downloadDone inside the goroutine would race with
+			// the assignment and could reference the wrong pack's channel.
+			downloadDone := ps.downloadDone
 			go func() {
 				select {
-				case <-c.ps.downloadDone:
+				case <-downloadDone:
 					return
 				case <-c.ctx.Done():
 					return
-				case <-c.conn.whoisFallbackTimer.C:
-					if !c.ps.messageSent.Load() {
+				case <-timerC:
+					if !ps.isMessageSent() {
 						c.infof("JOIN confirmation not received, sending XDCC request anyway")
-						c.sendXDCCRequest(client)
+						c.sendXDCCRequest(client, ps, pack)
 					}
 				}
 			}()
 			return
 		}
-		if c.ps.whoisFoundChannels.Load() {
+		if flags.whoisFoundChannels {
 			// All channels were already joined — send XDCC directly.
 			c.infof("All channels already joined, sending XDCC request")
-			c.sendXDCCRequest(client)
+			c.sendXDCCRequest(client, ps, pack)
 			return
 		}
 		// No channels found in WHOIS at all.
@@ -81,12 +97,22 @@ func (c *Client) registerHandlers() {
 			if !strings.HasPrefix(ch, "#") {
 				ch = "#" + ch
 			}
-			c.infof("No channels from WHOIS, joining fallback channel: %s", ch)
-			c.ps.needsJoin.Store(true)
-			client.Cmd.Join(ch)
+			ch = strings.ToLower(ch)
+			if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+				c.infof("Fallback channel %s is blacklisted, sending XDCC request directly", ch)
+				c.sendXDCCRequest(client, ps, pack)
+			} else {
+				c.infof("No channels from WHOIS, joining fallback channel: %s", ch)
+				ps.setNeedsJoin(true)
+				// Record fallback channel on the pack for speed tracking.
+				if pack.GetChannel() == "" {
+					pack.SetChannel(ch)
+				}
+				client.Cmd.Join(ch)
+			}
 		} else {
 			c.infof("No channels from WHOIS and no fallback, sending XDCC request directly")
-			c.sendXDCCRequest(client)
+			c.sendXDCCRequest(client, ps, pack)
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
@@ -97,6 +123,9 @@ func (c *Client) registerHandlers() {
 		if len(e.Params) < 2 {
 			return
 		}
+		// Capture current pack once at handler entry (fix 2.19).
+		pack := c.currentPack()
+		ps := c.ps.Load()
 		rawChannels := e.Params[len(e.Params)-1]
 		c.infof("WHOIS response: bot is in channels: %s", rawChannels)
 
@@ -106,13 +135,32 @@ func (c *Client) registerHandlers() {
 				continue
 			}
 			ch := strings.ToLower(part)
-			c.ps.whoisFoundChannels.Store(true)
+			// Filter blacklisted channels immediately: they must never be
+			// joined, counted as "found" via WHOIS, or recorded on the
+			// pack for speed tracking — not even if already joined from
+			// before the blacklist entry was added.
+			if c.opts.IsChannelBlacklisted != nil && c.opts.IsChannelBlacklisted(ch) {
+				c.infof("Skipping blacklisted channel %s", part)
+				continue
+			}
+			ps.setWhoisFoundChannels(true)
+			c.conn.joinedChannelsMu.RLock()
 			alreadyIn := c.conn.joinedChannels[ch]
+			c.conn.joinedChannelsMu.RUnlock()
 			if alreadyIn {
 				c.infof("Already in channel %s, skipping JOIN", part)
+				// Still record the channel on the pack for speed tracking.
+				if pack.GetChannel() == "" {
+					pack.SetChannel(ch)
+				}
 			} else {
 				c.infof("Joining channel: %s", part)
-				c.ps.needsJoin.Store(true)
+				ps.setNeedsJoin(true)
+				// Record the discovered channel on the pack so it can be
+				// used for per-channel statistics after download completes.
+				if pack.GetChannel() == "" {
+					pack.SetChannel(ch)
+				}
 				time.Sleep(time.Duration(1+randN(2)) * time.Second)
 				client.Cmd.Join(part)
 			}
@@ -121,15 +169,38 @@ func (c *Client) registerHandlers() {
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
 	// JOIN: record membership, send XDCC if pending.
+	// If this is a newly-joined channel (discovered via WHOIS), wait 5s before
+	// sending XDCC so the bot has time to register our presence.
+	// If the channel was already joined, send XDCC immediately.
 	cuid = c.conn.irc.Handlers.Add(girc.JOIN, func(client *girc.Client, e girc.Event) {
 		if e.Source == nil || !strings.EqualFold(e.Source.Name, client.GetNick()) {
 			return
 		}
+		pack := c.currentPack()
+		ps := c.ps.Load()
+		flags := ps.snapshotDecisionFlags()
 		ch := strings.ToLower(e.Params[0])
+		c.conn.joinedChannelsMu.Lock()
 		c.conn.joinedChannels[ch] = true
+		c.conn.joinedChannelsMu.Unlock()
 		c.infof("✓ Joined channel: %s", e.Params[0])
-		if !c.ps.messageSent.Load() {
-			c.sendXDCCRequest(client)
+		if !flags.messageSent {
+			if flags.needsJoin {
+				// New channel: reset the fallback timer to 5s from now
+				// so XDCC is sent 5s after JOIN confirmation.
+				// Acquire timerMu (fix 2.20) to synchronize with resetForPack
+				// and the RPL_ENDOFWHOIS handler which also touch the timer.
+				c.infof("New channel joined, waiting 5s before XDCC request")
+				c.conn.timerMu.Lock()
+				if c.conn.whoisFallbackTimer != nil {
+					c.stopWhoisFallbackTimerUnlocked()
+					c.conn.whoisFallbackTimer.Reset(5 * time.Second)
+				}
+				c.conn.timerMu.Unlock()
+			} else {
+				// Channel already joined: send XDCC immediately
+				c.sendXDCCRequest(client, ps, pack)
+			}
 		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
@@ -142,7 +213,9 @@ func (c *Client) registerHandlers() {
 		if ctcp.Source != nil {
 			sourceHost = ctcp.Source.Host
 		}
-		c.handleDCC(ctcp.Text, sourceHost)
+		// Pass client to handleDCC instead of reading c.conn.irc,
+		// which may be concurrently reassigned by reconnect().
+		c.handleDCC(client, ctcp.Text, sourceHost)
 	})
 
 	// NOTICE from bot.
@@ -154,9 +227,53 @@ func (c *Client) registerHandlers() {
 	// Message patterns include both English and Italian strings because several
 	// Rizon bots (particularly Italian ones) reply in Italian.
 	cuid = c.conn.irc.Handlers.Add(girc.NOTICE, func(client *girc.Client, e girc.Event) {
+		// Capture current pack once at handler entry (fix 2.19).
+		pack := c.currentPack()
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 		notice := e.Last()
 		msg := strings.ToLower(notice)
-		// These are standard IRC server ident/hostname check messages — suppress in quiet mode.
+
+		// Try to extract pack filename and size from the notice.
+		// This is important for manual downloads where filename/size aren't known upfront.
+		if filename, size := parsePackInfoFromNotice(notice); filename != "" || size > 0 {
+			ps.mu.Lock()
+			if filename != "" && ps.packFilename == "" {
+				ps.packFilename = filename
+				pack.SetFilename(filename, true)
+				c.infof("Bot notice: discovered filename=%s", filename)
+			}
+			if size > 0 && ps.packSize == 0 {
+				ps.packSize = size
+				pack.SetSize(size)
+				c.infof("Bot notice: discovered size=%s", entities.HumanReadableBytes(size))
+			}
+			ps.mu.Unlock()
+		}
+
+		// Check for failure-class notices first. These get categorized logs
+		// that include the notice text — no need for a separate raw log.
+		alreadyReqMsgs := []string{"you already requested", "richiesto questo pack!"}
+		blockedMsgs := []string{"xdcc send negato", "numero pack errato", "invalid pack number",
+			"gli slots sono occupati", "denied"}
+
+		for _, s := range alreadyReqMsgs {
+			if strings.Contains(msg, s) {
+				c.noticef("Bot %s says pack already requested (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
+				c.finishWithNotice(ps, ErrPackAlreadyReq, notice)
+				return
+			}
+		}
+		for _, s := range blockedMsgs {
+			if strings.Contains(msg, s) {
+				c.noticef("Bot %s denied XDCC request (pack=%d): %s", pack.Bot, pack.PackNumber, notice)
+				c.finishWithNotice(ps, ErrBotDenied, notice)
+				return
+			}
+		}
+
+		// Raw notice log for non-failure messages (informational notices,
+		// transfer progress, etc.). Quiet-filtered server checks use logf
+		// (verbose only), everything else uses noticef.
 		quietFiltered := []string{
 			"looking up your hostname",
 			"checking ident",
@@ -175,75 +292,60 @@ func (c *Client) registerHandlers() {
 		} else {
 			c.noticef("Bot notice: %s", notice)
 		}
-
-		// Try to extract pack filename and size from the notice.
-		// This is important for manual downloads where filename/size aren't known upfront.
-		if filename, size := parsePackInfoFromNotice(notice); filename != "" || size > 0 {
-			c.ps.mu.Lock()
-			if filename != "" && c.ps.packFilename == "" {
-				c.ps.packFilename = filename
-				c.currentPack().SetFilename(filename, true)
-				c.infof("Bot notice: discovered filename=%s", filename)
-			}
-			if size > 0 && c.ps.packSize == 0 {
-				c.ps.packSize = size
-				c.currentPack().SetSize(size)
-				c.infof("Bot notice: discovered size=%s", entities.HumanReadableBytes(size))
-			}
-			c.ps.mu.Unlock()
-		}
-
-		alreadyReqMsgs := []string{"you already requested", "richiesto questo pack!"}
-		blockedMsgs := []string{"xdcc send negato", "numero pack errato", "invalid pack number",
-			"gli slots sono occupati", "denied"}
-
-		for _, s := range alreadyReqMsgs {
-			if strings.Contains(msg, s) {
-				c.finishWithNotice(ErrPackAlreadyReq, notice)
-				return
-			}
-		}
-		for _, s := range blockedMsgs {
-			if strings.Contains(msg, s) {
-				c.finishWithNotice(ErrBotDenied, notice)
-				return
-			}
-		}
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
+	// IRC format: :server 401 ourNick targetNick :No such nick/channel
+	// girc includes the recipient (ourNick) as Params[0]; the target is Params[1].
 	cuid = c.conn.irc.Handlers.Add(girc.ERR_NOSUCHNICK, func(client *girc.Client, e girc.Event) {
-		c.noticef("Bot '%s' not found on server", c.currentPack().Bot)
-		c.finishWithError(ErrBotNotFound)
+		if len(e.Params) < 2 {
+			return
+		}
+		// Capture current pack once at handler entry (fix 2.19).
+		pack := c.currentPack()
+		if !strings.EqualFold(e.Params[1], pack.Bot) {
+			return // 401 for a different nick, not our bot
+		}
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
+		c.noticef("Bot '%s' not found on server", pack.Bot)
+		c.finishWithErrorPS(ps, ErrBotNotFound)
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 
 	cuid = c.conn.irc.Handlers.Add(girc.ERROR, func(client *girc.Client, e girc.Event) {
+		ps := c.ps.Load() // capture ps to avoid race with resetForPack()
 		c.noticef("IRC error: %s", e.Last())
-		c.finishWithError(ErrUnrecoverable)
+		c.finishWithErrorPS(ps, ErrUnrecoverable)
 	})
 	c.conn.handlerCUIDs = append(c.conn.handlerCUIDs, cuid)
 }
 
 // removeHandlers removes all handlers previously registered by this client
-// from the girc.Client. This prevents accumulation of duplicate handlers when
-// multiple downloads share the same persistent IRC connection.
+// from the girc.Client. Uses handlersRegisteredOn (the client where handlers
+// were actually registered) rather than c.conn.irc, which may have already
+// been reassigned to a new client by SetExistingClient or reconnect().
 func (c *Client) removeHandlers() {
+	if c.conn.handlersRegisteredOn == nil {
+		c.conn.handlerCUIDs = nil
+		return
+	}
 	for _, cuid := range c.conn.handlerCUIDs {
-		c.conn.irc.Handlers.Remove(cuid)
+		c.conn.handlersRegisteredOn.Handlers.Remove(cuid)
 	}
 	c.conn.handlerCUIDs = nil
 }
 
-func (c *Client) sendXDCCRequest(client *girc.Client) {
-	if c.ps.messageSent.Swap(true) {
+// sendXDCCRequest sends the XDCC request message to the bot. Both ps and pack
+// must be snapshots captured at handler entry so the request state and target
+// stay consistent even if c.ps/c.packIdxVal advance concurrently.
+func (c *Client) sendXDCCRequest(client *girc.Client, ps *packState, pack *entities.XDCCPack) {
+	if ps.markMessageSent() {
 		return
 	}
 	if c.opts.WaitTime > 0 {
 		c.logf("Waiting %ds before sending XDCC request", c.opts.WaitTime)
 		time.Sleep(time.Duration(c.opts.WaitTime) * time.Second)
 	}
-	pack := c.currentPack()
 	msg := pack.GetRequestMessage(false)
 	c.infof("→ Sending XDCC request to bot %s: %s", pack.Bot, msg)
 	client.Cmd.Message(pack.Bot, msg)

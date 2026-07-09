@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,18 @@ func filterPacks(packs []*entities.XDCCPack, opts SearchOptions) []*entities.XDC
 	if opts.MaxSize != "" {
 		result = filterByMaxSize(result, opts.MaxSize)
 	}
+	if opts.VideoOnly {
+		result = filterByExt(result, []string{".avi", ".mpeg", ".mkv", ".mp4", ".mpg", ".mov"})
+	}
+	if opts.AudioOnly {
+		result = filterByExt(result, []string{".mp3", ".m4a", ".ogg", ".flac", ".aac"})
+	}
+	if opts.BooksOnly {
+		result = filterByExt(result, []string{".epub", ".mobi", ".pdf"})
+	}
+	if opts.ZipOnly {
+		result = filterByExt(result, []string{".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"})
+	}
 	if opts.Compact {
 		result = compactPacks(result)
 	}
@@ -43,38 +55,81 @@ func filterPacks(packs []*entities.XDCCPack, opts SearchOptions) []*entities.XDC
 	return result
 }
 
-// filterByQuery keeps only packs whose filename contains all query terms.
+// filterByQuery keeps only packs whose filename contains all positive query terms
+// and none of the negative (exclusion) terms prefixed with "-".
+// For example, "ubuntu -old" keeps packs that contain "ubuntu" but not "old".
 func filterByQuery(packs []*entities.XDCCPack, query string) []*entities.XDCCPack {
-	// Split query into terms
-	terms := strings.Fields(strings.ToLower(query))
-	if len(terms) == 0 {
+	// Split query into terms and separate into positive and negative.
+	rawTerms := strings.Fields(strings.ToLower(query))
+	if len(rawTerms) == 0 {
 		return packs
 	}
 
+	var posTerms []string
+	var negTerms []string
+	for _, t := range rawTerms {
+		if strings.HasPrefix(t, "-") && len(t) > 1 {
+			negTerms = append(negTerms, t[1:]) // strip the "-" prefix
+		} else {
+			posTerms = append(posTerms, t)
+		}
+	}
+
+	// If there are no positive terms, include all packs and only apply exclusions.
+	// If there are no negative terms, this behaves identically to the old logic.
+
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		filenameLower := strings.ToLower(p.Filename)
-		// Check if all terms are present in filename
+		filenameLower := strings.ToLower(p.GetFilename())
+
+		// All positive terms must be present in the filename.
 		allFound := true
-		for _, term := range terms {
+		for _, term := range posTerms {
 			if !strings.Contains(filenameLower, term) {
 				allFound = false
 				break
 			}
 		}
-		if allFound {
-			out = append(out, p)
+		if !allFound {
+			continue
 		}
+
+		// No negative term must be present in the filename.
+		excluded := false
+		for _, term := range negTerms {
+			if strings.Contains(filenameLower, term) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		out = append(out, p)
 	}
 	return out
 }
 
+// wordSepReplacer maps common filename word separators to spaces for prefix matching.
+var wordSepReplacer = strings.NewReplacer(".", " ", "_", " ", "-", " ")
+
+// normalizeWords lowers case, replaces common word separators with spaces,
+// and collapses multiple spaces into single spaces.
+func normalizeWords(s string) string {
+	s = wordSepReplacer.Replace(strings.ToLower(s))
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // filterByPrefix keeps only packs whose filename starts with the given prefix.
+// Word separators (., _, -) are normalized to spaces before comparison, so
+// a prefix "paperino nano" matches "paperino.nano.1080p.mkv" and vice versa.
 func filterByPrefix(packs []*entities.XDCCPack, prefix string) []*entities.XDCCPack {
-	prefixLower := strings.ToLower(prefix)
+	prefixNorm := normalizeWords(prefix)
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if strings.HasPrefix(strings.ToLower(p.Filename), prefixLower) {
+		fnNorm := normalizeWords(p.GetFilename())
+		if strings.HasPrefix(fnNorm, prefixNorm) {
 			out = append(out, p)
 		}
 	}
@@ -102,7 +157,7 @@ func filterByMinSize(packs []*entities.XDCCPack, minSize string) []*entities.XDC
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if p.Size <= 0 || p.Size >= minBytes {
+		if p.GetSize() <= 0 || p.GetSize() >= minBytes {
 			out = append(out, p)
 		}
 	}
@@ -118,7 +173,7 @@ func filterByMaxSize(packs []*entities.XDCCPack, maxSize string) []*entities.XDC
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if p.Size <= 0 || p.Size <= maxBytes {
+		if p.GetSize() <= 0 || p.GetSize() <= maxBytes {
 			out = append(out, p)
 		}
 	}
@@ -137,7 +192,7 @@ func filterByExt(packs []*entities.XDCCPack, exts []string) []*entities.XDCCPack
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		ext := strings.ToLower(filepath.Ext(p.Filename))
+		ext := strings.ToLower(filepath.Ext(p.GetFilename()))
 		if extSet[ext] {
 			out = append(out, p)
 		}
@@ -167,7 +222,7 @@ func sortPacks(packs []*entities.XDCCPack, query string) {
 		a, b := packs[i], packs[j]
 
 		// Sort alphabetically by filename
-		return strings.ToLower(a.Filename) < strings.ToLower(b.Filename)
+		return strings.ToLower(a.GetFilename()) < strings.ToLower(b.GetFilename())
 	})
 }
 

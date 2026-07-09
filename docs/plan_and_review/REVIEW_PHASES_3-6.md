@@ -306,14 +306,14 @@ go build ./cmd/xdcc-server
 **Unit Tests:** ✅ PASS  
 ```
 go test ./...
-ok xdcc-go/cmd/xdcc-browse (cached)
-ok xdcc-go/cmd/xdcc-dl (cached)
-ok xdcc-go/cmd/xdcc-search (cached)
-ok xdcc-go/internal/cli (cached)
-ok xdcc-go/internal/downloader (cached)
-ok xdcc-go/internal/entities (cached)
-ok xdcc-go/internal/irc (cached)
-ok xdcc-go/internal/search (cached)
+ok xdcc_server/cmd/xdcc-browse (cached)
+ok xdcc_server/cmd/xdcc-dl (cached)
+ok xdcc_server/cmd/xdcc-search (cached)
+ok xdcc_server/internal/cli (cached)
+ok xdcc_server/internal/downloader (cached)
+ok xdcc_server/internal/entities (cached)
+ok xdcc_server/internal/irc (cached)
+ok xdcc_server/internal/search (cached)
 ```
 
 **Note:** I pacchetti nuovi (api, queue, searchagg, ircmanager) non hanno test. Considerare aggiungere test unitari almeno per le funzioni critiche.

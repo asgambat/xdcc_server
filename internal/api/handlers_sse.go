@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"xdcc-go/internal/sse"
+	"xdcc_server/internal/sse"
 )
 
 // =========================================================================
@@ -118,9 +118,10 @@ func (a *API) handleEvents(w http.ResponseWriter, r *http.Request) {
 			a.Logger.Debugf("[SSE] context canceled [%s]: %v", reqID, r.Context().Err())
 			return
 		case <-keepalive.C:
-			// Send keepalive comment to prevent connection timeout
+			// Send keepalive as a named event so the frontend can track
+			// liveness (SSE comments don't fire JS listeners).
 			a.Logger.Debugf("[SSE] sending keepalive [%s]", reqID)
-			fmt.Fprintf(w, ": keepalive\n\n")
+			fmt.Fprintf(w, "event: keepalive\ndata: {}\n\n")
 			flusher.Flush()
 		case evt, ok := <-ch:
 			if !ok {

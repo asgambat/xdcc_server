@@ -2,14 +2,15 @@ package ircmanager
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================
@@ -20,6 +21,7 @@ type mockStore struct {
 	mu        sync.Mutex
 	servers   map[int64]*store.ServerRecord
 	channels  map[int64][]store.ChannelRecord
+	chanErr   map[int64]error
 	nextSrvID int64
 	nextChID  int64
 }
@@ -28,9 +30,20 @@ func newMockStore() *mockStore {
 	return &mockStore{
 		servers:   make(map[int64]*store.ServerRecord),
 		channels:  make(map[int64][]store.ChannelRecord),
+		chanErr:   make(map[int64]error),
 		nextSrvID: 1,
 		nextChID:  1,
 	}
+}
+
+func (m *mockStore) setChannelsError(serverID int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.chanErr, serverID)
+		return
+	}
+	m.chanErr[serverID] = err
 }
 
 func (m *mockStore) addServer(addr string, port int, auto bool) int64 {
@@ -161,6 +174,9 @@ func (m *mockStore) AddChannel(ctx context.Context, c store.ChannelRecord) (int6
 func (m *mockStore) GetChannelsByServer(ctx context.Context, serverID int64) ([]store.ChannelRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err, ok := m.chanErr[serverID]; ok {
+		return nil, err
+	}
 	chs := m.channels[serverID]
 	if chs == nil {
 		return []store.ChannelRecord{}, nil
@@ -253,6 +269,10 @@ func (m *mockStore) MarkDownloadCompleted(ctx context.Context, id int64, filenam
 	return nil
 }
 func (m *mockStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
+	return nil
+}
+
+func (m *mockStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
 	return nil
 }
 func (m *mockStore) MarkDownloadFailed(ctx context.Context, id int64, errMsg string) error {
@@ -421,6 +441,123 @@ func TestDisconnectServer_NonExistent(t *testing.T) {
 	err := mgr.DisconnectServer(999)
 	if err != nil {
 		t.Errorf("expected nil for non-existent server (idempotent), got: %v", err)
+	}
+}
+
+func TestConnectServer_SetupFailure_DoesNotTrackConnection(t *testing.T) {
+	t.Parallel()
+
+	mgr, ms := newTestManager(t)
+
+	srvID := ms.addServer("irc.test.net", 6667, true)
+	ms.setChannelsError(srvID, errors.New("forced channel load failure"))
+
+	err := mgr.ConnectServerByID(srvID)
+	if err == nil {
+		t.Fatal("expected connect error when loading channels fails")
+	}
+
+	mgr.mu.RLock()
+	_, tracked := mgr.conns[srvID]
+	mgr.mu.RUnlock()
+
+	if tracked {
+		t.Fatalf("server %d should not remain tracked after setup failure", srvID)
+	}
+}
+
+func TestConnectDisconnect_SerializedPerServer(t *testing.T) {
+	t.Parallel()
+
+	mgr, ms := newTestManager(t)
+
+	srvID := ms.addServer("irc.test.net", 6667, true)
+	ms.setChannelsError(srvID, errors.New("forced channel load failure"))
+
+	oldConn := &managedConnection{
+		id:        srvID,
+		address:   "irc.test.net",
+		port:      6667,
+		nickname:  mgr.cfg.GetNickname(),
+		manager:   mgr,
+		joinedChs: make(map[string]string),
+		status:    "disconnected",
+	}
+
+	cancelCalled := make(chan struct{}, 1)
+	oldConn.cancel = func() {
+		select {
+		case cancelCalled <- struct{}{}:
+		default:
+		}
+	}
+	oldConn.wg.Add(1)
+
+	released := make(chan struct{})
+	releaseOldConn := func() {
+		select {
+		case <-released:
+			return
+		default:
+			close(released)
+			oldConn.wg.Done()
+		}
+	}
+	defer releaseOldConn()
+
+	mgr.mu.Lock()
+	mgr.conns[srvID] = oldConn
+	mgr.mu.Unlock()
+
+	connectDone := make(chan error, 1)
+	go func() {
+		connectDone <- mgr.ConnectServerByID(srvID)
+	}()
+
+	select {
+	case <-cancelCalled:
+		// ConnectServer reached oldConn.cancel() and is now blocked on oldConn.wg.Wait().
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for ConnectServer to start replacing old connection")
+	}
+
+	disconnectDone := make(chan error, 1)
+	go func() {
+		disconnectDone <- mgr.DisconnectServer(srvID)
+	}()
+
+	select {
+	case err := <-disconnectDone:
+		t.Fatalf("DisconnectServer returned early while ConnectServer was in progress: %v", err)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: blocked by per-server operation lock.
+	}
+
+	releaseOldConn()
+
+	select {
+	case err := <-connectDone:
+		if err == nil {
+			t.Fatal("expected connect error from forced channel load failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for ConnectServer to complete")
+	}
+
+	select {
+	case err := <-disconnectDone:
+		if err != nil {
+			t.Fatalf("unexpected disconnect error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for DisconnectServer to complete")
+	}
+
+	mgr.mu.RLock()
+	_, stillTracked := mgr.conns[srvID]
+	mgr.mu.RUnlock()
+	if stillTracked {
+		t.Fatalf("server %d should not be tracked after disconnect", srvID)
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/logging"
+
+	"github.com/lrstanley/girc"
 )
 
 // ===========================================================================
@@ -43,16 +45,19 @@ func TestConnectionLifecycle_NoDuplicateRun(t *testing.T) {
 	}
 	conn.ctx, conn.cancel = mgr.ctx, mgr.cancel
 
-	// Launch run() twice - second call should be ignored
-	conn.wg.Add(1)
-	go conn.run()
-	time.Sleep(10 * time.Millisecond) // Let first run() start
+	// startedCh is needed by run() to signal that wg.Add(1) has been called.
+	conn.startedCh = make(chan struct{})
 
-	// This should be safely ignored
+	// Launch run() - wait for it to register in the WaitGroup before
+	// launching the duplicate (otherwise timing could interfere).
+	go conn.run()
+	<-conn.startedCh // deterministic: run() has called wg.Add(1)
+
+	// This should be safely ignored (isRunning is already true)
 	go conn.run()
 
-	// Give time for potential duplicate to execute
-	time.Sleep(100 * time.Millisecond)
+	// Give duplicate goroutine time to execute its early-return path
+	time.Sleep(50 * time.Millisecond)
 
 	// Verify: should still be running (not panicked, not closed twice)
 	if !conn.IsRunning() {
@@ -113,4 +118,68 @@ func TestConnectionLifecycle_PanicRecovery(t *testing.T) {
 	// This test would require injecting a panic into connect()
 	// For now, we document that panic recovery exists in run()
 	t.Skip("Requires mock IRC client that can panic on demand")
+}
+
+func TestWaitConnected_RequiresConnectedStatusAndClient(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan struct{})
+	close(ch)
+
+	mc := &managedConnection{
+		status:      "connected",
+		connectedCh: ch,
+	}
+
+	if mc.waitConnected(20 * time.Millisecond) {
+		t.Fatal("expected waitConnected=false when irc client is nil")
+	}
+
+	mc.mu.Lock()
+	mc.irc = &girc.Client{}
+	mc.mu.Unlock()
+
+	if !mc.waitConnected(20 * time.Millisecond) {
+		t.Fatal("expected waitConnected=true when status is connected and irc client is set")
+	}
+}
+
+func TestWaitConnected_ChannelRotationAfterFirstClose(t *testing.T) {
+	t.Parallel()
+
+	first := make(chan struct{})
+	close(first)
+
+	mc := &managedConnection{
+		status:      "connecting",
+		connectedCh: first,
+	}
+
+	resultCh := make(chan bool, 1)
+	go func() {
+		resultCh <- mc.waitConnected(300 * time.Millisecond)
+	}()
+
+	// Simulate a reconnect attempt that publishes a new connected channel.
+	time.Sleep(20 * time.Millisecond)
+	second := make(chan struct{})
+	mc.mu.Lock()
+	mc.connectedCh = second
+	mc.mu.Unlock()
+
+	time.Sleep(20 * time.Millisecond)
+	mc.mu.Lock()
+	mc.status = "connected"
+	mc.irc = &girc.Client{}
+	close(second)
+	mc.mu.Unlock()
+
+	select {
+	case ok := <-resultCh:
+		if !ok {
+			t.Fatal("expected waitConnected=true after channel rotation and live connected state")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for waitConnected result")
+	}
 }

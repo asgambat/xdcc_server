@@ -2,12 +2,71 @@
   import { onMount } from 'svelte';
   import { watchlists, addToast, navigateToSearch } from '../lib/stores.js';
   import { WatchlistsAPI, DownloadsAPI } from '../lib/api.js';
-  import { escapeHtml } from '../lib/utils.js';
+  import { escapeHtml, createEditFormFocuser } from '../lib/utils.js';
   import Modal from './Modal.svelte';
 
   let loading = $state(true);
   let editingId = $state(null);
   let form = $state({ name: '', query: '', interval_minutes: 60, providers: [], min_size: '', max_size: '', notify_enabled: true, auto_enqueue: false, enabled: true });
+  let formCard = $state(null);
+  let queryInput = $state(null);
+  let formHighlight = $state(false);
+
+  // ---- Sort state ----
+  let sortKey = $state('name');
+  let sortAsc = $state(true);
+
+  let sortedWatchlists = $derived.by(() => {
+    const list = [...$watchlists];
+    const dir = sortAsc ? 1 : -1;
+    list.sort((a, b) => {
+      let va, vb;
+      switch (sortKey) {
+        case 'name':
+          va = (a.name || '').toLowerCase();
+          vb = (b.name || '').toLowerCase();
+          break;
+        case 'query':
+          va = (a.query || '').toLowerCase();
+          vb = (b.query || '').toLowerCase();
+          break;
+        case 'interval':
+          va = a.interval_minutes ?? 60;
+          vb = b.interval_minutes ?? 60;
+          break;
+        case 'last_run':
+          va = a.last_checked_at ? new Date(a.last_checked_at).getTime() : 0;
+          vb = b.last_checked_at ? new Date(b.last_checked_at).getTime() : 0;
+          break;
+        case 'new':
+          va = (a.last_results?.length || 0);
+          vb = (b.last_results?.length || 0);
+          break;
+        default:
+          return 0;
+      }
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+    return list;
+  });
+
+  function toggleSort(key) {
+    if (sortKey === key) {
+      sortAsc = !sortAsc;
+    } else {
+      sortKey = key;
+      sortAsc = true;
+    }
+  }
+
+  function sortArrow(key) {
+    if (sortKey !== key) return '';
+    return sortAsc ? ' ▲' : ' ▼';
+  }
+
+  const focusEditForm = createEditFormFocuser();
 
   // --- Results modal state ---
   let showResultsModal = $state(false);
@@ -40,6 +99,8 @@
 
   function startEdit(w) {
     editingId = w.id;
+    // Scroll to the edit form at the top of the page, highlight it, and focus the query input
+    focusEditForm(formCard, queryInput, (v) => { formHighlight = v; });
     form = {
       name: w.name || '',
       query: w.query || '',
@@ -164,7 +225,7 @@
 {#if loading}
   <div class="spinner"></div>
 {:else}
-  <div class="card mb-2">
+  <div class="card mb-2" class:card-highlight={formHighlight} bind:this={formCard}>
     <div class="card-header">
       <span class="card-title">{editingId ? 'Edit Watchlist' : 'Create Watchlist'}</span>
     </div>
@@ -175,7 +236,7 @@
       </div>
       <div class="form-group">
         <label class="form-label" for="wl-form-query">Query</label>
-        <input id="wl-form-query" class="form-input" bind:value={form.query} placeholder="e.g. Ubuntu 24.04" />
+        <input id="wl-form-query" class="form-input" bind:value={form.query} bind:this={queryInput} placeholder="e.g. Ubuntu 24.04" />
       </div>
       <div class="form-group">
         <label class="form-label" for="wl-form-interval">Interval (minutes)</label>
@@ -214,9 +275,16 @@
     {#if $watchlists.length > 0}
       <div class="table-container">
         <table>
-          <thead><tr><th>Name</th><th>Query</th><th>Interval</th><th>Last Run</th><th>New</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            <th role="button" tabindex="0" onclick={() => toggleSort('name')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('name'); }} style="cursor:pointer;user-select:none">Name{sortArrow('name')}</th>
+            <th role="button" tabindex="0" onclick={() => toggleSort('query')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('query'); }} style="cursor:pointer;user-select:none">Query{sortArrow('query')}</th>
+            <th role="button" tabindex="0" onclick={() => toggleSort('interval')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('interval'); }} style="cursor:pointer;user-select:none">Interval{sortArrow('interval')}</th>
+            <th role="button" tabindex="0" onclick={() => toggleSort('last_run')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('last_run'); }} style="cursor:pointer;user-select:none">Last Run{sortArrow('last_run')}</th>
+            <th role="button" tabindex="0" onclick={() => toggleSort('new')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('new'); }} style="cursor:pointer;user-select:none">New{sortArrow('new')}</th>
+            <th>Actions</th>
+          </tr></thead>
           <tbody>
-            {#each $watchlists as w}
+            {#each sortedWatchlists as w}
               <tr>
                 <td><strong>{w.name}</strong></td>
                 <td><span class="text-sm" role="button" tabindex="0" onclick={() => goToSearch(w)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToSearch(w); } }} style="font-family:monospace;background:var(--bg-tertiary);padding:0.1rem 0.3rem;border-radius:4px;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px" title="Click to search">{w.query}</span></td>

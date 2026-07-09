@@ -109,8 +109,8 @@ func TestEngineNames(t *testing.T) {
 func TestHttpGet_UserAgent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua := r.Header.Get("User-Agent")
-		if ua != "xdcc-go/1.0" {
-			t.Errorf("User-Agent = %q, want xdcc-go/1.0", ua)
+		if ua != "xdcc_server/1.0" {
+			t.Errorf("User-Agent = %q, want xdcc_server/1.0", ua)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

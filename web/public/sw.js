@@ -1,5 +1,5 @@
 // Minimal service worker for PWA installability
-const CACHE_NAME = 'xdcc-go-v1';
+const CACHE_NAME = 'xdcc_server-v1';
 
 self.addEventListener('install', (event) => {
   console.log('[SW] Installing...');

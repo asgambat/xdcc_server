@@ -29,6 +29,7 @@ type ServerStore interface {
 	DeleteChannel(ctx context.Context, id int64) error
 	SetChannelJoined(ctx context.Context, id int64, joined bool) error
 	UpdateChannelTopic(ctx context.Context, id int64, topic string) error
+	UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, avgSpeed float64) error
 	GetAutoJoinChannels(ctx context.Context) ([]ChannelRecord, error)
 }
 
@@ -60,6 +61,9 @@ type DownloadStore interface {
 	FindDuplicateDownload(ctx context.Context, bot, serverAddress string, packNumber int) (*DownloadRecord, error)
 	GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*DownloadRecord, error)
 	FilenamesExist(ctx context.Context, filenames []string) (map[string]bool, error)
+	UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error
+	DeleteAllHistory(ctx context.Context) (int64, error)
+	GetHistoricalAvgSpeed(ctx context.Context) (float64, error)
 }
 
 // SearchCacheStore covers search result caching in SQLite.

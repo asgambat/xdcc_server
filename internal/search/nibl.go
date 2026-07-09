@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // NiblEngine searches for XDCC packs on nibl.co.uk.

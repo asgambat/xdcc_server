@@ -2,24 +2,31 @@ package ircmanager
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
+	"xdcc_server/internal/channellog"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/entities"
+	xdccirc "xdcc_server/internal/irc"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/pubsub"
+	"xdcc_server/internal/store"
+
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/entities"
-	xdccirc "xdcc-go/internal/irc"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/pubsub"
-	"xdcc-go/internal/store"
 )
 
 // Internal constants
 const (
 	defaultConnectionTimeout  = 30 * time.Second       // timeout for connections to establish
 	waitConnectedPollInterval = 200 * time.Millisecond // polling interval when waiting for connection
+	maxReconnectRetries       = 10                     // max reconnection attempts before giving up
 )
 
 // ---------------------------------------------------------------------------
@@ -36,9 +43,26 @@ type Manager struct {
 	cfg    *config.Config
 	logger *logging.Logger
 
+	// serverOps serializes connect/disconnect operations per server ID,
+	// preventing interleaving races between ConnectServer and DisconnectServer.
+	opMu      sync.Mutex
+	serverOps map[int64]*sync.Mutex
+
 	conns      map[int64]*managedConnection
-	connecting map[int64]struct{} // servers currently being connected
 	subscriber *pubsub.Hub[Event]
+
+	// chlog writes per-channel PRIVMSG/NOTICE traffic to disk when the
+	// operator has enabled the hidden irc.channel_log feature in YAML.
+	// May be nil if initialization failed (logged at New()); in that case
+	// channel logging is silently skipped — better than blocking the
+	// whole manager on a filesystem hiccup.
+	chlog *channellog.Logger
+
+	// chlogReconcileDone is closed by Stop() to signal the config revision
+	// polling goroutine to exit. chlogReconcileExited is closed by the
+	// goroutine on exit, so Stop() can wait for it before closing chlog.
+	chlogReconcileDone   chan struct{}
+	chlogReconcileExited chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -47,16 +71,46 @@ type Manager struct {
 // New creates a new IRC connection manager.
 func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{
+	m := &Manager{
 		store:      st,
 		cfg:        cfg,
 		logger:     logger,
+		serverOps:  make(map[int64]*sync.Mutex),
 		conns:      make(map[int64]*managedConnection),
-		connecting: make(map[int64]struct{}),
 		subscriber: pubsub.New[Event](256),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+
+	// Initialize the channel logger if the hidden irc.channel_log list is
+	// non-empty, or if log_private_messages is enabled. The log directory is
+	// taken from logging.file_path's directory when available, otherwise it
+	// defaults to ./logs/ to keep the per-channel files alongside the main
+	// server log.
+	if len(cfg.IRC.ChannelLog) > 0 || cfg.IRC.LogPrivateMessages {
+		logDir := "./logs"
+		if cfg.Logging.FilePath != "" {
+			logDir = filepath.Dir(cfg.Logging.FilePath)
+		}
+		// Resolve to absolute path for a clear, unambiguous startup message.
+		if abs, err := filepath.Abs(logDir); err == nil {
+			logDir = abs
+		}
+		cl, err := channellog.New(logDir)
+		if err != nil {
+			logger.Warnf("channellog: init failed (dir=%s): %v — channel logging disabled", logDir, err)
+		} else {
+			m.chlog = cl
+			if len(cfg.IRC.ChannelLog) > 0 {
+				logger.Infof("channellog: enabled for %d channel(s), writing to %s", len(cfg.IRC.ChannelLog), logDir)
+			}
+			if cfg.IRC.LogPrivateMessages {
+				logger.Infof("channellog: private message logging enabled, writing to %s/private.log", logDir)
+			}
+		}
+	}
+
+	return m
 }
 
 // ---------------------------------------------------------------------------
@@ -67,8 +121,18 @@ func New(st store.ServerStore, cfg *config.Config, logger *logging.Logger) *Mana
 // their auto-join channels. It also connects to any servers marked auto_connect
 // in the database that are not yet managed.
 func (m *Manager) Start() error {
-	// Connect default servers from config
-	for _, sc := range m.cfg.IRC.DefaultServers {
+	// Start config revision polling to reconcile stale channel log files
+	// when the operator adds/removes channels from irc.channel_log at runtime.
+	if m.chlog != nil {
+		m.chlogReconcileDone = make(chan struct{})
+		m.chlogReconcileExited = make(chan struct{})
+		go m.reconcileChannelLogLoop()
+	}
+
+	// Connect default servers from config — take a snapshot to avoid
+	// racing with a concurrent config Replace from the API.
+	cfgSnap := m.cfg.Clone()
+	for _, sc := range cfgSnap.IRC.DefaultServers {
 		if !sc.AutoConnect {
 			continue
 		}
@@ -130,19 +194,26 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("listing servers: %w", err)
 	}
 
+	// Collect server IDs to connect under RLock, then connect outside
+	// the lock. This avoids the fragile unlock/re-lock pattern in the
+	// loop that could race with a concurrent RemoveServer modifying m.conns
+	// or the servers slice between iterations.
 	m.mu.RLock()
+	var toConnect []int64
 	for _, s := range servers {
 		if s.AutoConnect && s.Status == "disconnected" {
 			if _, exists := m.conns[s.ID]; !exists {
-				m.mu.RUnlock()
-				if err := m.ConnectServerByID(s.ID); err != nil {
-					m.logger.Warnf("connecting to server %s (id=%d) failed: %v", s.Address, s.ID, err)
-				}
-				m.mu.RLock()
+				toConnect = append(toConnect, s.ID)
 			}
 		}
 	}
 	m.mu.RUnlock()
+
+	for _, id := range toConnect {
+		if err := m.ConnectServerByID(id); err != nil {
+			m.logger.Warnf("connecting to server %d failed: %v", id, err)
+		}
+	}
 
 	return nil
 }
@@ -166,7 +237,66 @@ func (m *Manager) Stop() {
 	}
 	wg.Wait()
 
+	// Stop the config revision polling goroutine and wait for it to fully
+	// exit before closing the channel logger. This prevents a race between
+	// ReconcileChannels (still running in the goroutine) and Close().
+	if m.chlogReconcileDone != nil {
+		close(m.chlogReconcileDone)
+		<-m.chlogReconcileExited
+	}
+
+	// Flush per-channel log files to disk before tearing down the manager.
+	if m.chlog != nil {
+		if err := m.chlog.Close(); err != nil {
+			m.logger.Warnf("channellog: close error: %v", err)
+		}
+	}
+
 	m.cancel()
+}
+
+// ---------------------------------------------------------------------------
+// Config revision polling for channel log reconciliation
+// ---------------------------------------------------------------------------
+
+// reconcileChannelLogLoop periodically polls the config revision number.
+// When it detects a change, it reconciles the channellog file handles:
+// channels removed from irc.channel_log get their log files closed.
+// Runs every 30 seconds (matching channellog's own sync interval).
+func (m *Manager) reconcileChannelLogLoop() {
+	defer close(m.chlogReconcileExited)
+
+	// NOTE: reading lastRev at goroutine start creates a tiny window where
+	// a config update that lands between the read and the first tick is
+	// missed. This is acceptable because the ticker fires every 30s, so
+	// the change is picked up on the next tick at worst. If this becomes
+	// an issue, initialize lastRev = 0 to force a reconciliation on the
+	// first tick instead.
+	lastRev := m.cfg.GetConfigRevision()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.chlogReconcileDone:
+			return
+		case <-ticker.C:
+			rev := m.cfg.GetConfigRevision()
+			if rev == lastRev {
+				continue
+			}
+			lastRev = rev
+			m.logger.Debugf("channellog: config revision changed (%d), reconciling channel log files", rev)
+			m.chlog.ReconcileChannels(func(ch string) bool {
+				// "private" is not a real channel — it's the key used by
+				// LogPrivate for the private.log file. Always keep it.
+				if ch == "private" {
+					return true
+				}
+				return m.cfg.IsChannelLogged(ch)
+			})
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +321,21 @@ func (m *Manager) emitEvent(evt Event) {
 	m.subscriber.Publish(evt)
 }
 
+// lockServerOp acquires a per-server mutex so ConnectServer and
+// DisconnectServer cannot run concurrently for the same server ID.
+func (m *Manager) lockServerOp(serverID int64) func() {
+	m.opMu.Lock()
+	lock, ok := m.serverOps[serverID]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.serverOps[serverID] = lock
+	}
+	m.opMu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
+}
+
 // ---------------------------------------------------------------------------
 // Public API (Fase 3.5)
 // ---------------------------------------------------------------------------
@@ -211,32 +356,23 @@ func (m *Manager) ConnectServerByID(serverID int64) error {
 // ConnectServer connects to an IRC server with the given details.
 // If the server is already connected, it returns nil.
 func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
+	unlockServer := m.lockServerOp(srv.ID)
+	defer unlockServer()
+
 	m.mu.Lock()
 
 	// If already connected, return immediately.
-	if existing, ok := m.conns[srv.ID]; ok && existing.Status() == "connected" {
-		m.mu.Unlock()
-		return nil
+	if existing, ok := m.conns[srv.ID]; ok {
+		status := existing.Status()
+		if status == "connected" || status == "connecting" || status == "reconnecting" {
+			m.mu.Unlock()
+			return nil
+		}
 	}
-
-	// If another goroutine is already connecting this server, don't
-	// create a duplicate. This prevents the race condition where two
-	// callers both see a stale connection and both try to reconnect.
-	if _, connecting := m.connecting[srv.ID]; connecting {
-		m.mu.Unlock()
-		return nil
-	}
-
-	// Mark as connecting to prevent other goroutines from creating
-	// a duplicate connection for the same serverID.
-	m.connecting[srv.ID] = struct{}{}
-	defer func() {
-		m.mu.Lock()
-		delete(m.connecting, srv.ID)
-		m.mu.Unlock()
-	}()
 
 	// Grab the old connection (if any) for cleanup outside the lock.
+	// The per-server lock (lockServerOp) already prevents concurrent
+	// ConnectServer/DisconnectServer for the same server ID.
 	var oldConn *managedConnection
 	if existing, ok := m.conns[srv.ID]; ok {
 		oldConn = existing
@@ -252,29 +388,38 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		oldConn.wg.Wait()
 	}
 
-	// Create new managed connection
-	conn := &managedConnection{
-		id:        srv.ID,
-		address:   srv.Address,
-		port:      srv.Port,
-		nickname:  m.cfg.IRC.Nickname,
-		manager:   m,
-		joinedChs: make(map[string]string),
-		status:    "connecting",
+	// Load auto-join channels before publishing the new connection in m.conns.
+	// If setup fails, we abort without exposing a half-initialized connection.
+	channels, err := m.store.GetChannelsByServer(m.ctx, srv.ID)
+	if err != nil {
+		return fmt.Errorf("loading channels for server %d: %w", srv.ID, err)
 	}
 
-	// Load auto-join channels from DB
-	channels, err := m.store.GetChannelsByServer(m.ctx, srv.ID)
-	if err == nil {
-		for _, ch := range channels {
-			if ch.AutoJoin {
-				conn.autoJoinChs = append(conn.autoJoinChs, ch.Name)
-			}
+	autoJoinChs := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		if ch.AutoJoin {
+			autoJoinChs = append(autoJoinChs, ch.Name)
 		}
 	}
 
-	// Insert the new connection. The connecting flag is cleaned up by the
-	// defer registered above, which runs atomically after this function returns.
+	// Create new managed connection
+	conn := &managedConnection{
+		id:          srv.ID,
+		address:     srv.Address,
+		port:        srv.Port,
+		nickname:    m.cfg.GetNickname(),
+		autoJoinChs: autoJoinChs,
+		manager:     m,
+		joinedChs:   make(map[string]string),
+		status:      "connecting",
+		startedCh:   make(chan struct{}),
+	}
+
+	// Initialize context BEFORE inserting in m.conns so that no other
+	// goroutine can observe a connection with nil ctx/cancel.
+	conn.ctx, conn.cancel = context.WithCancel(m.ctx)
+
+	// Insert the new connection — fully initialized and ready to run.
 	m.mu.Lock()
 	m.conns[srv.ID] = conn
 	m.mu.Unlock()
@@ -284,10 +429,12 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 		m.logger.Warnf("updating server status in DB failed: %v", err)
 	}
 
-	// Start connection in background
-	conn.ctx, conn.cancel = context.WithCancel(m.ctx)
-	conn.wg.Add(1)
+	// Start connection in background, then wait until run() has called
+	// wg.Add(1). This guarantees that any subsequent wg.Wait() (e.g. in
+	// DisconnectServer) observes the counter already incremented and does
+	// not return prematurely.
 	go conn.run()
+	<-conn.startedCh
 
 	return nil
 }
@@ -297,6 +444,9 @@ func (m *Manager) ConnectServer(srv *store.ServerRecord) error {
 // already disconnected or removed by a concurrent call), it returns nil
 // because the desired state is already achieved.
 func (m *Manager) DisconnectServer(serverID int64) error {
+	unlockServer := m.lockServerOp(serverID)
+	defer unlockServer()
+
 	m.mu.Lock()
 	conn, ok := m.conns[serverID]
 	if ok {
@@ -326,22 +476,31 @@ func (m *Manager) DisconnectServer(serverID int64) error {
 		close(done)
 	}()
 
+	gracefulShutdown := false
+
 	// Use select with timeout for visibility
 	select {
 	case <-done:
 		m.logger.Infof("server %d disconnected cleanly", serverID)
-		return nil
+		gracefulShutdown = true
 	case <-time.After(5 * time.Second):
 		m.logger.Warnf("server %d shutdown taking longer than expected, still waiting...", serverID)
 	}
 
-	// Second phase: wait up to 10 more seconds (15s total)
-	select {
-	case <-done:
-		m.logger.Infof("server %d shutdown completed after delay", serverID)
-	case <-time.After(10 * time.Second):
-		m.logger.Errorf("server %d shutdown exceeded 15s, giving up (goroutine leak likely)", serverID)
-		return fmt.Errorf("server %d shutdown timeout after 15s", serverID)
+	if !gracefulShutdown {
+		// Second phase: wait up to 10 more seconds (15s total)
+		select {
+		case <-done:
+			m.logger.Infof("server %d shutdown completed after delay", serverID)
+		case <-time.After(10 * time.Second):
+			// Avoid false-positive timeout errors if run() already stopped right
+			// after the timeout fired.
+			if conn.IsRunning() {
+				m.logger.Errorf("server %d shutdown exceeded 15s and run() is still active", serverID)
+				return fmt.Errorf("server %d shutdown timeout after 15s (run goroutine still active)", serverID)
+			}
+			m.logger.Warnf("server %d shutdown exceeded 15s wait budget, but run() already stopped", serverID)
+		}
 	}
 
 	if err := m.store.SetServerStatus(m.ctx, serverID, "disconnected"); err != nil {
@@ -367,6 +526,9 @@ func (m *Manager) GetClient(serverID int64) *girc.Client {
 
 // JoinChannel joins a channel on a specific server.
 func (m *Manager) JoinChannel(serverID int64, channel string) error {
+	if m.cfg.IsChannelBlacklisted(channel) {
+		return fmt.Errorf("channel %q is blacklisted", channel)
+	}
 	m.mu.RLock()
 	conn, ok := m.conns[serverID]
 	m.mu.RUnlock()
@@ -389,21 +551,20 @@ func (m *Manager) LeaveChannel(serverID int64, channel string) error {
 
 // GetServers returns the list of all known IRC servers with their status.
 func (m *Manager) GetServers() []store.ServerRecord {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	servers, err := m.store.ListServers(m.ctx)
 	if err != nil {
 		m.logger.Warnf("listing servers failed: %v", err)
 		return nil
 	}
 
-	// Overlay live status from managed connections
+	// Overlay live status from managed connections (hold lock only for the overlay)
+	m.mu.RLock()
 	for i, s := range servers {
 		if conn, ok := m.conns[s.ID]; ok {
 			servers[i].Status = conn.Status()
 		}
 	}
+	m.mu.RUnlock()
 	return servers
 }
 
@@ -459,6 +620,50 @@ func (m *Manager) GetChannelTopic(serverID int64, channel string) (string, error
 	return topic, nil
 }
 
+// SendChannelMessage sends a message to an IRC channel on the given server.
+// The message is sent via PRIVMSG to the channel. The server must be
+// connected and the client must currently be joined to the channel, otherwise
+// an error is returned. Multi-line messages (containing \n or \r) are split
+// into separate PRIVMSG commands so each line is delivered atomically.
+func (m *Manager) SendChannelMessage(serverID int64, channel, message string) error {
+	if message == "" {
+		return fmt.Errorf("message must not be empty")
+	}
+	channel = xdccirc.NormalizeChannel(channel)
+
+	m.mu.RLock()
+	conn, ok := m.conns[serverID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("server %d is not connected", serverID)
+	}
+
+	conn.mu.RLock()
+	ircClient := conn.irc
+	_, joined := conn.joinedChs[channel]
+	conn.mu.RUnlock()
+	if ircClient == nil {
+		return fmt.Errorf("server %d is not connected", serverID)
+	}
+	if !joined {
+		return fmt.Errorf("not joined to channel %s", channel)
+	}
+
+	// Split on newlines (CR/LF) so each line is its own PRIVMSG. This avoids
+	// embedding line breaks into a single command, which most IRC servers
+	// would reject or truncate. Empty messages are already rejected by the
+	// `if message == ""` check above, so we just skip intermediate blank lines.
+	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		m.logger.Infof("sending message to %s on %s: %q", channel, conn.address, line)
+		conn.sendChannelMsg(ircClient, channel, line)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Download support
 // ---------------------------------------------------------------------------
@@ -473,7 +678,7 @@ func (m *Manager) GetChannelTopic(serverID int64, channel string) (string, error
 // 6. Handles DCC transfer with progress callback
 // 7. Maintains the connection after download (channels remain joined)
 func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, channel string, progressFn func(bytesReceived, totalBytes int64, speedBPS float64)) (string, error) {
-	m.logger.Infof("DownloadPack: starting download for %s from bot %s on %s", pack.Filename, pack.Bot, pack.Server.Address)
+	m.logger.Infof("DownloadPack: starting download for %s from bot %s on %s", pack.GetFilename(), pack.Bot, pack.Server.Address)
 
 	// Find or create persistent connection for this server
 	_, conn, err := m.ensureConnection(pack.Server.Address, pack.Server.Port)
@@ -502,11 +707,12 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 		FallbackChannel:  channel,
 		ThrottleBytes:    0, // Use unlimited for now, can make configurable
 		WaitTime:         1,
-		ChannelJoinDelay: m.cfg.Download.ChannelJoinDelay,                                 // from config: -1=random, 0=no delay, >0=fixed
-		Username:         m.cfg.IRC.Nickname, Logger: xdccirc.LoggerFunc(m.logger.Printf), // *logging.Logger has Printf, so this works
+		ChannelJoinDelay: m.cfg.GetChannelJoinDelay(),                                      // from config: -1=random, 0=no delay, >0=fixed
+		Username:         m.cfg.GetNickname(), Logger: xdccirc.LoggerFunc(m.logger.Printf), // *logging.Logger has Printf, so this works
 		ProgressCallback: progressFn,
 		// When the persistent connection drops and reconnects, the xdccirc.Client
 		// calls this to get the new girc.Client and re-bind its handlers.
+		IsChannelBlacklisted: m.cfg.IsChannelBlacklisted,
 		ReconnectCallback: func() *girc.Client {
 			conn.mu.RLock()
 			irc := conn.irc
@@ -517,8 +723,14 @@ func (m *Manager) DownloadPack(ctx context.Context, pack *entities.XDCCPack, cha
 
 	// Create xdccirc.Client and attach it to the existing persistent connection
 	packSlice := []*entities.XDCCPack{pack}
-	client := xdccirc.NewClient(ctx, packSlice, opts, 1) // verbosity=1 so WHOIS/JOIN logs appear
+	client, err := xdccirc.NewClient(ctx, packSlice, opts, 1) // verbosity=1 so WHOIS/JOIN logs appear
+	if err != nil {
+		return "", err
+	}
 	client.SetExistingClient(gircClient)
+	// Remove download handlers when done to prevent accumulation on the
+	// shared girc.Client across multiple downloads on the same connection.
+	defer client.Cleanup()
 
 	// Tell the client about channels the managed connection is already in
 	// so it doesn't try to re-join them (which the server would silently
@@ -671,6 +883,12 @@ type managedConnection struct {
 	runningMu sync.Mutex     // Protects isRunning field
 	isRunning bool           // Prevents duplicate run() calls
 
+	// startedCh is closed by run() once wg.Add(1) has been called, so
+	// that ConnectServer (which waits on it) can be sure that any
+	// subsequent wg.Wait() will observe the counter already incremented.
+	startedCh   chan struct{}
+	startedOnce sync.Once
+
 	manager *Manager
 }
 
@@ -678,6 +896,17 @@ func (mc *managedConnection) Status() string {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 	return mc.status
+}
+
+// signalStarted closes startedCh exactly once, unblocking any caller
+// waiting for run() to register itself in the WaitGroup.
+// Safe to call from both the normal start path and the early-return guard.
+func (mc *managedConnection) signalStarted() {
+	mc.startedOnce.Do(func() {
+		if mc.startedCh != nil {
+			close(mc.startedCh)
+		}
+	})
 }
 
 // IsRunning returns whether the run() goroutine is currently active.
@@ -692,6 +921,42 @@ func (mc *managedConnection) setStatus(s string) {
 	mc.mu.Lock()
 	mc.status = s
 	mc.mu.Unlock()
+}
+
+// closeTrackedClient clears mc.irc under lock and closes the tracked client.
+// If no tracked client exists, it closes fallback (if provided).
+func (mc *managedConnection) closeTrackedClient(fallback *girc.Client, reason string) {
+	mc.mu.Lock()
+	tracked := mc.irc
+	mc.irc = nil
+	mc.mu.Unlock()
+
+	if tracked != nil {
+		if mc.manager != nil && mc.manager.logger != nil && reason != "" {
+			mc.manager.logger.Infof("closing IRC client for server %d (%s)", mc.id, reason)
+		}
+		tracked.Close()
+		return
+	}
+
+	if fallback != nil {
+		if mc.manager != nil && mc.manager.logger != nil && reason != "" {
+			mc.manager.logger.Infof("closing IRC client for server %d (%s)", mc.id, reason)
+		}
+		fallback.Close()
+	}
+}
+
+// activeGreetingClient returns the current IRC client only if it still matches
+// the expected pointer and the connection is live.
+func (mc *managedConnection) activeGreetingClient(expected *girc.Client) *girc.Client {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if expected == nil || mc.status != "connected" || mc.irc == nil || mc.irc != expected {
+		return nil
+	}
+	return mc.irc
 }
 
 // connectResult represents the outcome of a connection attempt.
@@ -712,11 +977,19 @@ func (mc *managedConnection) run() {
 	if mc.isRunning {
 		mc.manager.logger.Warnf("run() already active for server %d, skipping duplicate call", mc.id)
 		mc.runningMu.Unlock()
+		// Signal startedCh defensively: unblocks any caller waiting on it
+		// even though this is a duplicate invocation (no-op if already done).
+		mc.signalStarted()
 		return
 	}
 	mc.isRunning = true
+	// wg.Add(1) is called here — not by the caller — so that Add and Done
+	// are always paired inside run() itself. signalStarted() is invoked
+	// immediately after to unblock ConnectServer (which waits on startedCh).
+	mc.wg.Add(1)
 	mc.runningMu.Unlock()
 
+	mc.signalStarted()
 	defer mc.wg.Done()
 
 	// Ensure cleanup on exit
@@ -729,25 +1002,27 @@ func (mc *managedConnection) run() {
 		if r := recover(); r != nil {
 			mc.manager.logger.Errorf("PANIC in run() for server %d: %v\n%s", mc.id, r, debug.Stack())
 			mc.setStatus("error")
-			_ = mc.manager.store.SetServerStatus(context.Background(), mc.id, "error")
-
-			// Clean up IRC client resources to prevent goroutine/channel
-			// leaks. If the panic happened inside connect(), there may be
-			// a girc.Client with active handlers and spawned goroutines.
-			mc.mu.RLock()
-			if mc.irc != nil {
-				mc.manager.logger.Infof("closing IRC client for server %d after panic", mc.id)
-				mc.irc.Close()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "error"); err != nil {
+				mc.manager.logger.Warnf("set server %d status=error in DB failed: %v", mc.id, err)
 			}
-			mc.mu.RUnlock()
+			cancel()
+
+			// Clean up IRC client resources to prevent goroutine/channel leaks.
+			mc.closeTrackedClient(nil, "panic recovery")
 		}
 	}()
 
-	// Helper: final disconnect cleanup. Uses context.Background() because
+	// Helper: final disconnect cleanup. Uses a timeout context because
 	// mc.ctx is already cancelled when this runs (conn.disconnect() cancels
-	// it), and ExecContext with a cancelled context would silently fail.
+	// it), and a bare context.Background() would let store operations
+	// block indefinitely during shutdown.
 	disconnectCleanup := func() {
-		_ = mc.manager.store.SetServerStatus(context.Background(), mc.id, "disconnected")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "disconnected"); err != nil {
+			mc.manager.logger.Warnf("set server %d status=disconnected in DB failed: %v", mc.id, err)
+		}
 		mc.manager.emitEvent(Event{
 			Type:       EventServerDisconnected,
 			ServerID:   mc.id,
@@ -776,9 +1051,12 @@ func (mc *managedConnection) run() {
 				ServerAddr: mc.address,
 			})
 			if !mc.reconnectBackoff() {
-				// Context was cancelled during backoff — caller expects
-				// the DB status to reflect reality.
-				disconnectCleanup()
+				// If context was cancelled (user disconnected), clean up as disconnected.
+				// If context is still alive, max retries were exceeded — status is
+				// already "failed" in DB, just return without overwriting it.
+				if mc.ctx.Err() != nil {
+					disconnectCleanup()
+				}
 				return
 			}
 		}
@@ -854,8 +1132,19 @@ func (mc *managedConnection) connect() connectResult {
 			ServerAddr: mc.address,
 		})
 
-		// Auto-join channels
-		for _, ch := range mc.autoJoinChs {
+		// Auto-join channels (skip blacklisted).
+		// Take a snapshot under RLock to avoid racing with concurrent
+		// joinChannel/leaveChannel (HTTP handler goroutines) that write
+		// to autoJoinChs under mc.mu.Lock().
+		mc.mu.RLock()
+		chsSnapshot := make([]string, len(mc.autoJoinChs))
+		copy(chsSnapshot, mc.autoJoinChs)
+		mc.mu.RUnlock()
+		for _, ch := range chsSnapshot {
+			if mc.manager.cfg.IsChannelBlacklisted(ch) {
+				mc.manager.logger.Infof("skipping auto-join of blacklisted channel %q on %s", ch, mc.address)
+				continue
+			}
 			cl.Cmd.Join(ch)
 		}
 
@@ -876,7 +1165,9 @@ func (mc *managedConnection) connect() connectResult {
 		// joined automatically (e.g. via WHOIS during a download).
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, true)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, true); err != nil {
+				mc.manager.logger.Warnf("mark channel %s joined in DB failed: %v", ch, err)
+			}
 		} else if err == nil {
 			_, err = mc.manager.store.AddChannel(mc.ctx, store.ChannelRecord{
 				ServerID: mc.id,
@@ -897,6 +1188,13 @@ func (mc *managedConnection) connect() connectResult {
 			ServerAddr: mc.address,
 			Channel:    ch,
 		})
+
+		// Send a greeting to the channel after a small random delay (2-4s).
+		// This makes the bot look more human and avoids triggering IRC
+		// anti-flood protections when many channels are joined in a burst.
+		// Runs in its own goroutine so the JOIN handler returns immediately
+		// and the IRC event loop is not blocked.
+		mc.sendChannelGreeting(cl, ch)
 	})
 
 	client.Handlers.Add(girc.KICK, func(cl *girc.Client, e girc.Event) {
@@ -914,7 +1212,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false); err != nil {
+				mc.manager.logger.Warnf("mark channel %s not joined in DB failed: %v", ch, err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -937,7 +1237,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false)
+			if err := mc.manager.store.SetChannelJoined(mc.ctx, channels.ID, false); err != nil {
+				mc.manager.logger.Warnf("mark channel %s not joined in DB failed: %v", ch, err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -960,7 +1262,9 @@ func (mc *managedConnection) connect() connectResult {
 
 		channels, err := mc.manager.store.GetChannelsByServerAndName(mc.ctx, mc.id, ch)
 		if err == nil && channels != nil {
-			_ = mc.manager.store.UpdateChannelTopic(mc.ctx, channels.ID, topic)
+			if err := mc.manager.store.UpdateChannelTopic(mc.ctx, channels.ID, topic); err != nil {
+				mc.manager.logger.Warnf("update channel topic in DB failed: %v", err)
+			}
 		}
 
 		mc.manager.emitEvent(Event{
@@ -987,6 +1291,12 @@ func (mc *managedConnection) connect() connectResult {
 		mc.manager.logger.Warnf("IRC error on %s: %s", mc.address, e.Last())
 	})
 
+	// Per-channel PRIVMSG / NOTICE logger (hidden, opt-in via irc.channel_log).
+	// Only records traffic addressed to a channel we are joined to and that
+	// appears in the configured log list. Private messages (target = our own
+	// nick) are intentionally skipped to avoid leaking direct queries.
+	mc.registerChannelLogHandlers(client)
+
 	// Start connection in a goroutine; when irc.Connect() returns,
 	// the connection has been lost (either due to error or explicit Close).
 	// Tracked by mc.wg so DisconnectServer can detect leaked goroutines.
@@ -1001,7 +1311,7 @@ func (mc *managedConnection) connect() connectResult {
 	// Phase 1: Wait for CONNECTED event or immediate failure
 	select {
 	case <-mc.ctx.Done():
-		client.Close()
+		mc.closeTrackedClient(client, "context cancelled during connect")
 		// Drain with timeout to prevent indefinite blocking
 		select {
 		case <-disconnected:
@@ -1012,12 +1322,16 @@ func (mc *managedConnection) connect() connectResult {
 	case <-connected:
 		// Connected successfully — proceed to Phase 2
 	case err := <-disconnected:
-		// Connection failed on first attempt
+		// Connection failed on first attempt.
 		mc.manager.logger.Errorf("connection to %s failed: %v", mc.address, err)
-		// Use context.Background() because mc.ctx might already be cancelled
+		// Use a timeout context because mc.ctx might already be cancelled
 		// if a concurrent DisconnectServer() called disconnect() while the
 		// connection was still being established.
-		_ = mc.manager.store.IncrementServerRetry(context.Background(), mc.id)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := mc.manager.store.IncrementServerRetry(shutdownCtx, mc.id); err != nil {
+			mc.manager.logger.Warnf("increment retry count for server %d in DB failed: %v", mc.id, err)
+		}
+		cancel()
 		return connectResultInitialFailure
 	}
 
@@ -1025,7 +1339,7 @@ func (mc *managedConnection) connect() connectResult {
 	select {
 	case <-mc.ctx.Done():
 		// Explicit disconnect requested — send QUIT, close, then drain with timeout
-		client.Close()
+		mc.closeTrackedClient(client, "explicit disconnect")
 		// Drain with timeout to prevent indefinite blocking
 		select {
 		case <-disconnected:
@@ -1043,7 +1357,7 @@ func (mc *managedConnection) connect() connectResult {
 }
 
 // reconnectBackoff implements exponential backoff (Fase 3.4).
-// Returns false if the context was cancelled.
+// Returns false if the context was cancelled or max retries exceeded.
 func (mc *managedConnection) reconnectBackoff() bool {
 	mc.mu.Lock()
 	mc.status = "reconnecting"
@@ -1052,10 +1366,25 @@ func (mc *managedConnection) reconnectBackoff() bool {
 	if idx < 5 {
 		mc.backoffIdx++
 	}
+	retries := mc.retryCount
 	mc.mu.Unlock()
 
+	// Check max retries before scheduling
+	if retries > maxReconnectRetries {
+		mc.manager.logger.Errorf("max reconnection attempts (%d) exceeded for %s — giving up", maxReconnectRetries, mc.address)
+		mc.setStatus("failed")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "failed"); err != nil {
+			mc.manager.logger.Warnf("set server %d status=failed in DB failed: %v", mc.id, err)
+		}
+		cancel()
+		return false
+	}
+
 	// Notify the manager to update DB
-	_ = mc.manager.store.SetServerStatus(mc.ctx, mc.id, "reconnecting")
+	if err := mc.manager.store.SetServerStatus(mc.ctx, mc.id, "reconnecting"); err != nil {
+		mc.manager.logger.Warnf("set server %d status=reconnecting in DB failed: %v", mc.id, err)
+	}
 
 	mc.manager.emitEvent(Event{
 		Type:       EventServerReconnecting,
@@ -1072,7 +1401,7 @@ func (mc *managedConnection) reconnectBackoff() bool {
 		delay = 1 * time.Hour // after 5 failures, retry every hour
 	}
 
-	mc.manager.logger.Infof("reconnecting to %s in %v (attempt %d)", mc.address, delay, mc.retryCount)
+	mc.manager.logger.Infof("reconnecting to %s in %v (attempt %d)", mc.address, delay, retries)
 
 	select {
 	case <-mc.ctx.Done():
@@ -1095,32 +1424,237 @@ func (mc *managedConnection) disconnect() {
 // with a short polling fallback. Returns true if connected within the
 // timeout, false otherwise.
 func (mc *managedConnection) waitConnected(timeout time.Duration) bool {
-	mc.mu.RLock()
-	ch := mc.connectedCh
-	mc.mu.RUnlock()
+	deadline := time.Now().Add(timeout)
 
-	if ch != nil {
+	for {
+		mc.mu.RLock()
+		ch := mc.connectedCh
+		ready := mc.status == "connected" && mc.irc != nil
+		mc.mu.RUnlock()
+
+		if ready {
+			return true
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+
+		if ch == nil {
+			sleepFor := waitConnectedPollInterval
+			if remaining < sleepFor {
+				sleepFor = remaining
+			}
+			time.Sleep(sleepFor)
+			continue
+		}
+
+		timer := time.NewTimer(remaining)
 		select {
 		case <-ch:
-			return mc.Status() == "connected"
-		case <-time.After(timeout):
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+
+			mc.mu.RLock()
+			readyAfterSignal := mc.status == "connected" && mc.irc != nil
+			sameSignal := mc.connectedCh == ch
+			mc.mu.RUnlock()
+			if readyAfterSignal {
+				return true
+			}
+			if sameSignal {
+				sleepFor := waitConnectedPollInterval
+				if remaining < sleepFor {
+					sleepFor = remaining
+				}
+				time.Sleep(sleepFor)
+			}
+		case <-timer.C:
 			return false
 		}
 	}
+}
 
-	// Fallback: connectedCh not yet populated, poll briefly
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if mc.Status() == "connected" {
-			return true
-		}
-		time.Sleep(waitConnectedPollInterval)
+// sendChannelMsg sends a PRIVMSG to the given channel via the girc client
+// and also logs it to the channel log file (if channel logging is enabled).
+// girc's PRIVMSG handler only fires for incoming messages, so outgoing ones
+// would otherwise not appear in the channel log.
+func (mc *managedConnection) sendChannelMsg(cl *girc.Client, channel, message string) {
+	cl.Cmd.Message(channel, message)
+
+	if mc.manager.chlog != nil && mc.manager.cfg != nil &&
+		mc.manager.cfg.IsChannelLogged(channel) {
+		nick := cl.GetNick()
+		mc.manager.chlog.Log(channel, nick, channellog.KindMessage, message)
 	}
-	return false
+}
+
+// sendChannelGreeting sends a random greeting message to the given channel
+// after a random delay between 2 and 4 seconds. The greeting is picked from
+// the configured greetings list (config.IRC.Greetings); when the list is empty
+// the built-in default "hello everybody" is used.
+//
+// Runs in its own goroutine so the caller (JOIN handler) returns immediately
+// and the IRC event loop is never blocked. The goroutine is also cancelled
+// when the connection is torn down, so it cannot outlive the IRC client it
+// would otherwise send a message through.
+func (mc *managedConnection) sendChannelGreeting(cl *girc.Client, channel string) {
+	if cl == nil {
+		return
+	}
+	go func() {
+		// Random delay between 2 and 4 seconds, inclusive.
+		// crypto/rand is used (instead of math/rand) to be safe under
+		// concurrent calls from multiple goroutines.
+		delaySec, err := randIntRange(2, 4)
+		if err != nil {
+			// Fall back to a fixed 3s delay on the (extremely rare) rand
+			// failure so we never skip the greeting entirely.
+			delaySec = 3
+		}
+		timer := time.NewTimer(time.Duration(delaySec) * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-mc.ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		// Pick the greeting. We do this after the delay so changes to the
+		// configured list take effect for the next channel joined.
+		greeting := mc.manager.cfg.PickGreeting()
+
+		// Re-check context cancellation right before sending, since the
+		// connection could have been torn down while the timer was ticking.
+		select {
+		case <-mc.ctx.Done():
+			return
+		default:
+		}
+
+		sendClient := mc.activeGreetingClient(cl)
+		if sendClient == nil {
+			// The connection changed or dropped while waiting.
+			return
+		}
+
+		mc.manager.logger.Infof("sending greeting to %s on %s: %q", channel, mc.address, greeting)
+		mc.sendChannelMsg(sendClient, channel, greeting)
+	}()
+}
+
+// registerChannelLogHandlers installs PRIVMSG, NOTICE, and private message
+// handlers that write message traffic to per-channel or private log files.
+//
+// All handlers are registered when chlog is non-nil (i.e. channel logging was
+// possible at startup). Each handler reads the *current* config on every event
+// invocation, so runtime config changes via /api/config (e.g. adding channels
+// to channel_log, toggling log_private_messages) take effect immediately
+// without requiring reconnection.
+func (mc *managedConnection) registerChannelLogHandlers(cl *girc.Client) {
+	if mc.manager.chlog == nil || mc.manager.cfg == nil {
+		return
+	}
+
+	// Channel PRIVMSG handler — logs messages to per-channel files.
+	// Reads cfg.IRC.ChannelLog dynamically on each event.
+	privHandler := func(_ *girc.Client, e girc.Event) {
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" || (target[0] != '#' && target[0] != '&') {
+			return
+		}
+		target = xdccirc.NormalizeChannel(target)
+		if !mc.manager.cfg.IsChannelLogged(target) {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.Log(target, sender, channellog.KindMessage, e.Last())
+	}
+
+	// Channel NOTICE handler — logs notices to per-channel files.
+	noticeHandler := func(_ *girc.Client, e girc.Event) {
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" || (target[0] != '#' && target[0] != '&') {
+			return
+		}
+		target = xdccirc.NormalizeChannel(target)
+		if !mc.manager.cfg.IsChannelLogged(target) {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.Log(target, sender, channellog.KindNotice, e.Last())
+	}
+
+	// Private message handler — logs DMs to private.log.
+	// Reads cfg.IRC.LogPrivateMessages dynamically on each event.
+	privMsgHandler := func(_ *girc.Client, e girc.Event) {
+		if !mc.manager.cfg.GetLogPrivateMessages() {
+			return
+		}
+		if len(e.Params) == 0 {
+			return
+		}
+		target := e.Params[0]
+		if target == "" {
+			return
+		}
+		// Skip channel messages — those are handled by privHandler above.
+		if target[0] == '#' || target[0] == '&' {
+			return
+		}
+		sender := ""
+		if e.Source != nil {
+			sender = e.Source.Name
+		}
+		mc.manager.chlog.LogPrivate(mc.address, sender, e.Last())
+	}
+
+	privCUID := cl.Handlers.Add(girc.PRIVMSG, privHandler)
+	mc.manager.logger.Debugf("channellog: registered PRIVMSG handler (CUID=%s) for %s", privCUID, mc.address)
+	noticeCUID := cl.Handlers.Add(girc.NOTICE, noticeHandler)
+	mc.manager.logger.Debugf("channellog: registered NOTICE handler (CUID=%s) for %s", noticeCUID, mc.address)
+	privMsgCUID := cl.Handlers.Add(girc.PRIVMSG, privMsgHandler)
+	mc.manager.logger.Debugf("channellog: registered private message handler (CUID=%s) for %s", privMsgCUID, mc.address)
+}
+
+// randIntRange returns a pseudo-random integer in the inclusive range [lo, hi].
+// Uses crypto/rand so it is safe under concurrent invocation.
+func randIntRange(lo, hi int) (int, error) {
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	span := int64(hi - lo + 1)
+	n, err := rand.Int(rand.Reader, big.NewInt(span))
+	if err != nil {
+		return 0, err
+	}
+	return int(n.Int64()) + lo, nil
 }
 
 // joinChannel sends a JOIN command for the given channel.
 func (mc *managedConnection) joinChannel(channel string) error {
+	if mc.manager.cfg.IsChannelBlacklisted(channel) {
+		return fmt.Errorf("channel %q is blacklisted", channel)
+	}
+
 	mc.mu.RLock()
 	client := mc.irc
 	mc.mu.RUnlock()

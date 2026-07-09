@@ -186,7 +186,7 @@ Six comprehensive tests covering all lifecycle aspects:
 --- PASS: TestConnectionLifecycle_NoRaceOnStatusChecks (5.01s)
 
 PASS
-ok      xdcc-go/internal/ircmanager     5.503s
+ok      xdcc_server/internal/ircmanager     5.503s
 ```
 
 ---

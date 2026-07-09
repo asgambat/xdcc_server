@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // ===========================================================================
@@ -25,8 +25,8 @@ func TestCacheGetSet(t *testing.T) {
 	if len(got.Packs) != 1 {
 		t.Errorf("expected 1 pack, got %d", len(got.Packs))
 	}
-	if got.Packs[0].Filename != "test.mkv" {
-		t.Errorf("expected filename test.mkv, got %s", got.Packs[0].Filename)
+	if got.Packs[0].GetFilename() != "test.mkv" {
+		t.Errorf("expected filename test.mkv, got %s", got.Packs[0].GetFilename())
 	}
 	if !got.isFresh() {
 		t.Errorf("expected entry to be fresh")
@@ -211,5 +211,130 @@ func TestCacheExpiresStale(t *testing.T) {
 	got := c.get(context.Background(), "test", "p1")
 	if got != nil && !got.isFresh() && !got.isStale() {
 		t.Log("cache entry is fully expired — cache should not return expired entries")
+	}
+}
+
+// ===========================================================================
+// cacheEntry.isStale with expired entry
+// ===========================================================================
+
+func TestCacheEntryIsStaleExpired(t *testing.T) {
+	now := time.Now()
+	e := &cacheEntry{
+		FetchedAt: now.Add(-2 * time.Hour),
+		ExpiresAt: now.Add(-1 * time.Hour),
+		StaleAt:   now.Add(-30 * time.Minute),
+	}
+
+	if e.isFresh() {
+		t.Error("expected entry to NOT be fresh (expired)")
+	}
+	if e.isStale() {
+		t.Error("expected entry to NOT be within stale TTL (fully expired)")
+	}
+}
+
+// ===========================================================================
+// cacheEntry.isStale with entry still within stale window
+// ===========================================================================
+
+func TestCacheEntryIsStaleNotExpired(t *testing.T) {
+	now := time.Now()
+	e := &cacheEntry{
+		FetchedAt: now.Add(-45 * time.Minute),
+		ExpiresAt: now.Add(-15 * time.Minute), // fresh TTL expired
+		StaleAt:   now.Add(15 * time.Minute),  // but still within stale
+	}
+
+	if e.isFresh() {
+		t.Error("expected entry to NOT be fresh (fresh TTL expired)")
+	}
+	if !e.isStale() {
+		t.Error("expected entry to still be within stale TTL")
+	}
+}
+
+// ===========================================================================
+// getStale
+// ===========================================================================
+
+func TestGetStale(t *testing.T) {
+	c := newSearchCache(nil, true, 10*time.Minute, 1*time.Hour)
+
+	c.set(context.Background(), "q1", "p1", []*entities.XDCCPack{mkPack("a.mkv", 100, "Bot")})
+	c.set(context.Background(), "q1", "p2", []*entities.XDCCPack{mkPack("b.mkv", 200, "Bot")})
+	c.set(context.Background(), "q2", "p1", []*entities.XDCCPack{mkPack("c.mkv", 300, "Bot")})
+
+	stale := c.getStale(context.Background(), "q1")
+	if stale == nil {
+		t.Fatal("expected stale entries for q1")
+	}
+	if len(stale) != 2 {
+		t.Errorf("expected 2 stale entries for q1, got %d", len(stale))
+	}
+
+	// Fresh entries are also within stale window, so they should appear
+	if _, ok := stale["p1"]; !ok {
+		t.Error("expected p1 in stale results")
+	}
+	if _, ok := stale["p2"]; !ok {
+		t.Error("expected p2 in stale results")
+	}
+}
+
+func TestGetStale_NonExistent(t *testing.T) {
+	c := newSearchCache(nil, true, 10*time.Minute, 1*time.Hour)
+
+	stale := c.getStale(context.Background(), "nonexistent")
+	if stale != nil {
+		t.Errorf("expected nil for nonexistent query, got %+v", stale)
+	}
+}
+
+func TestCacheSet_Overwrites(t *testing.T) {
+	// Same query+provider, set twice — second should override first
+	c := newSearchCache(nil, true, 10*time.Minute, 1*time.Hour)
+
+	c.set(context.Background(), "q", "p", []*entities.XDCCPack{mkPack("old.mkv", 100, "Bot")})
+	c.set(context.Background(), "q", "p", []*entities.XDCCPack{mkPack("new.mkv", 200, "Bot")})
+
+	entry := c.get(context.Background(), "q", "p")
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	if entry.Packs[0].GetFilename() != "new.mkv" {
+		t.Errorf("expected 'new.mkv' after overwrite, got %s", entry.Packs[0].GetFilename())
+	}
+}
+
+// ===========================================================================
+// newSearchCache — nil store edge cases
+// ===========================================================================
+
+func TestNewSearchCache_NilStore(t *testing.T) {
+	// nil store → enabled stays false even when enabled=true
+	c := newSearchCache(nil, true, 5*time.Minute, 30*time.Minute)
+	if c.enabled {
+		t.Error("expected enabled=false when store is nil (even with enabled=true param)")
+	}
+
+	// enabled=false → disabled regardless of store
+	c2 := newSearchCache(nil, false, 5*time.Minute, 30*time.Minute)
+	if c2.enabled {
+		t.Error("expected enabled=false when enabled param is false")
+	}
+}
+
+func TestNewSearchCache_Defaults(t *testing.T) {
+	c := newSearchCache(nil, true, 5*time.Minute, 30*time.Minute)
+
+	if c.freshTTL != 5*time.Minute {
+		t.Errorf("expected freshTTL=5m, got %v", c.freshTTL)
+	}
+	if c.staleTTL != 30*time.Minute {
+		t.Errorf("expected staleTTL=30m, got %v", c.staleTTL)
+	}
+	if c.entries == nil {
+		t.Error("expected entries map to be initialized")
 	}
 }

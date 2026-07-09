@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/ircmanager"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/ircmanager"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================
@@ -29,6 +29,9 @@ func (m *mockIRCManager) LeaveChannel(serverID int64, channel string) error { re
 func (m *mockIRCManager) GetChannels(serverID int64) []store.ChannelRecord  { return nil }
 func (m *mockIRCManager) GetChannelTopic(serverID int64, channel string) (string, error) {
 	return "", nil
+}
+func (m *mockIRCManager) SendChannelMessage(serverID int64, channel, message string) error {
+	return nil
 }
 func (m *mockIRCManager) Subscribe() chan ircmanager.Event     { return nil }
 func (m *mockIRCManager) Unsubscribe(ch chan ircmanager.Event) {}
@@ -82,18 +85,20 @@ func TestWhoisBotOnServerRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Simulate RPL_WHOISUSER (311) — bot found
+		// girc includes the recipient as Params[0]; Params[1] is the target.
 		client.RunHandlers(&girc.Event{
 			Command: "311",
-			Params:  []string{bot, "user", "host", "Test User"},
+			Params:  []string{"ourNick", bot, "user", "host", "*"},
 		})
 	}()
 
 	go func() {
 		defer wg.Done()
 		// Simulate ERR_NOSUCHNICK (401) — bot not found
+		// girc includes the recipient as Params[0]; Params[1] is the target.
 		client.RunHandlers(&girc.Event{
 			Command: "401",
-			Params:  []string{bot, "No such nick"},
+			Params:  []string{"ourNick", bot},
 		})
 	}()
 
@@ -144,9 +149,10 @@ func TestWhoisBotOnServerConcurrentCallbacks(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// girc includes the recipient as Params[0]; Params[1] is the target.
 			client.RunHandlers(&girc.Event{
 				Command: "311",
-				Params:  []string{bot, "user", "host", "Test User"},
+				Params:  []string{"ourNick", bot, "user", "host", "*"},
 			})
 		}()
 	}

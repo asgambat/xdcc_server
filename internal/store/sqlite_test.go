@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // newTestStore creates a SQLiteStore backed by a copy of the pre-migrated
@@ -36,33 +38,22 @@ func newTestStore(tb testing.TB) *SQLiteStore {
 	db.SetMaxOpenConns(3)
 	db.SetMaxIdleConns(3)
 
-	// Foreign keys are a connection-level setting; re-enable on the new connection.
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+	// Batch all PRAGMAs into a single Exec to reduce round-trips.
+	// foreign_keys is a connection-level setting; synchronous=OFF and
+	// journal_mode=MEMORY disable durability guarantees (not needed in tests).
+	if _, err := db.Exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=OFF; PRAGMA journal_mode=MEMORY"); err != nil {
 		db.Close()
-		tb.Fatalf("PRAGMA foreign_keys: %v", err)
-	}
-
-	// Speed up tests by disabling durability guarantees (not needed in tests).
-	// synchronous=OFF avoids fsync on every write; journal_mode=MEMORY avoids
-	// flushing the WAL/journal file to disk.
-	if _, err := db.Exec("PRAGMA synchronous=OFF"); err != nil {
-		db.Close()
-		tb.Fatalf("PRAGMA synchronous: %v", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode=MEMORY"); err != nil {
-		db.Close()
-		tb.Fatalf("PRAGMA journal_mode: %v", err)
+		tb.Fatalf("setting PRAGMAs: %v", err)
 	}
 
 	testLog := logging.New(logging.LevelDebug, "", 0)
-	return &SQLiteStore{db: db, dbPath: dbPath, log: testLog}
-}
-
-func closeStore(tb testing.TB, s *SQLiteStore) {
-	tb.Helper()
-	if err := s.Close(); err != nil {
-		tb.Errorf("Close: %v", err)
-	}
+	s := &SQLiteStore{db: db, dbPath: dbPath, log: testLog}
+	tb.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			tb.Errorf("Close: %v", err)
+		}
+	})
+	return s
 }
 
 // ===========================================================================
@@ -70,8 +61,8 @@ func closeStore(tb testing.TB, s *SQLiteStore) {
 // ===========================================================================
 
 func TestAddServer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, err := s.AddServer(context.Background(), ServerRecord{
 		Address:     "irc.test.net",
@@ -88,8 +79,8 @@ func TestAddServer(t *testing.T) {
 }
 
 func TestGetServer_NotFound(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srv, err := s.GetServer(context.Background(), 999)
 	if err != nil {
@@ -101,8 +92,8 @@ func TestGetServer_NotFound(t *testing.T) {
 }
 
 func TestGetServer_Found(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.example.com", Port: 6667, Status: "disconnected"})
 	srv, err := s.GetServer(context.Background(), id)
@@ -124,8 +115,8 @@ func TestGetServer_Found(t *testing.T) {
 }
 
 func TestIncrementServerRetry(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.retry.net", Port: 6667, Status: "connected"})
 	err := s.IncrementServerRetry(context.Background(), id)
@@ -147,8 +138,8 @@ func TestIncrementServerRetry(t *testing.T) {
 // ===========================================================================
 
 func TestAddChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.chan.net", Port: 6667})
 	chID, err := s.AddChannel(context.Background(), ChannelRecord{
@@ -165,8 +156,8 @@ func TestAddChannel(t *testing.T) {
 }
 
 func TestGetChannelsByServer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.chan2.net", Port: 6667})
 	_, _ = s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#alpha"})
@@ -188,8 +179,8 @@ func TestGetChannelsByServer(t *testing.T) {
 }
 
 func TestGetChannelsByServerAndName(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.channelookup.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#lookup"})
@@ -213,8 +204,8 @@ func TestGetChannelsByServerAndName(t *testing.T) {
 }
 
 func TestUpdateChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.updchan.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#old", AutoJoin: true})
@@ -234,8 +225,8 @@ func TestUpdateChannel(t *testing.T) {
 }
 
 func TestSetChannelJoined(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.joined.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#joinedtest"})
@@ -248,8 +239,8 @@ func TestSetChannelJoined(t *testing.T) {
 }
 
 func TestDeleteChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.delchan.net", Port: 6667})
 	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#delme"})
@@ -262,8 +253,8 @@ func TestDeleteChannel(t *testing.T) {
 }
 
 func TestGetAutoJoinChannels(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Add a server with auto_connect=true
 	srvID, _ := s.AddServer(context.Background(), ServerRecord{
@@ -295,8 +286,8 @@ func TestGetAutoJoinChannels(t *testing.T) {
 // ===========================================================================
 
 func TestEnqueueAndGetDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, err := s.EnqueueDownload(context.Background(), DownloadRecord{
 		PackMessage:   "xdcc send #1",
@@ -326,8 +317,8 @@ func TestEnqueueAndGetDownload(t *testing.T) {
 }
 
 func TestGetQueue(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Enqueue 3 downloads
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot1", ServerAddress: "irc.t.net", Channel: "#a", Filename: "a.mkv", FileSize: 100})
@@ -344,8 +335,8 @@ func TestGetQueue(t *testing.T) {
 }
 
 func TestGetQueueByChannel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot1", ServerAddress: "irc.t.net", Channel: "#xdcc", Filename: "a.mkv", FileSize: 100})
 	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{Bot: "Bot2", ServerAddress: "irc.t.net", Channel: "#other", Filename: "b.mkv", FileSize: 100})
@@ -363,8 +354,8 @@ func TestGetQueueByChannel(t *testing.T) {
 }
 
 func TestMarkDownloadStarted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 100,
@@ -384,8 +375,8 @@ func TestMarkDownloadStarted(t *testing.T) {
 }
 
 func TestUpdateDownloadProgress(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -402,8 +393,8 @@ func TestUpdateDownloadProgress(t *testing.T) {
 }
 
 func TestMarkDownloadCompleted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -426,8 +417,8 @@ func TestMarkDownloadCompleted(t *testing.T) {
 }
 
 func TestMarkDownloadFailed(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -447,8 +438,8 @@ func TestMarkDownloadFailed(t *testing.T) {
 }
 
 func TestMarkDownloadSkipped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -467,8 +458,8 @@ func TestMarkDownloadSkipped(t *testing.T) {
 }
 
 func TestMarkDownloadPaused(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -487,8 +478,8 @@ func TestMarkDownloadPaused(t *testing.T) {
 }
 
 func TestMarkDownloadPaused_OnlyQueuedOrDownloading(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -508,8 +499,8 @@ func TestMarkDownloadPaused_OnlyQueuedOrDownloading(t *testing.T) {
 }
 
 func TestRetryDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -534,8 +525,8 @@ func TestRetryDownload(t *testing.T) {
 }
 
 func TestDeleteDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -549,8 +540,8 @@ func TestDeleteDownload(t *testing.T) {
 }
 
 func TestSetDownloadPriority(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -568,8 +559,8 @@ func TestSetDownloadPriority(t *testing.T) {
 }
 
 func TestBulkActionDownloads(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id1, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "a.mkv", FileSize: 100,
@@ -603,8 +594,8 @@ func TestBulkActionDownloads(t *testing.T) {
 }
 
 func TestBulkActionUnknownAction(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 100,
@@ -620,8 +611,8 @@ func TestBulkActionUnknownAction(t *testing.T) {
 // ===========================================================================
 
 func TestSetAndGetSearchCache(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	entry := SearchCacheEntry{
@@ -651,8 +642,8 @@ func TestSetAndGetSearchCache(t *testing.T) {
 }
 
 func TestGetSearchCache_Missing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	entry, err := s.GetSearchCache(context.Background(), "nonexistent", "nibl")
 	if err != nil {
@@ -664,8 +655,8 @@ func TestGetSearchCache_Missing(t *testing.T) {
 }
 
 func TestDeleteExpiredSearchCache(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	entry := SearchCacheEntry{
@@ -690,8 +681,8 @@ func TestDeleteExpiredSearchCache(t *testing.T) {
 }
 
 func TestGetSearchCacheByQuery(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	// Insert entries from multiple providers for same query
@@ -743,8 +734,8 @@ func TestGetSearchCacheByQuery(t *testing.T) {
 }
 
 func TestGetSearchCacheByQuery_Empty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	entries, err := s.GetSearchCacheByQuery(context.Background(), "nonexistent")
 	if err != nil {
@@ -759,8 +750,8 @@ func TestGetSearchCacheByQuery_Empty(t *testing.T) {
 // does not deadlock even with limited connections. This is the regression test
 // for the critical bug where getFresh() used nested queries.
 func TestGetSearchCacheByQuery_NoDeadlock(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	// Populate cache
@@ -804,8 +795,8 @@ func TestGetSearchCacheByQuery_NoDeadlock(t *testing.T) {
 // ===========================================================================
 
 func TestAddAndGetSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	p := SearchPreset{
 		Name:        "Anime Weekly",
@@ -835,8 +826,8 @@ func TestAddAndGetSearchPreset(t *testing.T) {
 }
 
 func TestListSearchPresets(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddSearchPreset(context.Background(), SearchPreset{Name: "Preset A", Query: "query a"})
 	_, _ = s.AddSearchPreset(context.Background(), SearchPreset{Name: "Preset B", Query: "query b"})
@@ -851,8 +842,8 @@ func TestListSearchPresets(t *testing.T) {
 }
 
 func TestUpdateSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "Old Name", Query: "old query"})
 	err := s.UpdateSearchPreset(context.Background(), SearchPreset{ID: id, Name: "New Name", Query: "new query", FiltersJSON: "{}"})
@@ -867,8 +858,8 @@ func TestUpdateSearchPreset(t *testing.T) {
 }
 
 func TestDeleteSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "Del Me", Query: "delete me"})
 	_ = s.DeleteSearchPreset(context.Background(), id)
@@ -880,8 +871,8 @@ func TestDeleteSearchPreset(t *testing.T) {
 }
 
 func TestSetDefaultSearchPreset(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id1, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "A", Query: "a", IsDefault: true})
 	id2, _ := s.AddSearchPreset(context.Background(), SearchPreset{Name: "B", Query: "b"})
@@ -906,8 +897,8 @@ func TestSetDefaultSearchPreset(t *testing.T) {
 // ===========================================================================
 
 func TestAddAndGetWatchlist(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	w := Watchlist{
 		Name:        "My Watchlist",
@@ -938,8 +929,8 @@ func TestAddAndGetWatchlist(t *testing.T) {
 }
 
 func TestListWatchlists(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "WL1", Query: "query1"})
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "WL2", Query: "query2"})
@@ -954,8 +945,8 @@ func TestListWatchlists(t *testing.T) {
 }
 
 func TestDeleteWatchlist(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddWatchlist(context.Background(), Watchlist{Name: "Del", Query: "delete"})
 	_ = s.DeleteWatchlist(context.Background(), id)
@@ -967,8 +958,8 @@ func TestDeleteWatchlist(t *testing.T) {
 }
 
 func TestSetWatchlistChecked(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.AddWatchlist(context.Background(), Watchlist{Name: "Check", Query: "check"})
 	err := s.SetWatchlistChecked(context.Background(), id, "abc123", `[{"filename":"test.mkv","size":1000}]`)
@@ -989,8 +980,8 @@ func TestSetWatchlistChecked(t *testing.T) {
 }
 
 func TestGetEnabledWatchlists(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "Enabled1", Query: "q1", Enabled: true})
 	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "Disabled", Query: "q2", Enabled: false})
@@ -1010,8 +1001,8 @@ func TestGetEnabledWatchlists(t *testing.T) {
 // ===========================================================================
 
 func TestRecordAndGetProviderStats(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	stats := ProviderStats{
@@ -1047,8 +1038,8 @@ func TestRecordAndGetProviderStats(t *testing.T) {
 }
 
 func TestGetAllProviderStats(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	now := time.Now()
 	_ = s.RecordProviderStats(context.Background(), ProviderStats{
@@ -1074,8 +1065,8 @@ func TestGetAllProviderStats(t *testing.T) {
 // ===========================================================================
 
 func TestCurrentSchemaVersion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	v, err := s.CurrentSchemaVersion(context.Background())
 	if err != nil {
@@ -1087,12 +1078,54 @@ func TestCurrentSchemaVersion(t *testing.T) {
 }
 
 // ===========================================================================
+// Migration smoke test
+// ===========================================================================
+
+func TestMigrations_DownloadsIndexes(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	rows, err := s.DB().QueryContext(context.Background(),
+		`SELECT name FROM sqlite_master
+		 WHERE type='index' AND tbl_name='downloads'
+		 ORDER BY name`)
+	if err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	defer rows.Close()
+
+	want := map[string]bool{
+		"idx_downloads_status":         false,
+		"idx_downloads_channel":        false,
+		"idx_downloads_bot_server":     false,
+		"idx_downloads_status_channel": false,
+		"idx_downloads_filename":       false,
+		"idx_downloads_bot":            false,
+		"idx_downloads_completed_at":   false,
+		"idx_downloads_lower_filename": false,
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		delete(want, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	for name := range want {
+		t.Errorf("missing index: %s", name)
+	}
+}
+
+// ===========================================================================
 // Export / Import
 // ===========================================================================
 
 func TestExportData_Empty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	exp, err := s.ExportData(context.Background())
 	if err != nil {
@@ -1107,8 +1140,8 @@ func TestExportData_Empty(t *testing.T) {
 }
 
 func TestExportImportData(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	// Add some data
 	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.export.net", Port: 6667, Status: "connected"})
@@ -1128,7 +1161,6 @@ func TestExportImportData(t *testing.T) {
 
 	// Import into fresh store
 	s2 := newTestStore(t)
-	defer closeStore(t, s2)
 
 	err = s2.ImportData(context.Background(), exp)
 	if err != nil {
@@ -1155,8 +1187,8 @@ func TestExportImportData(t *testing.T) {
 // ===========================================================================
 
 func TestGetDownloadByBotMessage(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "MyBot", ServerAddress: "irc.t.net", Channel: "#x",
@@ -1186,8 +1218,8 @@ func TestGetDownloadByBotMessage(t *testing.T) {
 // ===========================================================================
 
 func TestRequeueDownload(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
-	defer closeStore(t, s)
 
 	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
 		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "f.mkv", FileSize: 1000,
@@ -1203,4 +1235,842 @@ func TestRequeueDownload(t *testing.T) {
 	if d.Status != DownloadStatusQueued {
 		t.Errorf("expected status 'queued', got %s", d.Status)
 	}
+}
+
+// ===========================================================================
+// Helper functions
+// ===========================================================================
+
+func TestBoolToInt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   bool
+		want int
+	}{
+		{true, 1},
+		{false, 0},
+	}
+	for _, tt := range tests {
+		got := boolToInt(tt.in)
+		if got != tt.want {
+			t.Errorf("boolToInt(%v) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
+
+// ===========================================================================
+// nullTime.Scan
+// ===========================================================================
+
+func TestNullTimeScan(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   any
+		want    time.Time
+		wantOk  bool
+		wantErr bool
+	}{
+		{"nil", nil, time.Time{}, false, false},
+		{"valid datetime", "2024-01-15 10:30:45", time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC), true, false},
+		{"invalid format", "2024-01-15T10:30:45Z", time.Time{}, false, true},
+		{"empty string", "", time.Time{}, false, true},
+		{"wrong type", 12345, time.Time{}, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var nt nullTime
+			err := nt.Scan(tt.value)
+			if tt.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if nt.Valid != tt.wantOk {
+				t.Errorf("Valid: got %v, want %v", nt.Valid, tt.wantOk)
+			}
+			if nt.Valid && !nt.Time.Equal(tt.want) {
+				t.Errorf("Time: got %v, want %v", nt.Time, tt.want)
+			}
+		})
+	}
+}
+
+func TestNullTimeScan_ZeroTime(t *testing.T) {
+	t.Parallel()
+	var nt nullTime
+	if err := nt.Scan(nil); err != nil {
+		t.Fatalf("Scan(nil): %v", err)
+	}
+	if nt.Valid {
+		t.Error("expected Valid=false after nil scan")
+	}
+	if !nt.Time.IsZero() {
+		t.Errorf("expected zero time, got %v", nt.Time)
+	}
+}
+
+// ===========================================================================
+// UpdateChannelAvgSpeed
+// ===========================================================================
+
+func TestUpdateChannelAvgSpeed(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.speed.net", Port: 6667})
+	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#speedtest"})
+
+	// First update: avg_speed_bps=0 → EMA cold-start → use value directly
+	err := s.UpdateChannelAvgSpeed(context.Background(), "irc.speed.net", "#speedtest", 1024.0)
+	if err != nil {
+		t.Fatalf("UpdateChannelAvgSpeed (first): %v", err)
+	}
+
+	ch, _ := s.GetChannelsByServerAndName(context.Background(), srvID, "#speedtest")
+	if ch.AvgSpeedBPS != 1024.0 {
+		t.Errorf("expected AvgSpeedBPS=1024 after first update (cold start), got %f", ch.AvgSpeedBPS)
+	}
+
+	// Second update: avg_speed_bps=1024 → EMA = 1024*0.7 + 2048*0.3 = 716.8 + 614.4 = 1331.2
+	err = s.UpdateChannelAvgSpeed(context.Background(), "irc.speed.net", "#speedtest", 2048.0)
+	if err != nil {
+		t.Fatalf("UpdateChannelAvgSpeed (second): %v", err)
+	}
+
+	ch, _ = s.GetChannelsByServerAndName(context.Background(), srvID, "#speedtest")
+	// 1024*0.7 + 2048*0.3 = 716.8 + 614.4 = 1331.2
+	if ch.AvgSpeedBPS < 1331.0 || ch.AvgSpeedBPS > 1332.0 {
+		t.Errorf("expected AvgSpeedBPS≈1331.2 after EMA update, got %f", ch.AvgSpeedBPS)
+	}
+
+	_ = chID
+}
+
+// ===========================================================================
+// IncrementDownloadRetry
+// ===========================================================================
+
+func TestIncrementDownloadRetry(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "f.mkv", FileSize: 100,
+	})
+
+	for i := 1; i <= 3; i++ {
+		err := s.IncrementDownloadRetry(context.Background(), id)
+		if err != nil {
+			t.Fatalf("IncrementDownloadRetry (iteration %d): %v", i, err)
+		}
+		d, _ := s.GetDownload(context.Background(), id)
+		if d.RetryCount != i {
+			t.Errorf("expected retry_count=%d, got %d", i, d.RetryCount)
+		}
+	}
+}
+
+// ===========================================================================
+// UpdateDownloadMetadata
+// ===========================================================================
+
+func TestUpdateDownloadMetadata_Filename(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "original.mkv", FileSize: 100,
+	})
+
+	err := s.UpdateDownloadMetadata(context.Background(), id, "updated.mkv", 0)
+	if err != nil {
+		t.Fatalf("UpdateDownloadMetadata: %v", err)
+	}
+
+	d, _ := s.GetDownload(context.Background(), id)
+	if d.Filename != "updated.mkv" {
+		t.Errorf("expected filename 'updated.mkv', got %s", d.Filename)
+	}
+	if d.FileSize != 100 {
+		t.Errorf("expected file_size 100 unchanged, got %d", d.FileSize)
+	}
+}
+
+func TestUpdateDownloadMetadata_FileSize(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "f.mkv", FileSize: 100,
+	})
+
+	err := s.UpdateDownloadMetadata(context.Background(), id, "", 5000)
+	if err != nil {
+		t.Fatalf("UpdateDownloadMetadata: %v", err)
+	}
+
+	d, _ := s.GetDownload(context.Background(), id)
+	if d.Filename != "f.mkv" {
+		t.Errorf("expected filename unchanged 'f.mkv', got %s", d.Filename)
+	}
+	if d.FileSize != 5000 {
+		t.Errorf("expected file_size 5000, got %d", d.FileSize)
+	}
+}
+
+func TestUpdateDownloadMetadata_Both(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "old.mkv", FileSize: 100,
+	})
+
+	err := s.UpdateDownloadMetadata(context.Background(), id, "new.mkv", 9999)
+	if err != nil {
+		t.Fatalf("UpdateDownloadMetadata: %v", err)
+	}
+
+	d, _ := s.GetDownload(context.Background(), id)
+	if d.Filename != "new.mkv" {
+		t.Errorf("expected filename 'new.mkv', got %s", d.Filename)
+	}
+	if d.FileSize != 9999 {
+		t.Errorf("expected file_size 9999, got %d", d.FileSize)
+	}
+}
+
+func TestUpdateDownloadMetadata_Noop(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "keep.mkv", FileSize: 500,
+	})
+
+	// Empty string + size 0 should leave both unchanged
+	err := s.UpdateDownloadMetadata(context.Background(), id, "", 0)
+	if err != nil {
+		t.Fatalf("UpdateDownloadMetadata: %v", err)
+	}
+
+	d, _ := s.GetDownload(context.Background(), id)
+	if d.Filename != "keep.mkv" {
+		t.Errorf("expected filename unchanged, got %s", d.Filename)
+	}
+	if d.FileSize != 500 {
+		t.Errorf("expected file_size unchanged, got %d", d.FileSize)
+	}
+}
+
+// ===========================================================================
+// CleanupSearchCache
+// ===========================================================================
+
+func TestCleanupSearchCache(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	now := time.Now()
+
+	// Insert a stale entry (stale in the past)
+	staleEntry := SearchCacheEntry{
+		QueryKey:       "stale",
+		Provider:       "test",
+		PayloadJSON:    "[]",
+		FetchedAt:      now.Add(-48 * time.Hour),
+		ExpiresAt:      now.Add(-24 * time.Hour),
+		StaleExpiresAt: now.Add(-1 * time.Hour),
+	}
+	_ = s.SetSearchCache(context.Background(), staleEntry)
+
+	// Insert a fresh entry
+	freshEntry := SearchCacheEntry{
+		QueryKey:       "fresh",
+		Provider:       "test",
+		PayloadJSON:    "[]",
+		FetchedAt:      now,
+		ExpiresAt:      now.Add(time.Hour),
+		StaleExpiresAt: now.Add(24 * time.Hour),
+	}
+	_ = s.SetSearchCache(context.Background(), freshEntry)
+
+	deleted, err := s.CleanupSearchCache(context.Background())
+	if err != nil {
+		t.Fatalf("CleanupSearchCache: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted entry, got %d", deleted)
+	}
+
+	// Stale should be gone
+	stale, _ := s.GetSearchCache(context.Background(), "stale", "test")
+	if stale != nil {
+		t.Error("stale entry should have been deleted")
+	}
+
+	// Fresh should remain
+	fresh, _ := s.GetSearchCache(context.Background(), "fresh", "test")
+	if fresh == nil {
+		t.Error("fresh entry should still exist")
+	}
+}
+
+// ===========================================================================
+// ResetAllServerStatuses
+// ===========================================================================
+
+func TestResetAllServerStatuses(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	// Add servers with different statuses
+	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.one.net", Port: 6667, Status: "connected"})
+	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.two.net", Port: 6697, Status: "reconnecting"})
+	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.three.net", Port: 6667, Status: "disconnected"})
+
+	err := s.ResetAllServerStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("ResetAllServerStatuses: %v", err)
+	}
+
+	servers, _ := s.ListServers(context.Background())
+	for _, srv := range servers {
+		if srv.Status != "disconnected" {
+			t.Errorf("server %s: expected status 'disconnected', got %s", srv.Address, srv.Status)
+		}
+	}
+}
+
+// ===========================================================================
+// SetServerStatus / SetServerConnected
+// ===========================================================================
+
+func TestSetServerStatus(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.status.net", Port: 6667, Status: "disconnected"})
+
+	err := s.SetServerStatus(context.Background(), id, "connected")
+	if err != nil {
+		t.Fatalf("SetServerStatus: %v", err)
+	}
+
+	srv, _ := s.GetServer(context.Background(), id)
+	if srv.Status != "connected" {
+		t.Errorf("expected status 'connected', got %s", srv.Status)
+	}
+}
+
+func TestSetServerConnected(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.conn.net", Port: 6667, Status: "reconnecting", RetryCount: 5})
+
+	err := s.SetServerConnected(context.Background(), id)
+	if err != nil {
+		t.Fatalf("SetServerConnected: %v", err)
+	}
+
+	srv, _ := s.GetServer(context.Background(), id)
+	if srv.Status != "connected" {
+		t.Errorf("expected status 'connected', got %s", srv.Status)
+	}
+	if srv.RetryCount != 0 {
+		t.Errorf("expected retry_count 0 after connected, got %d", srv.RetryCount)
+	}
+	if srv.LastConnectedAt == nil {
+		t.Error("expected last_connected_at to be set")
+	}
+}
+
+// ===========================================================================
+// GetTotalDownloadedBytes
+// ===========================================================================
+
+func TestGetTotalDownloadedBytes_Empty(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	total, err := s.GetTotalDownloadedBytes(context.Background())
+	if err != nil {
+		t.Fatalf("GetTotalDownloadedBytes: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("expected 0, got %d", total)
+	}
+}
+
+func TestGetTotalDownloadedBytes_WithProgress(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id1, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "a.mkv", FileSize: 1000,
+	})
+	_ = s.UpdateDownloadProgress(context.Background(), id1, 500, 0)
+
+	id2, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x", Filename: "b.mkv", FileSize: 2000,
+	})
+	_ = s.UpdateDownloadProgress(context.Background(), id2, 300, 0)
+
+	total, err := s.GetTotalDownloadedBytes(context.Background())
+	if err != nil {
+		t.Fatalf("GetTotalDownloadedBytes: %v", err)
+	}
+	if total != 800 {
+		t.Errorf("expected 800 (500+300), got %d", total)
+	}
+}
+
+// ===========================================================================
+// FindDuplicateDownload
+// ===========================================================================
+
+func TestFindDuplicateDownload_Found(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "DupBot", ServerAddress: "irc.dup.net", Channel: "#xdcc",
+		PackMessage: "xdcc send #42", Filename: "dup.mkv", FileSize: 1000,
+	})
+
+	dup, err := s.FindDuplicateDownload(context.Background(), "DupBot", "irc.dup.net", 42)
+	if err != nil {
+		t.Fatalf("FindDuplicateDownload: %v", err)
+	}
+	if dup == nil {
+		t.Fatal("expected to find duplicate, got nil")
+	}
+	if dup.Bot != "DupBot" {
+		t.Errorf("expected bot DupBot, got %s", dup.Bot)
+	}
+}
+
+func TestFindDuplicateDownload_NotFound(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	dup, err := s.FindDuplicateDownload(context.Background(), "NoBot", "irc.nope.net", 1)
+	if err != nil {
+		t.Fatalf("FindDuplicateDownload: %v", err)
+	}
+	if dup != nil {
+		t.Errorf("expected nil for non-existent duplicate, got %+v", dup)
+	}
+}
+
+func TestFindDuplicateDownload_DifferentServer(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	_, _ = s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "GlobalBot", ServerAddress: "irc.one.net", Channel: "#x",
+		PackMessage: "xdcc send #1", Filename: "f.mkv", FileSize: 100,
+	})
+
+	// Same bot, same pack number, but different server — should NOT match
+	dup, _ := s.FindDuplicateDownload(context.Background(), "GlobalBot", "irc.two.net", 1)
+	if dup != nil {
+		t.Errorf("expected nil for different server, got %+v", dup)
+	}
+}
+
+// ===========================================================================
+// FilenamesExist
+// ===========================================================================
+
+func TestFilenamesExist_EmptyInput(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	result, err := s.FilenamesExist(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("FilenamesExist(nil): %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(result))
+	}
+
+	result, err = s.FilenamesExist(context.Background(), []string{})
+	if err != nil {
+		t.Fatalf("FilenamesExist([]): %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(result))
+	}
+}
+
+func TestFilenamesExist_Found(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "exists.mkv", FileSize: 100,
+	})
+	_ = s.MarkDownloadCompleted(context.Background(), id, "", 0)
+
+	result, err := s.FilenamesExist(context.Background(), []string{"exists.mkv", "missing.mkv"})
+	if err != nil {
+		t.Fatalf("FilenamesExist: %v", err)
+	}
+	if !result["exists.mkv"] {
+		t.Error("expected exists.mkv to be found")
+	}
+	if result["missing.mkv"] {
+		t.Error("expected missing.mkv to not be found")
+	}
+}
+
+func TestFilenamesExist_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "Video.MKV", FileSize: 100,
+	})
+	_ = s.MarkDownloadCompleted(context.Background(), id, "", 0)
+
+	result, err := s.FilenamesExist(context.Background(), []string{"video.mkv"})
+	if err != nil {
+		t.Fatalf("FilenamesExist: %v", err)
+	}
+	if !result["video.mkv"] {
+		t.Error("expected case-insensitive match for video.mkv")
+	}
+}
+
+func TestFilenamesExist_Deduplication(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.EnqueueDownload(context.Background(), DownloadRecord{
+		Bot: "Bot", ServerAddress: "irc.t.net", Channel: "#x",
+		Filename: "dup.mkv", FileSize: 100,
+	})
+	_ = s.MarkDownloadCompleted(context.Background(), id, "", 0)
+
+	// Send duplicate filenames — should handle gracefully
+	result, err := s.FilenamesExist(context.Background(), []string{"dup.mkv", "dup.mkv", "other.mkv"})
+	if err != nil {
+		t.Fatalf("FilenamesExist with duplicates: %v", err)
+	}
+	if !result["dup.mkv"] {
+		t.Error("expected dup.mkv to be found")
+	}
+	if result["other.mkv"] {
+		t.Error("expected other.mkv to not be found")
+	}
+}
+
+// ===========================================================================
+// UpdateChannelTopic
+// ===========================================================================
+
+func TestUpdateChannelTopic(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	srvID, _ := s.AddServer(context.Background(), ServerRecord{Address: "irc.topic.net", Port: 6667})
+	chID, _ := s.AddChannel(context.Background(), ChannelRecord{ServerID: srvID, Name: "#topictest", Topic: "Welcome"})
+
+	err := s.UpdateChannelTopic(context.Background(), chID, "Updated topic here")
+	if err != nil {
+		t.Fatalf("UpdateChannelTopic: %v", err)
+	}
+
+	ch, _ := s.GetChannelsByServerAndName(context.Background(), srvID, "#topictest")
+	if ch.Topic != "Updated topic here" {
+		t.Errorf("expected topic 'Updated topic here', got %s", ch.Topic)
+	}
+}
+
+// ===========================================================================
+// SetWatchlistNotified
+// ===========================================================================
+
+func TestSetWatchlistNotified(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	id, _ := s.AddWatchlist(context.Background(), Watchlist{Name: "NotifyTest", Query: "test", Enabled: true})
+
+	err := s.SetWatchlistNotified(context.Background(), id)
+	if err != nil {
+		t.Fatalf("SetWatchlistNotified: %v", err)
+	}
+
+	w, _ := s.GetWatchlist(context.Background(), id)
+	if w.LastNotifiedAt == nil {
+		t.Error("expected last_notified_at to be set")
+	}
+}
+
+// ===========================================================================
+// CreateBackup
+// ===========================================================================
+
+func TestCreateBackup(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	// Must be in a writable temp dir (backup path must be absolute)
+	backupPath, err := s.CreateBackup(context.Background())
+	if err != nil {
+		t.Fatalf("CreateBackup: %v", err)
+	}
+
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		t.Errorf("backup file should exist at %s", backupPath)
+	}
+	if !strings.HasPrefix(backupPath, s.dbPath+".backup.") {
+		t.Errorf("unexpected backup path format: %s", backupPath)
+	}
+}
+
+// ===========================================================================
+// ExportToFile / ImportFromFile
+// ===========================================================================
+
+func TestExportToFile_ImportFromFile(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	// Add some data
+	_, _ = s.AddServer(context.Background(), ServerRecord{Address: "irc.fileio.net", Port: 6667, Status: "connected"})
+	_, _ = s.AddWatchlist(context.Background(), Watchlist{Name: "FileIO WL", Query: "test", Enabled: true})
+
+	// Export to temp file
+	exportPath := filepath.Join(t.TempDir(), "export.json")
+	err := s.ExportToFile(context.Background(), exportPath)
+	if err != nil {
+		t.Fatalf("ExportToFile: %v", err)
+	}
+
+	// Verify the file exists and is valid JSON
+	data, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("reading export file: %v", err)
+	}
+	if len(data) < 10 {
+		t.Errorf("export file too small (%d bytes)", len(data))
+	}
+
+	// Import into fresh store
+	s2 := newTestStore(t)
+	err = s2.ImportFromFile(context.Background(), exportPath)
+	if err != nil {
+		t.Fatalf("ImportFromFile: %v", err)
+	}
+
+	// Verify imported data
+	servers, _ := s2.ListServers(context.Background())
+	if len(servers) != 1 {
+		t.Errorf("expected 1 server imported, got %d", len(servers))
+	}
+	if servers[0].Address != "irc.fileio.net" {
+		t.Errorf("expected address 'irc.fileio.net', got %s", servers[0].Address)
+	}
+
+	wls, _ := s2.ListWatchlists(context.Background())
+	if len(wls) != 1 {
+		t.Errorf("expected 1 watchlist imported, got %d", len(wls))
+	}
+}
+
+func TestImportFromFile_NotFound(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	err := s.ImportFromFile(context.Background(), "/nonexistent/export.json")
+	if err == nil {
+		t.Error("expected error for non-existent import file")
+	}
+}
+
+func TestImportFromFile_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	invalidPath := filepath.Join(t.TempDir(), "invalid.json")
+	_ = os.WriteFile(invalidPath, []byte("not json"), 0o644)
+
+	err := s.ImportFromFile(context.Background(), invalidPath)
+	if err == nil {
+		t.Error("expected error for invalid JSON import")
+	}
+}
+
+func TestCleanupOldBackups(t *testing.T) {
+	t.Parallel()
+
+	// --- maxCount < 1: no-op ---
+	t.Run("ZeroMaxCount", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		// Create some backup files that should NOT be deleted
+		for i := 0; i < 5; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+		cleanupOldBackups(dbPath, 0)
+		// All files should survive
+		entries, _ := os.ReadDir(tmpDir)
+		if len(entries) != 5 {
+			t.Errorf("expected 5 files after cleanup with maxCount=0, got %d", len(entries))
+		}
+	})
+
+	// --- maxCount negative: no-op ---
+	t.Run("NegativeMaxCount", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		for i := 0; i < 3; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+		cleanupOldBackups(dbPath, -1)
+		entries, _ := os.ReadDir(tmpDir)
+		if len(entries) != 3 {
+			t.Errorf("expected 3 files after cleanup with maxCount=-1, got %d", len(entries))
+		}
+	})
+
+	// --- fewer backups than maxCount: keep all ---
+	t.Run("FewerThanMax", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		for i := 0; i < 2; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+		cleanupOldBackups(dbPath, 3)
+		entries, _ := os.ReadDir(tmpDir)
+		if len(entries) != 2 {
+			t.Errorf("expected 2 files when fewer than max, got %d", len(entries))
+		}
+	})
+
+	// --- exactly at maxCount: keep all ---
+	t.Run("ExactlyMax", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		for i := 0; i < 3; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+		cleanupOldBackups(dbPath, 3)
+		entries, _ := os.ReadDir(tmpDir)
+		if len(entries) != 3 {
+			t.Errorf("expected 3 files at exactly max, got %d", len(entries))
+		}
+	})
+
+	// --- more than maxCount: oldest deleted, recent kept ---
+	t.Run("ExceedsMax", func(t *testing.T) {
+		// No t.Parallel() — uses deterministic file creation order
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		// Create 5 backups
+		for i := 0; i < 5; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+
+		// Cleanup keeping only 2 most recent
+		cleanupOldBackups(dbPath, 2)
+
+		// Check only 2 files remain
+		entries, _ := os.ReadDir(tmpDir)
+		if len(entries) != 2 {
+			t.Errorf("expected 2 files after cleanup, got %d", len(entries))
+		}
+	})
+
+	// --- directories mixed in: not removed ---
+	t.Run("DirectoriesMixed", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		// Create a subdirectory that starts with the backup prefix
+		_ = os.Mkdir(filepath.Join(tmpDir, "test.db.backup.dir"), 0o755)
+		// Create backup files
+		for i := 0; i < 5; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+
+		cleanupOldBackups(dbPath, 2)
+
+		// Directory should survive
+		if _, err := os.Stat(filepath.Join(tmpDir, "test.db.backup.dir")); err != nil {
+			t.Error("directory should not be removed by cleanup")
+		}
+	})
+
+	// --- non-matching files: not removed ---
+	t.Run("NonMatchingFiles", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		// Create a mix: 5 backups + 3 other files
+		for i := 0; i < 5; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+		_ = os.WriteFile(filepath.Join(tmpDir, "other.txt"), []byte("other"), 0o644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "test.db-journal"), []byte("journal"), 0o644)
+
+		cleanupOldBackups(dbPath, 2)
+
+		// Non-matching files survive
+		if _, err := os.Stat(filepath.Join(tmpDir, "other.txt")); err != nil {
+			t.Error("non-matching file 'other.txt' should survive")
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, "test.db-journal")); err != nil {
+			t.Error("non-matching file 'test.db-journal' should survive")
+		}
+	})
+
+	// --- non-existent directory: silent return ---
+	t.Run("NonExistentDir", func(t *testing.T) {
+		t.Parallel()
+		// Should not panic
+		cleanupOldBackups("/nonexistent/path/db.sqlite", 3)
+	})
+
+	// --- backupPrefix matching at directory boundary ---
+	t.Run("PrefixAtDirBoundary", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "subdir", "test.db")
+		_ = os.MkdirAll(filepath.Dir(dbPath), 0o755)
+
+		for i := 0; i < 5; i++ {
+			_ = os.WriteFile(fmt.Sprintf("%s.backup.%d", dbPath, i), []byte("data"), 0o644)
+		}
+
+		cleanupOldBackups(dbPath, 2)
+
+		entries, _ := os.ReadDir(filepath.Dir(dbPath))
+		if len(entries) != 2 {
+			t.Errorf("expected 2 files in subdir after cleanup, got %d", len(entries))
+		}
+	})
 }

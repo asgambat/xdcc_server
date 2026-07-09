@@ -12,12 +12,12 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"xdcc-go/internal/cli"
-	"xdcc-go/internal/client"
-	"xdcc-go/internal/downloader"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/search"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/cli"
+	"xdcc_server/internal/client"
+	"xdcc_server/internal/downloader"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/search"
+	"xdcc_server/internal/store"
 )
 
 func main() {
@@ -124,8 +124,8 @@ If -q and -v are used together, -q takes precedence and -v is ignored.`,
 			fmt.Printf("\nFound %d result(s):\n\n", len(results))
 			for i, pack := range results {
 				fmt.Printf("  [%3d] %s [%s] bot: %s\n", i+1,
-					pack.Filename,
-					entities.HumanReadableBytes(pack.Size),
+					pack.GetFilename(),
+					entities.HumanReadableBytes(pack.GetSize()),
 					pack.Bot)
 			}
 
@@ -299,21 +299,21 @@ func runBrowseWithServer(serverURL, term, extFilter, botFilter string, compact, 
 			Bot:           p.Bot,
 			ServerAddress: p.Server.Address,
 			Channel:       channel,
-			Filename:      p.Filename,
-			FileSize:      p.Size,
+			Filename:      p.GetFilename(),
+			FileSize:      p.GetSize(),
 		}
 
 		id, err := c.EnqueueDownload(rec)
 		if err != nil {
 			errStr := err.Error()
 			if strings.Contains(errStr, "duplicate") {
-				fmt.Fprintf(os.Stderr, "⚠️  Skipped %s (already in queue): %v\n", p.Filename, err)
+				fmt.Fprintf(os.Stderr, "⚠️  Skipped %s (already in queue): %v\n", p.GetFilename(), err)
 				continue
 			}
-			return fmt.Errorf("delegating download %s: %w", p.Filename, err)
+			return fmt.Errorf("delegating download %s: %w", p.GetFilename(), err)
 		}
 
-		fmt.Fprintf(os.Stderr, "📥 Queued %s (id=%d) on server\n", p.Filename, id)
+		fmt.Fprintf(os.Stderr, "📥 Queued %s (id=%d) on server\n", p.GetFilename(), id)
 	}
 
 	return nil
@@ -324,7 +324,7 @@ func filterByPrefix(packs []*entities.XDCCPack, term string) []*entities.XDCCPac
 	prefix := strings.ToLower(term)
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		if strings.HasPrefix(strings.ToLower(p.Filename), prefix) {
+		if strings.HasPrefix(strings.ToLower(p.GetFilename()), prefix) {
 			out = append(out, p)
 		}
 	}
@@ -357,7 +357,7 @@ func filterByExtension(packs []*entities.XDCCPack, extList string) []*entities.X
 	}
 	var out []*entities.XDCCPack
 	for _, p := range packs {
-		ext := strings.ToLower(filepath.Ext(p.Filename))
+		ext := strings.ToLower(filepath.Ext(p.GetFilename()))
 		if exts[ext] {
 			out = append(out, p)
 		}

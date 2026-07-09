@@ -28,12 +28,13 @@ type ServerRecord struct {
 
 // ChannelRecord represents an IRC channel stored in the database.
 type ChannelRecord struct {
-	ID       int64  `json:"id"`
-	ServerID int64  `json:"server_id"`
-	Name     string `json:"name"`
-	AutoJoin bool   `json:"auto_join"`
-	Topic    string `json:"topic,omitempty"`
-	Joined   bool   `json:"joined"`
+	ID          int64   `json:"id"`
+	ServerID    int64   `json:"server_id"`
+	Name        string  `json:"name"`
+	AutoJoin    bool    `json:"auto_join"`
+	Topic       string  `json:"topic,omitempty"`
+	Joined      bool    `json:"joined"`
+	AvgSpeedBPS float64 `json:"avg_speed_bps"` // running average download speed for this channel (B/s)
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ type DownloadRecord struct {
 	Status        string     `json:"status"` // queued, downloading, completed, failed, paused, skipped_existing
 	ProgressBytes int64      `json:"progress_bytes"`
 	SpeedBPS      int64      `json:"speed_bps,omitempty"`
+	AvgSpeedBPS   float64    `json:"avg_speed_bps,omitempty"` // average speed over the whole download (file_size/duration)
 	ErrorMessage  string     `json:"error_message,omitempty"`
 	RetryCount    int        `json:"retry_count"` // number of auto-retry attempts
 	CreatedAt     time.Time  `json:"created_at"`

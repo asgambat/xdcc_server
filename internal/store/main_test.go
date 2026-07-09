@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"xdcc-go/internal/logging"
+	"xdcc_server/internal/logging"
 )
 
 // templateDBPath is the path to a pre-migrated SQLite database template. It is
@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 
 	dbPath := filepath.Join(dir, "template.db")
 	testLog := logging.New(logging.LevelDebug, "", 0)
-	s, err := NewSQLiteStore(dbPath, testLog)
+	s, err := NewSQLiteStore(dbPath, 2000, 3, testLog)
 	if err != nil {
 		panic("cannot create template store: " + err.Error())
 	}
@@ -63,7 +63,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// copyFile copies a file from src to dst.
+// copyFile copies a file from src to dst. It skips fsync — tests do not need
+// crash-safe durability, only speed.
 func copyFile(src, dst string) error {
 	s, err := os.Open(src)
 	if err != nil {
@@ -77,8 +78,6 @@ func copyFile(src, dst string) error {
 	}
 	defer d.Close()
 
-	if _, err := io.Copy(d, s); err != nil {
-		return err
-	}
-	return d.Sync()
+	_, err = io.Copy(d, s)
+	return err
 }

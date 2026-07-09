@@ -1,4 +1,4 @@
-# 🔍 Code Review Report — xdcc-go
+# 🔍 Code Review Report — xdcc_server
 
 **Data:** 2026-05-21  
 **Ambito:** Analisi approfondita di concorrenza, bug, anomalie, manutenibilità e shutdown  

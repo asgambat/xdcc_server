@@ -11,8 +11,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================
@@ -44,9 +44,13 @@ func (a *API) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // =========================================================================
 
 func (a *API) handleVersion(w http.ResponseWriter, r *http.Request) {
+	v := a.Version
+	if v == "" {
+		v = "dev"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"version":                       "0.2.0",
-		"min_compatible_client_version": "0.2.0",
+		"version":                       v,
+		"min_compatible_client_version": v,
 	})
 }
 
@@ -62,9 +66,9 @@ func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return a copy of the config with the admin token redacted.
-	cfg := *a.Config
+	cfg := a.Config.Clone()
 	cfg.Security.AdminToken = "***REDACTED***"
-	writeJSON(w, http.StatusOK, &cfg)
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // handleGetConfigRaw reads and returns the raw config.yaml file content
@@ -175,6 +179,25 @@ func findKeyInYAML(s, key string, start int) int {
 	return -1
 }
 
+// syncMsgRateLimiter reconfigures the send-message rate limiter to match
+// the current config values. This is called after runtime config updates
+// so changes to message_rate_limit / message_rate_window_sec take effect
+// without a server restart.
+func (a *API) syncMsgRateLimiter() {
+	limit, windowSec := a.Config.GetMessageRateLimit()
+	if limit > 0 && windowSec > 0 {
+		if rl := a.MsgRateLimiter.Load(); rl != nil {
+			// Reconfigure existing limiter (method is mutex-protected).
+			rl.Reconfigure(limit, time.Duration(windowSec)*time.Second)
+		} else {
+			a.MsgRateLimiter.Store(NewRateLimiter(limit, time.Duration(windowSec)*time.Second))
+		}
+	} else {
+		// Rate limiting disabled — nil out the limiter.
+		a.MsgRateLimiter.Store(nil)
+	}
+}
+
 // =========================================================================
 // PUT /api/config
 // =========================================================================
@@ -212,11 +235,25 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Preserve the admin token from the live config.
-		newCfg.Security.AdminToken = a.Config.Security.AdminToken
+		// SnapshotAndApply atomically captures the live config (so we can
+		// preserve the admin token), lets us overlay the parsed newCfg onto
+		// the snapshot, and installs the result via Replace — all under a
+		// single RLock. The returned pre-snapshot is intentionally unused
+		// here because SaveRaw writes the raw body bytes verbatim and does
+		// not need a diff.
+		a.Config.SnapshotAndApply(func(snap *config.Config) {
+			// Always preserve the live admin token: the raw YAML editor
+			// round-trips with the redacted placeholder, so a user-supplied
+			// token would always be the redacted one.
+			newCfg.Security.AdminToken = snap.Security.AdminToken
+			// Use snap.Replace (field-by-field copy) instead of *snap = newCfg
+			// to avoid copying snap's embedded sync.RWMutex, which would be
+			// flagged by `go vet` as "copies lock value".
+			snap.Replace(&newCfg)
+		})
 
-		// Update in-memory config to reflect the saved YAML changes.
-		*a.Config = newCfg
+		// Sync rate limiter with new config values.
+		a.syncMsgRateLimiter()
 
 		// Save raw YAML bytes directly, preserving comments and formatting.
 		if a.ConfigPath != "" {
@@ -240,29 +277,37 @@ func (a *API) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Protect the admin token: if the client sent the redacted placeholder
-	// (which happens when the Advanced tab loads raw YAML and saves it back),
-	// preserve the live token so it isn't overwritten.
-	if newCfg.Security.AdminToken == "" || newCfg.Security.AdminToken == "***REDACTED***" {
-		newCfg.Security.AdminToken = a.Config.Security.AdminToken
-	}
-
-	// Validate the new config before applying or persisting.
+	// Validate the new config before applying or persisting. Validation
+	// runs before SnapshotAndApply so a failure leaves the live config
+	// untouched (Validate does not depend on the live admin token).
 	if err := newCfg.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
 			fmt.Sprintf("config validation failed: %v", err))
 		return
 	}
 
-	// Snapshot old config for diff-based partial save.
-	oldCfg := *a.Config
+	// SnapshotAndApply atomically captures the live config (so we can
+	// preserve the admin token when the client sent the redacted placeholder
+	// or left the field empty), overlays the validated newCfg onto the
+	// snapshot, and installs the result via Replace — all under a single
+	// RLock. The returned pre-snapshot is used as the "old" side of the
+	// diff computed by ApplyPartial.
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		if newCfg.Security.AdminToken == "" || newCfg.Security.AdminToken == "***REDACTED***" {
+			newCfg.Security.AdminToken = snap.Security.AdminToken
+		}
+		// Use snap.Replace (field-by-field copy) instead of *snap = newCfg
+		// to avoid copying snap's embedded sync.RWMutex, which would be
+		// flagged by `go vet` as "copies lock value".
+		snap.Replace(&newCfg)
+	})
 
-	// Apply to live config.
-	*a.Config = newCfg
+	// Sync rate limiter with new config values.
+	a.syncMsgRateLimiter()
 
 	// Persist using partial update to preserve comments & formatting.
 	if a.ConfigPath != "" {
-		if err := a.Config.ApplyPartial(a.ConfigPath, &oldCfg); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving config to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("config updated in memory but failed to persist: %v", err))
@@ -294,15 +339,18 @@ func (a *API) handleUpdateTheme(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Snapshot old config for partial save.
-	oldCfg := *a.Config
-
-	// Update only the theme field in the live config.
-	a.Config.UI.Theme = body.Theme
+	// SnapshotAndApply atomically captures the pre-mutation state and installs
+	// the post-mutation state under a single RLock, returning the pre-snapshot
+	// (oldCfg) for use as the "old" side of the diff when persisting.
+	// This closes the TOCTOU window that would open if we called Clone() twice
+	// (once for oldCfg, once for the new value).
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		snap.UI.Theme = body.Theme
+	})
 
 	// Persist only the theme change to disk using partial update.
 	if a.ConfigPath != "" {
-		if err := a.Config.ApplyPartial(a.ConfigPath, &oldCfg); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving theme to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("theme updated in memory but failed to persist: %v", err))
@@ -342,8 +390,17 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	uptimeSeconds := int64(time.Since(a.StartTime).Seconds())
 
+	// Use live speed when downloads are active, otherwise fall back to
+	// the historical average across all completed downloads.
+	averageSpeedBPS := totalSpeedBPS
+	if averageSpeedBPS == 0 {
+		if histAvg, err := a.Store.GetHistoricalAvgSpeed(r.Context()); err == nil {
+			averageSpeedBPS = int64(histAvg)
+		}
+	}
+
 	// Get disk info
-	di, err := getDiskInfo(a.Config.Download.DestDir)
+	di, err := getDiskInfo(a.Config.GetDestDir())
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -357,7 +414,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_completed":        totalHistory,
 		"connected_servers":      serverCount,
 		"total_downloaded_bytes": totalDownloadedBytes,
-		"average_speed_bps":      totalSpeedBPS,
+		"average_speed_bps":      averageSpeedBPS,
 		"uptime_seconds":         uptimeSeconds,
 		"disk_free_bytes":        diskFreeBytes,
 		"disk_total_bytes":       diskTotalBytes,
@@ -375,7 +432,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	warnings := make([]string, 0)
 	info := make(map[string]interface{})
 
-	di, err := getDiskInfo(a.Config.Download.DestDir)
+	di, err := getDiskInfo(a.Config.GetDestDir())
 	diskFreeBytes := int64(0)
 	diskTotalBytes := int64(0)
 	if err == nil {
@@ -422,8 +479,9 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":    uptimeSeconds,
 		"disk_free_bytes":   diskFreeBytes,
 		"disk_total_bytes":  diskTotalBytes,
-		"token_ttl_minutes": a.Config.Security.TokenTTLMinutes,
-		"ui_theme":          a.Config.UI.Theme, // public — used by frontend for initial theme
+		"token_ttl_minutes": a.Config.GetTokenTTLMinutes(),
+		"ui_theme":          a.Config.GetUITheme(),           // public — used by frontend for initial theme
+		"messages_enabled":  a.Config.GetEnableMessageSend(), // public — used by frontend to show/hide send button
 	})
 }
 
@@ -515,7 +573,7 @@ func (a *API) handleAdminImport(w http.ResponseWriter, r *http.Request) {
 // =========================================================================
 
 func (a *API) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	completed := a.Config.UI.SetupCompleted
+	completed := a.Config.GetSetupCompleted()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"setup_completed": completed,
@@ -540,34 +598,41 @@ func (a *API) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := a.Config
-
-	if body.Nickname != "" {
-		cfg.IRC.Nickname = body.Nickname
-	}
-	if body.ServerAddress != "" {
-		port := body.ServerPort
-		if port < 1 || port > 65535 {
-			port = 6667
+	// SnapshotAndApply atomically captures the pre-mutation config (so we
+	// can compute a diff for partial persistence later) and installs the
+	// mutated version via Replace — all under proper locking. This closes
+	// the data race that existed when the handler wrote directly to Config
+	// fields without acquiring mu.Lock().
+	oldCfg := a.Config.SnapshotAndApply(func(snap *config.Config) {
+		if body.Nickname != "" {
+			snap.IRC.Nickname = body.Nickname
 		}
-		cfg.IRC.DefaultServers = []config.ServerConfig{
-			{
-				Address:     body.ServerAddress,
-				Port:        port,
-				AutoConnect: true,
-			},
+		if body.ServerAddress != "" {
+			port := body.ServerPort
+			if port < 1 || port > 65535 {
+				port = 6667
+			}
+			snap.IRC.DefaultServers = []config.ServerConfig{
+				{
+					Address:     body.ServerAddress,
+					Port:        port,
+					AutoConnect: true,
+				},
+			}
 		}
-	}
-	if body.DownloadDir != "" {
-		cfg.Download.DestDir = body.DownloadDir
-	}
-	if body.TempDir != "" {
-		cfg.Download.TempDir = body.TempDir
-	}
+		if body.DownloadDir != "" {
+			snap.Download.DestDir = body.DownloadDir
+		}
+		if body.TempDir != "" {
+			snap.Download.TempDir = body.TempDir
+		}
+		snap.UI.SetupCompleted = true
+	})
 
-	cfg.UI.SetupCompleted = true
-
-	for _, dir := range []string{cfg.Download.TempDir, cfg.Download.DestDir} {
+	// Read directories from the now-updated live config via the thread-safe
+	// getter (acquires mu.RLock internally).
+	dlCfg := a.Config.GetDownloadConfig()
+	for _, dir := range []string{dlCfg.TempDir, dlCfg.DestDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			a.logAndError(w, http.StatusInternalServerError, "MKDIR_ERROR",
 				fmt.Sprintf("creating directory %s: %v", dir, err))
@@ -575,9 +640,11 @@ func (a *API) handleSetupBootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Persist the bootstrap config to disk so setup survives a restart.
+	// Persist using ApplyPartial to preserve comments and formatting.
+	// Falls back to a full Save() automatically for non-scalar changes
+	// (e.g. DefaultServers slice).
 	if a.ConfigPath != "" {
-		if err := a.Config.Save(a.ConfigPath); err != nil {
+		if err := a.Config.ApplyPartial(a.ConfigPath, oldCfg); err != nil {
 			a.Logger.Errorf("saving bootstrap config to %s: %v", a.ConfigPath, err)
 			writeError(w, http.StatusInternalServerError, "SAVE_ERROR",
 				fmt.Sprintf("setup completed in memory but failed to persist config: %v", err))

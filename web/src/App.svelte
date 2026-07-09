@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import { currentView, toasts, sseStatus, stats, status, config, downloads, servers, hasAdminToken, setAdminToken, getAdminToken, onAuthFailure, startTokenExpiryCheck, stopTokenExpiryCheck, theme, SYSTEM_VIEWS } from './lib/stores.js';
+  import { currentView, toasts, sseStatus, stats, status, version, config, downloads, servers, downloadsBadge, hasAdminToken, setAdminToken, getAdminToken, onAuthFailure, startTokenExpiryCheck, stopTokenExpiryCheck, theme, SYSTEM_VIEWS } from './lib/stores.js';
   import { sseClient, SystemAPI, DownloadsAPI, ServersAPI } from './lib/api.js';
   import { debounce, escapeHtml } from './lib/utils.js';
   import Sidebar from './components/Sidebar.svelte';
@@ -18,6 +18,7 @@
   import Logs from './components/Logs.svelte';
 
   let sidebarOpen = $state(false);
+  let downloadsNavKey = $state(0); // incremented on re-navigate to Downloads to force Active tab
 
   // ── Admin token prompt state ──
   let showTokenModal = $state(false);
@@ -36,6 +37,11 @@
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
 
   function navigateTo(view) {
+    // If already on Downloads and clicking Downloads again, force remount
+    // so the component switches back to the Active tab (from History).
+    if (view === 'downloads' && $currentView === 'downloads') {
+      downloadsNavKey++;
+    }
     currentView.set(view);
     window.location.hash = view;
     sidebarOpen = false;
@@ -43,6 +49,7 @@
 
   /** Handle requestToken event from sidebar — show token prompt modal */
   function onRequestToken(e) {
+    sidebarOpen = false; // close mobile sidebar so modal is visible
     pendingSystemView = e.detail;
     tokenInput = '';
     tokenError = '';
@@ -120,8 +127,16 @@
   // Autofocus the token input when the modal appears
   $effect(() => {
     if (showTokenModal && tokenInputEl) {
-      // Small delay to let the modal's slideUp animation start
-      requestAnimationFrame(() => tokenInputEl.focus());
+      // Delay to let the modal's slideUp animation (0.2s) finish and the
+      // sidebar close animation complete, then focus and trigger the
+      // virtual keyboard on mobile devices.
+      const tid = setTimeout(() => {
+        tokenInputEl.focus();
+        // On mobile, programmatic focus alone may not open the keyboard;
+        // dispatching a click on the input helps trigger it.
+        tokenInputEl.click();
+      }, 250);
+      return () => clearTimeout(tid);
     }
   });
 
@@ -131,6 +146,7 @@
     _authModalSuppressed = true;
     onAuthFailure(() => {
       if (_authModalSuppressed) return;
+      sidebarOpen = false; // close mobile sidebar so modal is visible
       showTokenModal = true;
       tokenError = 'Session expired — please re-authenticate';
     });
@@ -152,12 +168,13 @@
 
     // Load initial data
     try {
-      const [statsData, statusData, cfg, dls, srvs] = await Promise.all([
+      const [statsData, statusData, cfg, dls, srvs, ver] = await Promise.all([
         SystemAPI.stats().catch(() => null),
         SystemAPI.status().catch(() => null),
         SystemAPI.config().catch(() => null),
         DownloadsAPI.list().catch(() => []),
         ServersAPI.list().catch(() => []),
+        SystemAPI.version().catch(() => null),
       ]);
       if (dls?.downloads || dls) downloads.set(dls?.downloads || dls);
       if (srvs) servers.set(srvs);
@@ -173,6 +190,7 @@
           document.documentElement.setAttribute('data-theme', statusData.ui_theme);
         }
       }
+      if (ver && ver.version) version.set(ver.version);
       if (cfg) {
         config.set(cfg);
       }
@@ -438,6 +456,7 @@
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
         e.preventDefault();
+        sidebarOpen = false; // close mobile sidebar so modal is visible
         tokenInput = '';
         tokenError = '';
         pendingSystemView = '';
@@ -461,7 +480,12 @@
     on:requestToken={onRequestToken} />
 
   <div class="mobile-header">
-    <button class="hamburger" onclick={toggleSidebar} aria-label="Open Menu">☰</button>
+    <button class="hamburger" onclick={toggleSidebar} aria-label="Open Menu">
+      ☰
+      {#if $downloadsBadge > 0}
+        <span class="hamburger-badge">{$downloadsBadge}</span>
+      {/if}
+    </button>
     <div class="header-title">XDCC Manager</div>
   </div>
 
@@ -502,7 +526,9 @@
     {:else if $currentView === 'servers'}
       <Servers on:navigate />
     {:else if $currentView === 'downloads'}
-      <Downloads />
+      {#key downloadsNavKey}
+        <Downloads />
+      {/key}
     {:else if $currentView === 'search'}
       <Search />
     {:else if $currentView === 'presets'}
@@ -532,6 +558,8 @@
       placeholder="Paste admin token..."
       bind:value={tokenInput}
       bind:this={tokenInputEl}
+      inputmode="text"
+      autocomplete="off"
       onkeydown={(e) => e.key === 'Enter' && submitToken()}
     />
     {#if tokenError}
@@ -592,8 +620,31 @@
     cursor: pointer; 
     padding: 0.5rem;
     border-radius: 8px;
+    position: relative;
   }
   .hamburger:hover { background: var(--bg-hover); }
+  .hamburger-badge {
+    position: absolute;
+    top: 0;
+    right: -2px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    min-width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 999px;
+    padding: 0 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+    animation: badgePop 0.3s ease;
+  }
+  @keyframes badgePop {
+    from { transform: scale(0); }
+    60%  { transform: scale(1.3); }
+    to   { transform: scale(1); }
+  }
 
   @media (max-width: 768px) {
     .app-layout { flex-direction: column; }

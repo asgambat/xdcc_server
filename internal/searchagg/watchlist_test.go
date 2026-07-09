@@ -3,13 +3,14 @@ package searchagg
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/store"
 )
 
 // ===========================================================================
@@ -87,6 +88,10 @@ func (m *mockDownloadStore) IncrementDownloadRetry(ctx context.Context, id int64
 func (m *mockDownloadStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
 	return nil
 }
+
+func (m *mockDownloadStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	return nil
+}
 func (m *mockDownloadStore) BulkActionDownloads(ctx context.Context, ids []int64, action string) (map[int64]string, error) {
 	return nil, nil
 }
@@ -95,6 +100,10 @@ func (m *mockDownloadStore) FindDuplicateDownload(ctx context.Context, bot, serv
 }
 func (m *mockDownloadStore) GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*store.DownloadRecord, error) {
 	return nil, nil
+}
+func (m *mockDownloadStore) DeleteAllHistory(ctx context.Context) (int64, error) { return 0, nil }
+func (m *mockDownloadStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) {
+	return 0, nil
 }
 
 // ===========================================================================
@@ -218,8 +227,8 @@ func TestFilterNewPacks_SomeAlreadyDownloaded(t *testing.T) {
 	if len(newPacks) != 1 {
 		t.Errorf("expected 1 new pack (b.mkv), got %d", len(newPacks))
 	}
-	if newPacks[0].Filename != "b.mkv" {
-		t.Errorf("expected b.mkv as new pack, got %s", newPacks[0].Filename)
+	if newPacks[0].GetFilename() != "b.mkv" {
+		t.Errorf("expected b.mkv as new pack, got %s", newPacks[0].GetFilename())
 	}
 }
 
@@ -429,6 +438,9 @@ func (m *trackedWatchlistStore) IncrementDownloadRetry(ctx context.Context, id i
 func (m *trackedWatchlistStore) UpdateDownloadMetadata(ctx context.Context, id int64, filename string, fileSize int64) error {
 	return nil
 }
+func (m *trackedWatchlistStore) UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error {
+	return nil
+}
 func (m *trackedWatchlistStore) BulkActionDownloads(ctx context.Context, ids []int64, action string) (map[int64]string, error) {
 	return nil, nil
 }
@@ -437,6 +449,10 @@ func (m *trackedWatchlistStore) FindDuplicateDownload(ctx context.Context, bot, 
 }
 func (m *trackedWatchlistStore) GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*store.DownloadRecord, error) {
 	return nil, nil
+}
+func (m *trackedWatchlistStore) DeleteAllHistory(ctx context.Context) (int64, error) { return 0, nil }
+func (m *trackedWatchlistStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) {
+	return 0, nil
 }
 func (m *trackedWatchlistStore) FilenamesExist(ctx context.Context, filenames []string) (map[string]bool, error) {
 	return nil, nil
@@ -568,6 +584,76 @@ func TestWatchlistInFlight_Dedup(t *testing.T) {
 	agg.watchlistInFlight.Delete(wlID)
 }
 
+// ===========================================================================
+// NotifyEnabled guard tests
+// ===========================================================================
+
+// TestRunWatchlist_NotifyDisabledSkipsCallback verifies that the external
+// notification callback is NOT invoked when NotifyEnabled=false.
+func TestRunWatchlist_NotifyDisabledSkipsCallback(t *testing.T) {
+	ms := &trackedWatchlistStore{}
+	agg := newTestAggregator(ms)
+
+	var callbackCount int32
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int, query string) {
+		atomic.AddInt32(&callbackCount, 1)
+	})
+
+	wl := store.Watchlist{
+		ID:              1,
+		Name:            "test-wl",
+		Query:           "anything",
+		IntervalMinutes: 5,
+		NotifyEnabled:   false,
+		Enabled:         true,
+		AutoEnqueue:     false,
+	}
+
+	_, err := agg.RunWatchlist(context.Background(), wl)
+	if err != nil {
+		t.Fatalf("RunWatchlist: %v", err)
+	}
+	if atomic.LoadInt32(&callbackCount) != 0 {
+		t.Errorf("callback called %d times; expected 0 (NotifyEnabled=false)", callbackCount)
+	}
+}
+
+// TestRunWatchlist_NotifyEnabledNoNewPacks verifies that the callback
+// is NOT invoked when NotifyEnabled=true but there are no new packs.
+// This confirms the guard condition works end-to-end: all conditions
+// (NotifyEnabled, HasChanges, len(NewPacks)>0) must be satisfied.
+func TestRunWatchlist_NotifyEnabledNoNewPacks(t *testing.T) {
+	ms := &trackedWatchlistStore{}
+	agg := newTestAggregator(ms)
+
+	var callbackCount int32
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int, query string) {
+		atomic.AddInt32(&callbackCount, 1)
+	})
+
+	// Use a non-empty LastMatchFingerprint so HasChanges logic evaluates
+	// the fingerprint-change path (else-if branch). With no search engines
+	// configured, the search returns empty packs → NewPacks = 0.
+	wl := store.Watchlist{
+		ID:                   2,
+		Name:                 "test-wl-2",
+		Query:                "anything",
+		IntervalMinutes:      5,
+		NotifyEnabled:        true,
+		Enabled:              true,
+		AutoEnqueue:          false,
+		LastMatchFingerprint: "old-fingerprint",
+	}
+
+	_, err := agg.RunWatchlist(context.Background(), wl)
+	if err != nil {
+		t.Fatalf("RunWatchlist: %v", err)
+	}
+	if atomic.LoadInt32(&callbackCount) != 0 {
+		t.Errorf("callback called %d times; expected 0 (no new packs)", callbackCount)
+	}
+}
+
 // TestWatchlistInFlight_ReentrancyGuard verifies the LoadOrStore/Delete
 // reentrancy pattern used by runWatchlistSafely. The first call acquires
 // the gate (loaded=false), and a second call while the first holds it
@@ -649,6 +735,81 @@ func TestRunDueWatchlists_FirstRun(t *testing.T) {
 	if hasID2 {
 		t.Error("expected watchlist ID=2 (recently checked) to NOT be dispatched")
 	}
+}
+
+// ===========================================================================
+// serializeWatchlistResults
+// ===========================================================================
+
+func TestSerializeWatchlistResults_Empty(t *testing.T) {
+	got := serializeWatchlistResults(nil)
+	if got != "[]" {
+		t.Errorf("expected '[]' for nil packs, got %q", got)
+	}
+
+	got = serializeWatchlistResults([]*entities.XDCCPack{})
+	if got != "[]" {
+		t.Errorf("expected '[]' for empty packs, got %q", got)
+	}
+}
+
+func TestSerializeWatchlistResults_Single(t *testing.T) {
+	srv := entities.NewIrcServerWithPort("irc.test.net", 6667)
+	pack := entities.NewXDCCPack(srv, "TestBot", 42)
+	pack.SetFilename("test.mkv", true)
+	pack.SetSize(123456789)
+
+	packs := []*entities.XDCCPack{pack}
+	got := serializeWatchlistResults(packs)
+
+	if !contains(got, "TestBot") {
+		t.Errorf("expected JSON to contain 'TestBot', got %q", got)
+	}
+	if !contains(got, "test.mkv") {
+		t.Errorf("expected JSON to contain 'test.mkv', got %q", got)
+	}
+	if !contains(got, "xdcc send #42") {
+		t.Errorf("expected JSON to contain 'xdcc send #42', got %q", got)
+	}
+	if !contains(got, "123456789") {
+		t.Errorf("expected JSON to contain size, got %q", got)
+	}
+}
+
+func TestSerializeWatchlistResults_Multiple(t *testing.T) {
+	srv := entities.NewIrcServerWithPort("irc.test.net", 6667)
+
+	p1 := entities.NewXDCCPack(srv, "BotA", 1)
+	p1.SetFilename("a.mkv", true)
+	p1.SetSize(100)
+
+	p2 := entities.NewXDCCPack(srv, "BotB", 2)
+	p2.SetFilename("b.mkv", true)
+	p2.SetSize(200)
+
+	packs := []*entities.XDCCPack{p1, p2}
+	got := serializeWatchlistResults(packs)
+
+	// Should be a valid JSON array with 2 items
+	if !contains(got, "[{") || !contains(got, "}]") {
+		t.Errorf("expected JSON array beginning and ending, got %q", got)
+	}
+	if !contains(got, "BotA") || !contains(got, "BotB") {
+		t.Errorf("expected both bots in JSON, got %q", got)
+	}
+}
+
+// =========================================================================
+// helpers
+// =========================================================================
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRunDueWatchlists_IntervalElapsed verifies that a watchlist whose

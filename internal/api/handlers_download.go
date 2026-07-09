@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/store"
 )
 
 // =========================================================================
@@ -143,6 +143,21 @@ func (a *API) handleEnqueueDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
+// =========================================================================
+// DELETE /api/downloads/history
+// =========================================================================
+
+func (a *API) handleDeleteAllHistory(w http.ResponseWriter, r *http.Request) {
+	deleted, err := a.Store.DeleteAllHistory(r.Context())
+	if err != nil {
+		a.logAndError(w, http.StatusInternalServerError, "DELETE_HISTORY_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": deleted,
+	})
 }
 
 // =========================================================================

@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/config"
-	"xdcc-go/internal/entities"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/metrics"
-	srch "xdcc-go/internal/search"
-	"xdcc-go/internal/store"
+	"xdcc_server/internal/config"
+	"xdcc_server/internal/entities"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/metrics"
+	srch "xdcc_server/internal/search"
+	"xdcc_server/internal/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,12 +52,17 @@ type Aggregator struct {
 	statsFlushDone chan struct{}
 
 	// onWatchlistResults is called when a watchlist finds new packs.
-	// Arguments: watchlist name, new packs count, enqueued count.
-	onWatchlistResults func(name string, newPacks, enqueued int)
+	// Arguments: watchlist name, new packs count, enqueued count, search query.
+	onWatchlistResults func(name string, newPacks, enqueued int, query string)
 
 	// watchlistInFlight tracks which watchlist IDs are currently being
 	// executed, preventing concurrent runs of the same watchlist.
 	watchlistInFlight sync.Map
+
+	// watchlistWg tracks in-flight watchlist goroutines so Stop() can
+	// wait for them to complete before returning. This prevents the
+	// store from being closed while a watchlist is still writing to it.
+	watchlistWg sync.WaitGroup
 }
 
 // New creates a new search Aggregator.
@@ -80,8 +85,8 @@ func (a *Aggregator) SetMetrics(met *metrics.Collector) {
 }
 
 // SetOnWatchlistResults sets a callback invoked when a watchlist finds new packs.
-// The callback receives (watchlistName string, newPacksCount, enqueuedCount int).
-func (a *Aggregator) SetOnWatchlistResults(fn func(name string, newPacks, enqueued int)) {
+// The callback receives (watchlistName string, newPacksCount, enqueuedCount int, query string).
+func (a *Aggregator) SetOnWatchlistResults(fn func(name string, newPacks, enqueued int, query string)) {
 	a.onWatchlistResults = fn
 }
 
@@ -107,8 +112,24 @@ func (a *Aggregator) Start(ctx context.Context) error {
 // Stop stops the cache cleanup and stats-flush goroutines.
 func (a *Aggregator) Stop() {
 	if a.cancel != nil {
-		a.cancel()
-		<-a.done           // wait for cleanupLoop
+		a.cancel() // signal all loops + in-flight watchlists to stop
+		<-a.done   // wait for cleanupLoop
+
+		// Wait for in-flight watchlist goroutines with a timeout.
+		// Each watchlist runs HTTP searches (bounded by providerTimeout,
+		// default 5s) and SQLite operations (bounded by busy timeout).
+		// A 60s deadline prevents indefinite blocking in pathological cases.
+		done := make(chan struct{})
+		go func() {
+			a.watchlistWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			a.log.Warnf("timed out waiting for watchlist goroutines to finish")
+		}
+
 		close(a.statsCh)   // signal statsFlushLoop to drain and exit
 		<-a.statsFlushDone // wait for final flush
 	}
@@ -202,7 +223,18 @@ func (a *Aggregator) runWatchlistSafely(wl store.Watchlist) {
 	}
 	defer a.watchlistInFlight.Delete(wl.ID)
 
-	ctx := context.Background()
+	// Use a.ctx so that Stop() cancels in-flight HTTP/DB operations,
+	// and track this goroutine so Stop() waits for it to finish.
+	// Defensive nil guard: in normal operation a.ctx is always set by Start(),
+	// but if this were ever called before Start(), fall back to Background.
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	a.watchlistWg.Add(1)
+	defer a.watchlistWg.Done()
+
 	result, err := a.RunWatchlist(ctx, wl)
 	if err != nil {
 		a.log.Warnf("watchlist %q failed: %v", wl.Name, err)
@@ -214,15 +246,14 @@ func (a *Aggregator) runWatchlistSafely(wl store.Watchlist) {
 		a.log.Infof("watchlist %q: found %d new packs (enqueued %d)",
 			wl.Name, newPacks, enqueued)
 
-		// Notify via SSE about new enqueued downloads
-		if enqueued > 0 && wl.AutoEnqueue {
+		// Notify via SSE about new enqueued downloads (respect notify_enabled).
+		if enqueued > 0 && wl.AutoEnqueue && wl.NotifyEnabled {
 			a.notifyWatchlistResults(wl.Name, result.NewPacks)
 		}
 
-		// External notification (webhook, etc.) only when new packs are actually found
-		if a.onWatchlistResults != nil && newPacks > 0 {
-			a.onWatchlistResults(wl.Name, newPacks, enqueued)
-		}
+		// External notification (webhook, etc.) is now handled in RunWatchlist to cover
+		// both scheduler-triggered and API-triggered runs — do NOT call it here to avoid double invocation.
+		// (Scheduler: runWatchlistSafely → RunWatchlist → callback. API: RunWatchlist → callback directly.)
 	} else {
 		a.log.Debugf("watchlist %q: no changes since last run", wl.Name)
 	}

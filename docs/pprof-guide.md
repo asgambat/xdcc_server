@@ -1,6 +1,6 @@
-# Guida al profiling con pprof per xdcc-go
+# Guida al profiling con pprof per xdcc_server
 
-Guida completa all'uso di `go tool pprof` per profilare CPU, heap, goroutine e leggere i flame graph nel server xdcc-go.
+Guida completa all'uso di `go tool pprof` per profilare CPU, heap, goroutine e leggere i flame graph nel server xdcc_server.
 
 ## Setup: endpoint e admin token
 
@@ -117,7 +117,7 @@ go tool pprof -http=:6060 allocs.pprof
 - Channel non chiusi che bloccano goroutine (e la loro memoria)
 - Slice che referenziano backing array molto grandi
 
-Nel progetto xdcc-go, occhio a:
+Nel progetto xdcc_server, occhio a:
 - `searchagg/cache.go` — cache senza TTL o senza eviction
 - `sse/hub.go` — buffer eventi che crescono se i consumer sono lenti
 - `ircmanager/` — connessioni IRC non chiuse
@@ -150,7 +150,7 @@ Un numero **alto e crescente** di goroutine bloccate sulla stessa funzione = **g
 
 ### Dump testuale completo
 
-Oltre a pprof, xdcc-go ha un endpoint dedicato per il dump testuale di tutte le goroutine (protetto da admin token):
+Oltre a pprof, xdcc_server ha un endpoint dedicato per il dump testuale di tutte le goroutine (protetto da admin token):
 
 ```bash
 curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/debug/goroutines/dump
@@ -192,7 +192,7 @@ go tool pprof -http=:6060 cpu.pprof
 | **Clicca un rettangolo** | Zoomma su quella funzione e tutto il suo sottoalbero |
 | **Clicca "Reset"** | Torna alla vista completa |
 | **Passa il mouse** | Vedrai: nome funzione, `flat`, `cum`, percentuali |
-| **Barra di ricerca in alto** | Filtra per nome funzione o package (es. `xdcc-go`, `runtime`) |
+| **Barra di ricerca in alto** | Filtra per nome funzione o package (es. `xdcc_server`, `runtime`) |
 | **Menu View → Flame Graph** | Vista standard — quadro generale |
 | **Menu View → Top** | Lista testuale — identificare numericamente i colpevoli |
 | **Menu View → Source** | Codice sorgente con annotazioni riga-per-riga |
@@ -205,7 +205,7 @@ I colori in pprof non hanno significato intrinseco: sono assegnati per distingue
 Pattern di riconoscimento rapido:
 - **`runtime/*`** (GC, scheduler) — scorciatoie del runtime
 - **`syscall`** — chiamate di sistema, spesso I/O — il tempo qui è "fuori dal tuo controllo"
-- **Il tuo codice** (`xdcc-go/**`) — il resto
+- **Il tuo codice** (`xdcc_server/**`) — il resto
 
 ### Pattern da cercare
 
@@ -280,7 +280,7 @@ go tool pprof -svg cpu.pprof > flame.svg
 
 ```bash
 # Mostra solo il tuo codice
-go tool pprof -hide=runtime -focus=xdcc-go cpu.pprof
+go tool pprof -hide=runtime -focus=xdcc_server cpu.pprof
 
 # Nascondi funzioni specifiche
 go tool pprof -hide=runtime -hide=syscall cpu.pprof
@@ -297,7 +297,7 @@ go tool pprof -http=:6060 http://localhost:8080/debug/pprof/heap
 
 ---
 
-## Checklist per xdcc-go
+## Checklist per xdcc_server
 
 In base all'architettura del progetto, ecco cosa profilare per ogni tipo di problema:
 

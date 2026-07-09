@@ -6,13 +6,17 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -99,11 +103,56 @@ type Config struct {
 	UI            UIConfig             `yaml:"ui"             json:"ui"`
 	Profiling     ProfilingConfig      `yaml:"profiling"      json:"profiling"`
 	Notifications []NotificationConfig `yaml:"notifications"  json:"notifications"`
+
+	// mu guards concurrent reads and writes of all data fields.
+	// fileMu serializes on-disk write operations (Save, SaveRaw, ApplyPartial).
+	mu     sync.RWMutex
+	fileMu sync.Mutex
+
+	// revision is incremented atomically every time the config is persisted
+	// to disk (Save, SaveRaw, ApplyPartial). Components that cache
+	// config-derived state (e.g. open channel log files) poll this value
+	// to detect when their cached state needs to be rebuilt.
+	revision atomic.Int64
 }
 
 type IRCConfig struct {
-	Nickname       string         `yaml:"nickname"        env:"XDCC_IRC_NICKNAME"        json:"nickname"`
-	DefaultServers []ServerConfig `yaml:"default_servers"                          json:"default_servers"`
+	Nickname         string         `yaml:"nickname"              env:"XDCC_IRC_NICKNAME"              json:"nickname"`
+	DefaultServers   []ServerConfig `yaml:"default_servers"                                  json:"default_servers"`
+	ChannelBlacklist []string       `yaml:"channel_blacklist"                                  json:"channel_blacklist"`
+	// Greetings is the list of messages randomly sent to a channel right after
+	// it is joined. A random message is picked from the list; if the list is
+	// empty, the default greeting "hello everybody" is used instead. A random
+	// delay between 2 and 4 seconds is applied before sending the greeting, to
+	// look more natural and avoid triggering anti-flood protections.
+	Greetings []string `yaml:"greetings"                                      env:"XDCC_IRC_GREETINGS"        json:"greetings"`
+	// EnableMessageSend controls whether the REST endpoint for sending
+	// PRIVMSG to IRC channels is active. When false (default), the API
+	// returns 403 Forbidden and the frontend disables the send button.
+	// This is a safety measure to prevent the web UI from being used as
+	// an IRC message relay when exposed to untrusted networks.
+	EnableMessageSend bool `yaml:"enable_message_send" env:"XDCC_IRC_ENABLE_MESSAGE_SEND" json:"enable_message_send"`
+	// MessageRateLimit is the maximum number of messages a single client
+	// IP can send within MessageRateWindow. Set to 0 to disable rate
+	// limiting entirely. Default: 5 messages per MessageRateWindow.
+	MessageRateLimit int `yaml:"message_rate_limit" env:"XDCC_IRC_MESSAGE_RATE_LIMIT" json:"message_rate_limit"`
+	// MessageRateWindowSec is the sliding window duration in seconds for
+	// the rate limit. Default: 60 (one minute).
+	MessageRateWindowSec int `yaml:"message_rate_window_sec" env:"XDCC_IRC_MESSAGE_RATE_WINDOW_SEC" json:"message_rate_window_sec"`
+	// LogPrivateMessages enables logging of private PRIVMSG messages sent
+	// directly to the bot's nickname. When true, each incoming private message
+	// is appended to private.log in the log directory with the format:
+	//   <datetime> [server] <sender> message
+	// Default: false (disabled).
+	LogPrivateMessages bool `yaml:"log_private_messages" env:"XDCC_IRC_LOG_PRIVATE_MESSAGES" json:"log_private_messages"`
+	// ChannelLog is an UNDOCUMENTED, hidden toggle: when a channel name appears
+	// in this list, every PRIVMSG and NOTICE sent to that channel is appended
+	// to a per-channel log file in the logging directory. The field is
+	// intentionally not exposed in config.yaml, has no env-var override, and
+	// no API endpoint to manage it. It exists for the operator who needs to
+	// record conversations from specific channels and is opt-in per-channel
+	// (case-insensitive match). Leave empty to disable the feature entirely.
+	ChannelLog []string `yaml:"channel_log,omitempty" json:"channel_log,omitempty"`
 }
 
 type ServerConfig struct {
@@ -122,6 +171,16 @@ type HTTPConfig struct {
 	Port        int      `yaml:"port"          env:"XDCC_HTTP_PORT"          json:"port"`
 	BindAddress string   `yaml:"bind_address"  env:"XDCC_HTTP_BIND_ADDRESS"  json:"bind_address"`
 	CORSOrigins []string `yaml:"cors_origins"                            json:"cors_origins"`
+	// TrustProxy controls whether X-Forwarded-For is trusted for client IP
+	// extraction. Default: false. Only enable when behind a trusted reverse
+	// proxy that strips/overwrites X-Forwarded-For from external clients.
+	// WARNING: enabling this on a publicly exposed instance allows clients
+	// to spoof their IP and bypass per-IP rate limiting.
+	TrustProxy bool `yaml:"trust_proxy"   env:"XDCC_HTTP_TRUST_PROXY"   json:"trust_proxy"`
+	// BaseURL is the public-facing URL of the server, used to construct links
+	// in external notifications (e.g., watchlist search results). When empty,
+	// notification URLs are omitted. Example: "https://xs.lan.asga.uk"
+	BaseURL string `yaml:"base_url"       env:"XDCC_HTTP_BASE_URL"       json:"base_url"`
 }
 
 type DownloadConfig struct {
@@ -154,6 +213,7 @@ type StorageConfig struct {
 	DBPath             string `yaml:"db_path"              env:"XDCC_STORAGE_DB_PATH"              json:"db_path"`
 	DownloadsRetention string `yaml:"downloads_retention"  env:"XDCC_STORAGE_DOWNLOADS_RETENTION" json:"downloads_retention"`
 	CleanupInterval    string `yaml:"cleanup_interval"     env:"XDCC_STORAGE_CLEANUP_INTERVAL"    json:"cleanup_interval"`
+	BusyTimeoutMs      int    `yaml:"busy_timeout_ms"      env:"XDCC_STORAGE_BUSY_TIMEOUT_MS"     json:"busy_timeout_ms"`
 }
 
 type LoggingConfig struct {
@@ -183,6 +243,8 @@ type SecurityConfig struct {
 // NotificationConfig configures a single external notification target.
 type NotificationConfig struct {
 	Type string `yaml:"type" json:"type"`
+	// Enabled controls whether this provider is active. Default: true (nil = enabled).
+	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// Webhook
 	WebhookEndpoint string `yaml:"webhook_endpoint" json:"webhook_endpoint"`
 	WebhookToken    string `yaml:"webhook_token"    json:"webhook_token"`
@@ -193,6 +255,15 @@ type NotificationConfig struct {
 	PushoverToken    string `yaml:"pushover_token"    json:"pushover_token"`
 	PushoverUser     string `yaml:"pushover_user"     json:"pushover_user"`
 	PushoverEndpoint string `yaml:"pushover_endpoint" json:"pushover_endpoint"`
+	// Email / SMTP
+	SMTPHost       string `yaml:"smtp_host"       json:"smtp_host"`
+	SMTPPort       int    `yaml:"smtp_port"       json:"smtp_port"`
+	SMTPUsername   string `yaml:"smtp_username"   json:"smtp_username"`
+	SMTPPassword   string `yaml:"smtp_password"   json:"smtp_password"`
+	SMTPFrom       string `yaml:"smtp_from"       json:"smtp_from"`
+	SMTPTo         string `yaml:"smtp_to"         json:"smtp_to"`
+	SMTPTLS        string `yaml:"smtp_tls"        json:"smtp_tls"`
+	SMTPSkipVerify bool   `yaml:"smtp_skip_verify" json:"smtp_skip_verify"`
 	// Event filter (empty = all events)
 	Events []string `yaml:"events" json:"events"`
 }
@@ -212,6 +283,13 @@ func DefaultConfig() *Config {
 	return &Config{
 		IRC: IRCConfig{
 			Nickname: "xdcc-user",
+			// Empty greetings list → default "hello everybody" is used.
+			// Add custom phrases here (one per list entry) to randomize greetings.
+			Greetings:            []string{},
+			EnableMessageSend:    false, // safety: require explicit opt-in
+			LogPrivateMessages:   false, // safety: require explicit opt-in
+			MessageRateLimit:     5,     // 5 messages per window per IP
+			MessageRateWindowSec: 60,    // 60-second sliding window
 			DefaultServers: []ServerConfig{
 				{
 					Address:     "irc.rizon.net",
@@ -262,6 +340,7 @@ func DefaultConfig() *Config {
 			DBPath:             "./db",
 			DownloadsRetention: "30d",
 			CleanupInterval:    "12h",
+			BusyTimeoutMs:      2000,
 		},
 		Logging: LoggingConfig{
 			Level:    "info",
@@ -351,8 +430,14 @@ func (c *Config) loadFile(path string) error {
 // Supported env vars:
 //
 //	XDCC_IRC_NICKNAME
+//	XDCC_IRC_GREETINGS
+//	XDCC_IRC_ENABLE_MESSAGE_SEND
+//	XDCC_IRC_LOG_PRIVATE_MESSAGES
+//	XDCC_IRC_MESSAGE_RATE_LIMIT
+//	XDCC_IRC_MESSAGE_RATE_WINDOW_SEC
 //	XDCC_HTTP_PORT
 //	XDCC_HTTP_BIND_ADDRESS
+//	XDCC_HTTP_TRUST_PROXY
 //	XDCC_SECURITY_ADMIN_TOKEN
 //	XDCC_SECURITY_TOKEN_TTL_MINUTES
 //	XDCC_DOWNLOAD_TEMP_DIR
@@ -378,6 +463,24 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("XDCC_IRC_NICKNAME"); v != "" {
 		c.IRC.Nickname = v
 	}
+	// XDCC_IRC_GREETINGS: comma-separated list of greeting phrases. Empty
+	// (or unset) means the built-in default "hello everybody" will be used.
+	if v := os.Getenv("XDCC_IRC_GREETINGS"); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+		c.IRC.Greetings = out
+	}
+	if v := os.Getenv("XDCC_IRC_ENABLE_MESSAGE_SEND"); v != "" {
+		c.IRC.EnableMessageSend = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("XDCC_IRC_LOG_PRIVATE_MESSAGES"); v != "" {
+		c.IRC.LogPrivateMessages = strings.EqualFold(v, "true") || v == "1"
+	}
 	if v := os.Getenv("XDCC_HTTP_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
 			c.HTTP.Port = port
@@ -385,6 +488,12 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("XDCC_HTTP_BIND_ADDRESS"); v != "" {
 		c.HTTP.BindAddress = v
+	}
+	if v := os.Getenv("XDCC_HTTP_TRUST_PROXY"); v != "" {
+		c.HTTP.TrustProxy = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("XDCC_HTTP_BASE_URL"); v != "" {
+		c.HTTP.BaseURL = strings.TrimRight(v, "/")
 	}
 	if v := os.Getenv("XDCC_SECURITY_ADMIN_TOKEN"); v != "" {
 		c.Security.AdminToken = v
@@ -457,6 +566,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("XDCC_STORAGE_CLEANUP_INTERVAL"); v != "" {
 		c.Storage.CleanupInterval = v
+	}
+	if v := os.Getenv("XDCC_STORAGE_BUSY_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Storage.BusyTimeoutMs = n
+		}
 	}
 	if v := os.Getenv("XDCC_LOGGING_LEVEL"); v != "" {
 		c.Logging.Level = v
@@ -623,6 +737,9 @@ func (c *Config) Validate() error {
 	}
 
 	// Duration validation
+	if c.Storage.BusyTimeoutMs < 0 {
+		return fmt.Errorf("storage.busy_timeout_ms must be >= 0, got %d", c.Storage.BusyTimeoutMs)
+	}
 	if _, err := parseDurationString(c.Storage.DownloadsRetention); err != nil {
 		return fmt.Errorf("storage.downloads_retention: %w", err)
 	}
@@ -729,9 +846,400 @@ func (c *Config) ParseDownloadsRetention() (int, error) {
 	return int(d.Hours() / 24), nil
 }
 
+// normalizeChannelName normalizes an IRC channel name: trims, lowercases,
+// and ensures a leading '#' prefix. Returns the empty string unchanged.
+func normalizeChannelName(channel string) string {
+	ch := strings.ToLower(strings.TrimSpace(channel))
+	if ch != "" && !strings.HasPrefix(ch, "#") && !strings.HasPrefix(ch, "&") {
+		ch = "#" + ch
+	}
+	return ch
+}
+
+// DefaultGreeting is sent to a channel right after JOIN when the configured
+// greetings list is empty.
+const DefaultGreeting = "hello everybody"
+
+// PickGreeting returns a pseudo-random greeting message. If the configured
+// list is empty, the default "hello everybody" greeting is returned. The
+// selection uses crypto/rand to be safe even when called concurrently from
+// many goroutines (e.g. when multiple channels are joined simultaneously).
+func (c *Config) PickGreeting() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.IRC.Greetings) == 0 {
+		return DefaultGreeting
+	}
+	idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(c.IRC.Greetings))))
+	if err != nil {
+		// Fall back to a deterministic index on the (extremely rare) rand
+		// failure so we never return an empty string.
+		return c.IRC.Greetings[0]
+	}
+	return c.IRC.Greetings[idx.Int64()]
+}
+
+// IsChannelBlacklisted returns true if the given channel name is in the
+// channel blacklist. The check is case-insensitive and the channel name
+// is normalized (lowercase, # prefix). Blacklisted channels are never
+// joined, not even manually or via WHOIS discovery.
+func (c *Config) IsChannelBlacklisted(channel string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ch := normalizeChannelName(channel)
+	if ch == "" {
+		return false
+	}
+	for _, bl := range c.IRC.ChannelBlacklist {
+		if normalizeChannelName(bl) == ch {
+			return true
+		}
+	}
+	return false
+}
+
+// IsChannelLogged returns true if PRIVMSG/NOTICE traffic to the given channel
+// should be recorded to a per-channel log file. Hidden/undocumented feature:
+// there is no UI or API to manage it, only the YAML irc.channel_log field.
+// The check is case-insensitive and normalizes the channel name (lowercase,
+// leading '#'). Returns false when the list is empty (default — no logging).
+func (c *Config) IsChannelLogged(channel string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.IRC.ChannelLog) == 0 {
+		return false
+	}
+	ch := normalizeChannelName(channel)
+	if ch == "" {
+		return false
+	}
+	for _, name := range c.IRC.ChannelLog {
+		if normalizeChannelName(name) == ch {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseCleanupInterval parses the cleanup interval string into a time.Duration.
 func (c *Config) ParseCleanupInterval() (time.Duration, error) {
 	return parseDurationString(c.Storage.CleanupInterval)
+}
+
+// ---------------------------------------------------------------------------
+// Thread-safe accessors for scalar fields read by concurrent goroutines.
+// These acquire mu.RLock internally so callers don't need external locking.
+// ---------------------------------------------------------------------------
+
+// GetNickname returns the configured IRC nickname.
+func (c *Config) GetNickname() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.Nickname
+}
+
+// GetEnableMessageSend returns whether IRC message sending is enabled.
+func (c *Config) GetEnableMessageSend() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.EnableMessageSend
+}
+
+// GetLogPrivateMessages returns whether private message logging is enabled.
+func (c *Config) GetLogPrivateMessages() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.LogPrivateMessages
+}
+
+// GetMessageRateLimit returns the rate limit and window for message sending.
+func (c *Config) GetMessageRateLimit() (limit, windowSec int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IRC.MessageRateLimit, c.IRC.MessageRateWindowSec
+}
+
+// GetTrustProxy returns whether X-Forwarded-For is trusted.
+func (c *Config) GetTrustProxy() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.HTTP.TrustProxy
+}
+
+// GetDownloadConfig returns a copy of the download configuration.
+func (c *Config) GetDownloadConfig() DownloadConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download
+}
+
+// GetBaseURL returns the public-facing base URL for constructing notification links.
+func (c *Config) GetBaseURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.HTTP.BaseURL
+}
+
+// GetTokenTTLMinutes returns the security token TTL.
+func (c *Config) GetTokenTTLMinutes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Security.TokenTTLMinutes
+}
+
+// GetUITheme returns the current UI theme.
+func (c *Config) GetUITheme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.Theme
+}
+
+// GetSetupCompleted returns whether setup has been completed.
+func (c *Config) GetSetupCompleted() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.UI.SetupCompleted
+}
+
+// GetChannelJoinDelay returns the channel join delay setting.
+func (c *Config) GetChannelJoinDelay() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.ChannelJoinDelay
+}
+
+// GetMaxRateBPS returns the download rate limit in bytes per second.
+func (c *Config) GetMaxRateBPS() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxRateBPS
+}
+
+// GetMaxParallelTotal returns the global maximum parallel downloads.
+func (c *Config) GetMaxParallelTotal() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxParallelTotal
+}
+
+// GetMinDiskSpace returns the minimum required disk space in bytes.
+func (c *Config) GetMinDiskSpace() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MinDiskSpace
+}
+
+// GetFailFallback returns the failure fallback mode.
+func (c *Config) GetFailFallback() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.FailFallback
+}
+
+// GetMaxRetryAttempts returns the maximum number of retry attempts.
+func (c *Config) GetMaxRetryAttempts() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.MaxRetryAttempts
+}
+
+// GetTempDir returns the download temporary directory.
+func (c *Config) GetTempDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.TempDir
+}
+
+// GetDestDir returns the download destination directory.
+func (c *Config) GetDestDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.DestDir
+}
+
+// GetStartupDelayMinutes returns the startup delay in minutes.
+func (c *Config) GetStartupDelayMinutes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.StartupDelayMinutes
+}
+
+// GetConflictPolicy returns the file conflict resolution policy.
+func (c *Config) GetConflictPolicy() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Download.ConflictPolicy
+}
+
+// bumpRevision atomically increments the config revision counter.
+// Must be called under fileMu (already held by all write paths).
+func (c *Config) bumpRevision() {
+	c.revision.Add(1)
+}
+
+// GetConfigRevision returns the current config revision number.
+// Components that cache config-derived state can poll this value to
+// detect when the config was persisted and rebuild their cached state.
+func (c *Config) GetConfigRevision() int64 {
+	return c.revision.Load()
+}
+
+// Clone returns a deep copy of all data fields of c. The mutex fields are not
+// copied — the returned Config starts with zero-value (unlocked) mutexes.
+// Use Clone to take a safe, read-locked snapshot of the live config.
+// Returns a pointer so callers do not implicitly copy the embedded mutex.
+func (c *Config) Clone() *Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cloneLocked()
+}
+
+// cloneLocked returns a deep copy of c's data fields. The mutex fields are
+// not copied — the returned Config has zero-value (unlocked) mutexes.
+// Callers must hold c.mu (read or write) before calling this method; it does
+// not acquire any lock on its own.
+func (c *Config) cloneLocked() *Config {
+	out := &Config{
+		IRC:       c.IRC,
+		HTTP:      c.HTTP,
+		Security:  c.Security,
+		Download:  c.Download,
+		Search:    c.Search,
+		Storage:   c.Storage,
+		Logging:   c.Logging,
+		UI:        c.UI,
+		Profiling: c.Profiling,
+	}
+	// Deep-copy slice fields to prevent sharing underlying arrays.
+	if c.Notifications != nil {
+		out.Notifications = make([]NotificationConfig, len(c.Notifications))
+		for i, n := range c.Notifications {
+			out.Notifications[i] = n
+			if n.Events != nil {
+				out.Notifications[i].Events = make([]string, len(n.Events))
+				copy(out.Notifications[i].Events, n.Events)
+			}
+		}
+	}
+	if c.IRC.Greetings != nil {
+		out.IRC.Greetings = make([]string, len(c.IRC.Greetings))
+		copy(out.IRC.Greetings, c.IRC.Greetings)
+	}
+	if c.IRC.ChannelBlacklist != nil {
+		out.IRC.ChannelBlacklist = make([]string, len(c.IRC.ChannelBlacklist))
+		copy(out.IRC.ChannelBlacklist, c.IRC.ChannelBlacklist)
+	}
+	if c.IRC.ChannelLog != nil {
+		out.IRC.ChannelLog = make([]string, len(c.IRC.ChannelLog))
+		copy(out.IRC.ChannelLog, c.IRC.ChannelLog)
+	}
+	if c.IRC.DefaultServers != nil {
+		out.IRC.DefaultServers = make([]ServerConfig, len(c.IRC.DefaultServers))
+		for i, s := range c.IRC.DefaultServers {
+			out.IRC.DefaultServers[i] = s
+			if s.Channels != nil {
+				out.IRC.DefaultServers[i].Channels = make([]ChannelConfig, len(s.Channels))
+				copy(out.IRC.DefaultServers[i].Channels, s.Channels)
+			}
+		}
+	}
+	if c.HTTP.CORSOrigins != nil {
+		out.HTTP.CORSOrigins = make([]string, len(c.HTTP.CORSOrigins))
+		copy(out.HTTP.CORSOrigins, c.HTTP.CORSOrigins)
+	}
+	if c.Search.EnabledProviders != nil {
+		out.Search.EnabledProviders = make([]string, len(c.Search.EnabledProviders))
+		copy(out.Search.EnabledProviders, c.Search.EnabledProviders)
+	}
+	return out
+}
+
+// SnapshotAndApply atomically captures the current config state, passes a
+// deep copy of that snapshot to fn for mutation, and installs the mutated
+// snapshot as the new live config.
+//
+// The entire operation runs under mu.Lock() — snapshot, mutation, and
+// installation are serialized with respect to all other writers and readers.
+// This eliminates the TOCTOU window that existed with the previous RLock +
+// Unlock + Replace(Lock) pattern, where a concurrent SnapshotAndApply could
+// interleave between the RUnlock and the Replace, causing a lost update.
+//
+// The returned *Config is the PRE-mutation snapshot — the same value the
+// caller can use as the "old" side of a diff when calling ApplyPartial to
+// persist only changed fields to disk:
+//
+//	old := a.Config.SnapshotAndApply(func(snap *Config) {
+//	    snap.UI.Theme = "dark"
+//	})
+//	a.Config.ApplyPartial(path, old) // diff(old, live) = theme change only
+//
+// fn must not call back into c (e.g. via c.Clone or c.Replace) — it should
+// only mutate the passed *Config value. Calling back would deadlock because
+// mu is held for the entire duration.
+//
+// WARNING: fn runs under mu.Lock(), which blocks all other readers and
+// writers of Config. fn must NOT perform any I/O, blocking operations,
+// or slow computation. Keep it limited to cheap field assignments.
+// If you need to add I/O (e.g. validation, persistence), do it BEFORE
+// calling SnapshotAndApply, not inside fn.
+func (c *Config) SnapshotAndApply(fn func(snap *Config)) *Config {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	old := c.cloneLocked()
+	// Second clone under the same Lock: ensures `old` and `post` share the
+	// exact same pre-mutation state, so the diff computed later is
+	// strictly the user's intended mutation.
+	post := c.cloneLocked()
+
+	if fn != nil {
+		fn(post)
+	}
+
+	// Inline field-by-field copy from Replace — cannot call Replace because
+	// it would deadlock trying to acquire mu.Lock() again.
+	// IMPORTANT: when adding a new top-level Config field, add it both
+	// here AND in Replace() below. If they diverge, SnapshotAndApply will
+	// silently drop the new field on live config updates.
+	c.IRC = post.IRC
+	c.HTTP = post.HTTP
+	c.Security = post.Security
+	c.Download = post.Download
+	c.Search = post.Search
+	c.Storage = post.Storage
+	c.Logging = post.Logging
+	c.UI = post.UI
+	c.Profiling = post.Profiling
+	c.Notifications = post.Notifications
+
+	return old
+}
+
+// Replace atomically replaces all data fields of c with those from other.
+// The mutex fields of c are preserved. other must be a local (non-shared) Config value
+// built in a single goroutine before calling Replace. It is passed by pointer
+// to avoid copying the embedded mutex when calling.
+//
+// NOTE: Replace does NOT bump the config revision counter (revision).
+// The revision is only incremented on disk writes (Save, SaveRaw,
+// ApplyPartial). If you call Replace without subsequently persisting,
+// components polling GetConfigRevision() will not detect the change.
+// When called inside SnapshotAndApply's fn (the typical pattern), this is
+// safe because the caller always follows with ApplyPartial which saves
+// and bumps the revision.
+func (c *Config) Replace(other *Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.IRC = other.IRC
+	c.HTTP = other.HTTP
+	c.Security = other.Security
+	c.Download = other.Download
+	c.Search = other.Search
+	c.Storage = other.Storage
+	c.Logging = other.Logging
+	c.UI = other.UI
+	c.Profiling = other.Profiling
+	c.Notifications = other.Notifications
 }
 
 // ---------------------------------------------------------------------------
@@ -742,12 +1250,21 @@ func (c *Config) ParseCleanupInterval() (time.Duration, error) {
 // comments and formatting from the Advanced YAML editor. A .bak backup of the
 // existing file is created before overwriting. The bytes are validated by the
 // caller before calling this method. If path is empty, returns an error.
+// Concurrent calls to SaveRaw, Save, and ApplyPartial are serialized via fileMu.
 func (c *Config) SaveRaw(path string, rawYAML []byte) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	return c.saveRawUnlocked(path, rawYAML)
+}
+
+// saveRawUnlocked is the non-locking implementation of SaveRaw.
+// Callers must hold c.fileMu before calling.
+func (c *Config) saveRawUnlocked(path string, rawYAML []byte) error {
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
-	// Stat the file once: if it exists, create a backup and preserve its mode.
+	// Create a backup and preserve file mode if the file exists.
 	mode := os.FileMode(0o644)
 	if fi, statErr := os.Stat(path); statErr == nil {
 		mode = fi.Mode()
@@ -757,51 +1274,40 @@ func (c *Config) SaveRaw(path string, rawYAML []byte) error {
 		}
 	}
 
-	// Atomic write: write to temp file first, then rename.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, rawYAML, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+	if err := atomicWriteFile(path, rawYAML, mode); err != nil {
+		return err
 	}
-
-	if err := os.Rename(tmp, path); err == nil {
-		return nil
-	}
-
-	// Rename failed (e.g., Docker bind mount → EBUSY). Clean up temp file
-	// and fall back to writing directly to the target path.
-	os.Remove(tmp)
-	if err := os.WriteFile(path, rawYAML, mode); err == nil {
-		return nil
-	}
-
-	// Last-resort fallback: write to /data then copy (Docker volume workaround).
-	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
-		tmpData := "/data/config.yaml.tmp"
-		if err := os.WriteFile(tmpData, rawYAML, 0o600); err == nil {
-			defer os.Remove(tmpData)
-			if copyErr := copyFile(tmpData, path); copyErr == nil {
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("all write methods failed for %s", path)
+	c.bumpRevision()
+	return nil
 }
 
 // Save marshals the current configuration to YAML and writes it atomically
 // to the given path. For raw byte writes (preserving comments/formatting),
 // use SaveRaw instead. If path is empty, returns an error.
+// Concurrent calls to Save, SaveRaw, and ApplyPartial are serialized via fileMu.
 func (c *Config) Save(path string) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	return c.saveUnlocked(path)
+}
+
+// saveUnlocked is the non-locking implementation of Save.
+// Callers must hold c.fileMu before calling.
+func (c *Config) saveUnlocked(path string) error {
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
+	// Marshal under RLock to prevent a concurrent Replace from racing with
+	// yaml.Marshal's reflection-based field traversal.
+	c.mu.RLock()
 	data, err := yaml.Marshal(c)
+	c.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("marshaling config to YAML: %w", err)
 	}
 
-	// Stat the file once: if it exists, create a backup and preserve its mode.
+	// Create a backup and preserve file mode if the file exists.
 	mode := os.FileMode(0o644)
 	if fi, statErr := os.Stat(path); statErr == nil {
 		mode = fi.Mode()
@@ -811,24 +1317,28 @@ func (c *Config) Save(path string) error {
 		}
 	}
 
-	// Atomic write: write to temp file first, then rename.
+	if err := atomicWriteFile(path, data, mode); err != nil {
+		return err
+	}
+	c.bumpRevision()
+	return nil
+}
+
+// atomicWriteFile writes data to path atomically using a temp file + rename.
+// Falls back to direct write if rename fails (e.g. Docker bind mount EBUSY).
+// Last-resort: writes to /data then copies (Docker volume workaround).
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+		return fmt.Errorf("writing temp file %s: %w", tmp, err)
 	}
-
 	if err := os.Rename(tmp, path); err == nil {
 		return nil
 	}
-
-	// Rename failed (e.g., Docker bind mount → EBUSY). Clean up temp file
-	// and fall back to writing directly to the target path.
 	os.Remove(tmp)
 	if err := os.WriteFile(path, data, mode); err == nil {
 		return nil
 	}
-
-	// Last-resort fallback: write to /data then copy (Docker volume workaround).
 	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
 		tmpData := "/data/config.yaml.tmp"
 		if err := os.WriteFile(tmpData, data, 0o600); err == nil {
@@ -838,7 +1348,6 @@ func (c *Config) Save(path string) error {
 			}
 		}
 	}
-
 	return fmt.Errorf("all write methods failed for %s", path)
 }
 
@@ -871,13 +1380,21 @@ type configChange struct {
 // to the YAML node tree. This preserves all comments, formatting, and field
 // ordering in the file. For non-scalar changes (slices, nested structs) it
 // falls back to a full Save().
+// Concurrent calls to ApplyPartial, Save, and SaveRaw are serialized via fileMu.
 func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+
 	if path == "" {
 		return fmt.Errorf("config path is empty, cannot save")
 	}
 
-	// Compute the changes between old and new config.
+	// Compute the changes between old and new config under RLock so that
+	// a concurrent Replace cannot race with the reflection-based diff.
+	c.mu.RLock()
 	changes := diffConfigs(oldCfg, c)
+	c.mu.RUnlock()
+
 	if len(changes) == 0 {
 		return nil // nothing to do
 	}
@@ -886,7 +1403,7 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 	// back to a full rewrite since we can't surgically update those.
 	for _, ch := range changes {
 		if !isScalarValue(ch.newValue) {
-			return c.Save(path)
+			return c.saveUnlocked(path)
 		}
 	}
 
@@ -899,16 +1416,16 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		// If we can't parse as a node tree, fall back to full save.
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 
 	// Navigate to the root mapping node.
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 	rootMapping := doc.Content[0]
 	if rootMapping.Kind != yaml.MappingNode {
-		return c.Save(path)
+		return c.saveUnlocked(path)
 	}
 
 	// Create a backup before modifying.
@@ -922,7 +1439,7 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 		if err := applyScalarChange(rootMapping, ch.yamlPath, ch.newValue); err != nil {
 			// If we can't apply a change (e.g. key missing in YAML), fall
 			// back to full save.
-			return c.Save(path)
+			return c.saveUnlocked(path)
 		}
 	}
 
@@ -932,39 +1449,17 @@ func (c *Config) ApplyPartial(path string, oldCfg *Config) error {
 		mode = fi.Mode()
 	}
 
-	// Write the modified node tree back to disk (atomic write).
+	// Write the modified node tree back to disk.
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return fmt.Errorf("marshaling updated config: %w", err)
 	}
 
-	// Atomic write: write to temp file first, then rename.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, mode); err != nil {
-		return fmt.Errorf("writing temp config %s: %w", tmp, err)
+	if err := atomicWriteFile(path, out, mode); err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, path); err == nil {
-		return nil
-	}
-	os.Remove(tmp)
-
-	// Rename failed — fall back to direct write.
-	if err := os.WriteFile(path, out, mode); err == nil {
-		return nil
-	}
-
-	// Last-resort /data fallback.
-	if di, e := os.Stat("/data"); e == nil && di.IsDir() {
-		tmpData := "/data/config.yaml.tmp"
-		if err := os.WriteFile(tmpData, out, 0o600); err == nil {
-			defer os.Remove(tmpData)
-			if copyErr := copyFile(tmpData, path); copyErr == nil {
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("all write methods failed for %s", path)
+	c.bumpRevision()
+	return nil
 }
 
 // diffConfigs compares two Config structs and returns a list of field changes.

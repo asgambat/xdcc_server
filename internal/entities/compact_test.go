@@ -35,8 +35,8 @@ func TestCompactPacks(t *testing.T) {
 
 	mkPack := func(filename string, size int64, bot string, packNum int) *XDCCPack {
 		p := NewXDCCPack(srv, bot, packNum)
-		p.Filename = filename
-		p.Size = size
+		p.SetFilename(filename, true)
+		p.SetSize(size)
 		return p
 	}
 
@@ -68,8 +68,8 @@ func TestCompactPacks_NoDuplicates(t *testing.T) {
 
 	mkPack := func(filename string, size int64, bot string, packNum int) *XDCCPack {
 		p := NewXDCCPack(srv, bot, packNum)
-		p.Filename = filename
-		p.Size = size
+		p.SetFilename(filename, true)
+		p.SetSize(size)
 		return p
 	}
 
@@ -94,11 +94,11 @@ func TestCompactPacks_Empty(t *testing.T) {
 func TestCompactPacks_ZeroSize(t *testing.T) {
 	srv := IrcServer{Address: "irc.rizon.net"}
 	p1 := NewXDCCPack(srv, "Bot1234567890", 1)
-	p1.Filename = "file.mkv"
-	p1.Size = 0
+	p1.SetFilename("file.mkv", true)
+	p1.SetSize(0)
 	p2 := NewXDCCPack(srv, "Bot1234567XXX", 2)
-	p2.Filename = "file.mkv"
-	p2.Size = 0
+	p2.SetFilename("file.mkv", true)
+	p2.SetSize(0)
 	result := CompactPacks([]*XDCCPack{p1, p2})
 	if len(result) != 1 {
 		t.Errorf("expected 1 (compacted), got %d", len(result))
@@ -108,11 +108,11 @@ func TestCompactPacks_ZeroSize(t *testing.T) {
 func TestCompactPacks_EmptyFilename(t *testing.T) {
 	srv := IrcServer{Address: "irc.rizon.net"}
 	p1 := NewXDCCPack(srv, "BotA", 1)
-	p1.Filename = ""
-	p1.Size = 100
+	p1.SetFilename("", true)
+	p1.SetSize(100)
 	p2 := NewXDCCPack(srv, "BotB", 2)
-	p2.Filename = ""
-	p2.Size = 200
+	p2.SetFilename("", true)
+	p2.SetSize(200)
 	result := CompactPacks([]*XDCCPack{p1, p2})
 	// Different sizes → both kept
 	if len(result) != 2 {
@@ -125,8 +125,8 @@ func TestCompactPacks_AllIdentical(t *testing.T) {
 	var packs []*XDCCPack
 	for i := 0; i < 5; i++ {
 		p := NewXDCCPack(srv, "Bot1234567890", i+1)
-		p.Filename = "same.mkv"
-		p.Size = 1000
+		p.SetFilename("same.mkv", true)
+		p.SetSize(1000)
 		packs = append(packs, p)
 	}
 	result := CompactPacks(packs)

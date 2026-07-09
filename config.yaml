@@ -4,6 +4,28 @@
 irc:
   # Base nickname (a random suffix is always appended)
   nickname: "xdcc-user"
+  # Channels that must never be joined (case-insensitive, # prefix optional)
+  channel_blacklist: []
+  # Greeting messages sent to a channel after joining it. A random message
+  # is picked from the list; if the list is empty, the default greeting
+  # "hello everybody" is used instead. A random delay between 2 and 4
+  # seconds is applied before sending, to look more natural and to avoid
+  # triggering IRC anti-flood protections.
+  greetings: []
+  # Whether the send-message REST endpoint and UI are enabled.
+  # Default: false (disabled). Set to true to allow sending PRIVMSG
+  # to IRC channels via the web UI.
+  enable_message_send: false
+  # Whether private PRIVMSG messages sent directly to the bot's nickname
+  # are logged to private.log in the log directory. Format:
+  #   <datetime> [server] <sender> message
+  # Default: false (disabled).
+  log_private_messages: false
+  # Per-IP rate limiting: max messages per sliding window.
+  # Set message_rate_limit to 0 to disable rate limiting entirely.
+  # Default: 5 messages every 60 seconds per client IP.
+  message_rate_limit: 5
+  message_rate_window_sec: 60
   # Default IRC servers to connect to on startup
   default_servers:
     - address: "irc.rizon.net"
@@ -26,6 +48,16 @@ http:
   bind_address: "127.0.0.1"
   # Allowed CORS origins (empty = same-origin only; for dev add "http://localhost:5173")
   cors_origins: []
+  # Public-facing base URL used for notification links (e.g., watchlist search results).
+  # When empty, links are omitted from notifications.
+  # Example: "https://xs.lan.asga.uk"
+  base_url: ""
+  # Whether to trust X-Forwarded-For header for client IP extraction.
+  # Default: false. Only enable when behind a trusted reverse proxy that
+  # strips/overwrites X-Forwarded-For from external clients.
+  # WARNING: enabling this on a publicly exposed instance allows clients
+  # to spoof their IP and bypass per-IP rate limiting.
+  trust_proxy: false
 
 download:
   # Directory for in-progress partial files
@@ -80,6 +112,11 @@ storage:
   downloads_retention: "30d"
   # Interval between periodic cleanup runs
   cleanup_interval: "12h"
+  # SQLite busy timeout (ms): how long SQLite retries internally when the
+  # database is locked by another connection before returning SQLITE_BUSY.
+  # Handles transient lock contention (e.g. download completing while
+  # another is being enqueued). Set to 0 to disable.
+  busy_timeout_ms: 2000
 
 logging:
   # Log level: debug | info | warn | error
@@ -104,9 +141,10 @@ profiling:
   mutex_profile_fraction: 0
 
 # External notifications for download and watchlist events
-# Supported providers: webhook, ntfy, pushover
+# Supported providers: webhook, ntfy, pushover, email
 # Available events: download_completed, download_failed, watchlist_new_results
 # If events is empty or omitted, all events trigger notifications.
+# Each provider can be disabled by setting enabled: false (default: true).
 #
 # Uncomment the desired providers below to enable notifications.
 #
@@ -116,8 +154,10 @@ profiling:
 #   Invia POST {"data":"messaggio"} a un endpoint HTTP/HTTPS qualsiasi.
 #   Supporta Bearer token opzionale per autenticazione.
 #   Esempi di utilizzo: Telegram bot, Slack webhook, IFTTT, Zapier.
+#   Per disabilitare: enabled: false
 #
 #   - type: webhook
+#     enabled: true                                  # default: true
 #     webhook_endpoint: "https://hooks.example.com/notify"
 #     webhook_token: "tk_abc123"                  # opzionale, ometti se non serve
 #     events: [download_completed, download_failed, watchlist_new_results]
@@ -127,8 +167,10 @@ profiling:
 #   Richiede un topic (gratuito) o istanza self-hosted.
 #   Il token è il Bearer token per l'autenticazione (opzionale: se omesso
 #   l'endpoint deve essere pubblico/anonymous).
+#   Per disabilitare: enabled: false
 #
 #   - type: ntfy
+#     enabled: true                                  # default: true
 #     ntfy_token: "tk_abc123"                     # opzionale, ometti per topic pubblico
 #     ntfy_endpoint: "https://ntfy.sh/mio_topic"
 #     events: [download_completed, download_failed, watchlist_new_results]
@@ -137,9 +179,30 @@ profiling:
 #   https://pushover.net — notifiche push su iOS/Android/desktop.
 #   Servono un Application Token e un User/Group Key.
 #   pushover_endpoint è opzionale (default: https://api.pushover.net/1/messages.json).
+#   Per disabilitare: enabled: false
 #
 #   - type: pushover
+#     enabled: true                                  # default: true
 #     pushover_token: "APP_TOKEN"
 #     pushover_user: "USER_KEY"
 #     pushover_endpoint: "https://api.pushover.net/1/messages.json"  # default, puoi omettere
+#     events: [download_completed, download_failed, watchlist_new_results]
+#
+#   ─── Email (SMTP) ──────────────────────────────────────────────
+#   Invia email via server SMTP. Supporta STARTTLS (default, porta 587),
+#   SSL/TLS diretto (porta 465 con smtp_tls: ssl) e connessione senza TLS
+#   (smtp_tls: none). Se le credenziali sono vuote, invia senza autenticazione.
+#   smtp_skip_verify: true permette certificati self-signed.
+#   Per disabilitare: enabled: false
+#
+#   - type: email
+#     enabled: true                                  # default: true
+#     smtp_host: "smtp.gmail.com"
+#     smtp_port: 587                                 # default: 587
+#     smtp_username: "tua@email.com"
+#     smtp_password: "la_tua_password"
+#     smtp_from: "tua@email.com"
+#     smtp_to: "destinatario@example.com"           # multipli separati da virgola
+#     smtp_tls: "starttls"                          # starttls | ssl | none
+#     smtp_skip_verify: false                       # true per certificati self-signed
 #     events: [download_completed, download_failed, watchlist_new_results]

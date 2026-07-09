@@ -1,4 +1,4 @@
-# Go Code Review — xdcc-go (bis)
+# Go Code Review — xdcc_server (bis)
 
 **Data:** 25 Maggio 2026  
 **Revisore:** Senior Go Developer / Code Reviewer  

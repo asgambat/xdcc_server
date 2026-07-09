@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"xdcc-go/internal/ircmanager"
-	"xdcc-go/internal/logging"
-	"xdcc-go/internal/queue"
-	"xdcc-go/internal/sse"
+	"xdcc_server/internal/ircmanager"
+	"xdcc_server/internal/logging"
+	"xdcc_server/internal/queue"
+	"xdcc_server/internal/sse"
 )
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 [Unit]
 Description=xdcc-server — XDCC download daemon with REST API and web UI
-Documentation=https://github.com/asgambat/xdcc-go
+Documentation=https://github.com/asgambat/xdcc-server
 After=network-online.target
 Wants=network-online.target
 

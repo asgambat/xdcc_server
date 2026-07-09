@@ -72,6 +72,8 @@ export const ServersAPI = {
   leaveChannel(sid, ch) { return api.del(`/servers/${sid}/channels/${encodeURIComponent(ch)}`); },
   topic(sid, ch)  { return api.get(`/servers/${sid}/channels/${encodeURIComponent(ch)}/topic`); },
   setChannelAutoJoin(sid, ch, autoJoin) { return api.patch(`/servers/${sid}/channels/${encodeURIComponent(ch)}`, { auto_join: autoJoin }); },
+  /** Send a message (PRIVMSG) to a channel. Multi-line messages are accepted. */
+  sendMessage(sid, ch, message) { return api.post(`/servers/${sid}/channels/${encodeURIComponent(ch)}/messages`, { message }); },
 };
 
 // ---- Download API ----
@@ -100,6 +102,7 @@ export const DownloadsAPI = {
   retry(id)       { return api.post(`/downloads/${id}/retry`); },
   position(id, p) { return api.patch(`/downloads/${id}/position`, { priority: p }); },
   bulk(ids, action) { return api.post('/downloads/bulk', { ids, action }); },
+  deleteAllHistory() { return api.del('/downloads/history', { adminToken: getAdminToken() }); },
 };
 
 // ---- Search API ----
@@ -250,6 +253,7 @@ export class SSEClient {
     };
 
     const eventTypes = [
+      'keepalive',
       'server_connected', 'server_disconnected', 'server_reconnecting',
       'channel_joined', 'channel_left', 'channel_topic_updated',
       'download_queued', 'download_started', 'download_progress',

@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"xdcc_server/internal/store"
+
 	"github.com/go-chi/chi/v5"
-	"xdcc-go/internal/store"
 )
 
 // =========================================================================
@@ -246,6 +247,12 @@ func (a *API) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 	// entries are created when IRC events use different casing.
 	body.Name = strings.ToLower(body.Name)
 
+	// Reject blacklisted channels before persisting to DB
+	if a.Config.IsChannelBlacklisted(body.Name) {
+		writeError(w, http.StatusForbidden, "CHANNEL_BLACKLISTED", fmt.Sprintf("Channel %q is blacklisted", body.Name))
+		return
+	}
+
 	chID, err := a.Store.AddChannel(r.Context(), store.ChannelRecord{
 		ServerID: serverID,
 		Name:     body.Name,
@@ -330,6 +337,86 @@ func (a *API) handleGetChannelTopic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"topic": topic})
+}
+
+// =========================================================================
+// POST /api/servers/:serverID/channels/:channelName/messages
+// =========================================================================
+
+// handleSendChannelMessage sends a message to an IRC channel via the
+// persistent connection. The body is JSON: { "message": "..." }.
+// Multi-line messages are split into one PRIVMSG per line by the manager.
+// This endpoint is gated by config.IRC.EnableMessageSend (default: false).
+func (a *API) handleSendChannelMessage(w http.ResponseWriter, r *http.Request) {
+	// Gate: message sending must be explicitly enabled in config.
+	if a.Config == nil || !a.Config.GetEnableMessageSend() {
+		writeError(w, http.StatusForbidden, "MESSAGES_DISABLED",
+			"Message sending is disabled. Set irc.enable_message_send=true in config.")
+		return
+	}
+
+	serverID, err := parseID(chi.URLParam(r, "serverID"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid server ID")
+		return
+	}
+	channelName, err := url.PathUnescape(chi.URLParam(r, "channelName"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_CHANNEL", "Invalid channel name encoding")
+		return
+	}
+	channelName = strings.ToLower(strings.TrimSpace(channelName))
+
+	if a.IRCManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "IRC_UNAVAILABLE", "IRC manager not available")
+		return
+	}
+	if channelName == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_CHANNEL", "channel name is required")
+		return
+	}
+
+	var body struct {
+		Message string `json:"message"`
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Invalid request body")
+		return
+	}
+
+	msg := strings.TrimSpace(body.Message)
+	if msg == "" {
+		writeError(w, http.StatusBadRequest, "MESSAGE_EMPTY", "message must not be empty")
+		return
+	}
+	// IRC RFC 1459 sets the maximum message length to 512 bytes including
+	// the trailing CRLF and the PRIVMSG prefix. The girc client splits
+	// long messages automatically, but we still cap the user-supplied
+	// message to a reasonable length to avoid abuse.
+	if len(msg) > 4000 {
+		writeError(w, http.StatusBadRequest, "MESSAGE_TOO_LONG",
+			"message must be at most 4000 characters")
+		return
+	}
+
+	// Apply per-IP rate limiting for flood prevention.
+	// Uses atomic load to avoid data races with syncMsgRateLimiter().
+	if rl := a.MsgRateLimiter.Load(); rl != nil {
+		clientIP := extractClientIP(r, a.Config.GetTrustProxy())
+		if !rl.Allow(clientIP) {
+			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED",
+				"Too many messages. Please wait before sending another message.")
+			return
+		}
+	}
+
+	if err := a.IRCManager.SendChannelMessage(serverID, channelName, msg); err != nil {
+		a.logAndError(w, http.StatusBadRequest, "SEND_MESSAGE_ERROR", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "channel": channelName})
 }
 
 // =========================================================================

@@ -3,7 +3,7 @@ package searchagg
 import (
 	"testing"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // Helper to create a pack with minimal fields.
@@ -143,6 +143,98 @@ func TestFilterByExt(t *testing.T) {
 	result = filterByExt(packs, []string{".exe"})
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for .exe, got %d", len(result))
+	}
+}
+
+// ===========================================================================
+// filterByQuery (inclusion + exclusion terms)
+// ===========================================================================
+
+func TestFilterByQuery_Exclusion(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Ubuntu.24.04.Server.mkv", 1000, "Bot1"),
+		mkPack("Ubuntu.24.04.Desktop.mkv", 800, "Bot2"),
+		mkPack("Debian.12.Server.mkv", 500, "Bot3"),
+	}
+
+	// "ubuntu -server" → keep packs with "ubuntu" but NOT "server"
+	result := filterByQuery(packs, "ubuntu -server")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for 'ubuntu -server', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.GetFilename())
+		}
+	}
+	if len(result) > 0 && result[0].GetFilename() != "Ubuntu.24.04.Desktop.mkv" {
+		t.Errorf("expected 'Ubuntu.24.04.Desktop.mkv', got %q", result[0].GetFilename())
+	}
+}
+
+func TestFilterByQuery_OnlyExclusion(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("my.file.mkv", 100, "Bot1"),
+		mkPack("sample.v2.mkv", 200, "Bot2"),
+	}
+
+	// "-sample" → keep packs that do NOT contain "sample" (all pass positive check)
+	result := filterByQuery(packs, "-sample")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for '-sample', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.GetFilename())
+		}
+	}
+	if len(result) > 0 && result[0].GetFilename() != "my.file.mkv" {
+		t.Errorf("expected 'my.file.mkv', got %q", result[0].GetFilename())
+	}
+}
+
+func TestFilterByQuery_MultipleExclusions(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Anime.Show.S01E01.1080p.mkv", 1000, "Bot1"),
+		mkPack("Anime.Show.S01E01.720p.mkv", 800, "Bot2"),
+		mkPack("Anime.Show.S01E01.480p.mkv", 500, "Bot3"),
+		mkPack("Anime.Show.S01E01.HEVC.mkv", 900, "Bot4"),
+	}
+
+	// "Anime -720p -480p" → keep packs with "Anime" but NOT "720p" or "480p"
+	result := filterByQuery(packs, "Anime -720p -480p")
+	if len(result) != 2 {
+		t.Errorf("expected 2 results for 'Anime -720p -480p', got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.GetFilename())
+		}
+	}
+}
+
+func TestFilterByQuery_NoExclusion_BackwardCompatible(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("Ubuntu.24.04.Server.mkv", 1000, "Bot1"),
+		mkPack("Ubuntu.24.04.Desktop.mkv", 800, "Bot2"),
+		mkPack("Debian.12.Server.mkv", 500, "Bot3"),
+	}
+
+	// "ubuntu" — plain query, no exclusion terms
+	result := filterByQuery(packs, "ubuntu")
+	if len(result) != 2 {
+		t.Errorf("expected 2 results for plain 'ubuntu', got %d", len(result))
+	}
+}
+
+func TestFilterByQuery_StandaloneDash(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("my-file.mkv", 100, "Bot1"),
+		mkPack("other_file.mkv", 200, "Bot2"),
+	}
+
+	// "- my" → standalone "-" is a positive term, "my" is positive
+	result := filterByQuery(packs, "- my")
+	// This requires the filename to contain both literal "-" and "my"
+	if len(result) != 1 {
+		t.Errorf("expected 1 result for '- my' (literal hyphen), got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s", p.GetFilename())
+		}
 	}
 }
 
@@ -299,12 +391,12 @@ func TestSortPacks_PrefixFirst(t *testing.T) {
 
 	// All packs with "Anime" prefix first, then sorted by size desc, then alphabetically
 	if len(packs) >= 3 {
-		if !containsLower(packs[0].Filename, "anime") {
-			t.Errorf("expected first result to have 'Anime' prefix, got %s", packs[0].Filename)
+		if !containsLower(packs[0].GetFilename(), "anime") {
+			t.Errorf("expected first result to have 'Anime' prefix, got %s", packs[0].GetFilename())
 		}
 		// Anime_Movie.mkv (300) should come before Anime_Show.mkv (200)
-		if packs[0].Filename != "Anime_Movie.mkv" {
-			t.Errorf("expected first to be Anime_Movie.mkv (largest size), got %s", packs[0].Filename)
+		if packs[0].GetFilename() != "Anime_Movie.mkv" {
+			t.Errorf("expected first to be Anime_Movie.mkv (largest size), got %s", packs[0].GetFilename())
 		}
 	}
 }
@@ -320,11 +412,11 @@ func TestSortPacks_NoQuery(t *testing.T) {
 
 	// When no query, sort by size desc then alphabetically
 	// All have same size (100), so alphabetical: a.mkv, b.mkv, c.mkv
-	if packs[0].Filename != "a.mkv" {
-		t.Errorf("expected first to be a.mkv (alphabetical when same size), got %s", packs[0].Filename)
+	if packs[0].GetFilename() != "a.mkv" {
+		t.Errorf("expected first to be a.mkv (alphabetical when same size), got %s", packs[0].GetFilename())
 	}
-	if packs[2].Filename != "c.mkv" {
-		t.Errorf("expected last to be c.mkv, got %s", packs[2].Filename)
+	if packs[2].GetFilename() != "c.mkv" {
+		t.Errorf("expected last to be c.mkv, got %s", packs[2].GetFilename())
 	}
 }
 
@@ -335,8 +427,8 @@ func TestSortPacks_LargerSizeFirst(t *testing.T) {
 	}
 	sortPacks(allSameSize, "")
 	// Same size → alphabetical
-	if allSameSize[0].Filename != "a.mkv" {
-		t.Errorf("expected 'a.mkv' first when same size, got %s", allSameSize[0].Filename)
+	if allSameSize[0].GetFilename() != "a.mkv" {
+		t.Errorf("expected 'a.mkv' first when same size, got %s", allSameSize[0].GetFilename())
 	}
 
 	diffSize := []*entities.XDCCPack{
@@ -344,8 +436,8 @@ func TestSortPacks_LargerSizeFirst(t *testing.T) {
 		mkPack("large.mkv", 1000, "Bot"),
 	}
 	sortPacks(diffSize, "")
-	if diffSize[0].Filename != "large.mkv" {
-		t.Errorf("expected 'large.mkv' first (larger size), got %s", diffSize[0].Filename)
+	if diffSize[0].GetFilename() != "large.mkv" {
+		t.Errorf("expected 'large.mkv' first (larger size), got %s", diffSize[0].GetFilename())
 	}
 }
 
@@ -470,4 +562,121 @@ func containerLower(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ===========================================================================
+// normalizeWords
+// ===========================================================================
+
+func TestNormalizeWords(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"Anime.Show.2023", "anime show 2023"},
+		{"Anime_Show_2023", "anime show 2023"},
+		{"Anime-Show-2023", "anime show 2023"},
+		{"Mix.of.sEpArAtOrS", "mix of separators"},
+		{"  leading and trailing  ", "leading and trailing"},
+		{"multiple...dots...here", "multiple dots here"},
+		{"no_separators", "no separators"},
+		{"", ""},
+		{"Already Normalized", "already normalized"},
+	}
+	for _, tt := range tests {
+		got := normalizeWords(tt.in)
+		if got != tt.want {
+			t.Errorf("normalizeWords(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// ===========================================================================
+// filterByMinSize
+// ===========================================================================
+
+func TestFilterByMinSize(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("small.mkv", 100*1024*1024, "Bot"),    // 100 MB
+		mkPack("medium.mkv", 500*1024*1024, "Bot"),   // 500 MB
+		mkPack("large.mkv", 2*1024*1024*1024, "Bot"), // 2 GB
+		mkPack("unknown.mkv", 0, "Bot"),              // unknown size
+	}
+
+	// Filter by 500MB minimum — keeps medium (500MB), large (2GB), and
+	// unknown (0 bytes, passes because size <= 0 is treated as unknown).
+	result := filterByMinSize(packs, "500MB")
+	if len(result) != 3 {
+		t.Errorf("expected 3 results for minSize=500MB (medium, large, unknown), got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s (%d bytes)", p.GetFilename(), p.GetSize())
+		}
+	}
+
+	// Filter by invalid size string → returns all
+	result = filterByMinSize(packs, "invalid")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for invalid minSize, got %d", len(result))
+	}
+
+	// Filter by empty string → returns all
+	result = filterByMinSize(packs, "")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for empty minSize, got %d", len(result))
+	}
+}
+
+func TestFilterByMinSize_WithUnknownSizes(t *testing.T) {
+	// Packs with unknown size (0) should pass the filter (not excluded)
+	packs := []*entities.XDCCPack{
+		mkPack("unknown.mkv", 0, "Bot"),
+	}
+	result := filterByMinSize(packs, "1GB")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result (unknown size passes), got %d", len(result))
+	}
+}
+
+// ===========================================================================
+// filterByMaxSize
+// ===========================================================================
+
+func TestFilterByMaxSize(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("small.mkv", 100*1024*1024, "Bot"),    // 100 MB
+		mkPack("medium.mkv", 500*1024*1024, "Bot"),   // 500 MB
+		mkPack("large.mkv", 2*1024*1024*1024, "Bot"), // 2 GB
+		mkPack("unknown.mkv", 0, "Bot"),              // unknown size
+	}
+
+	// Filter by 1GB maximum
+	result := filterByMaxSize(packs, "1GB")
+	if len(result) != 3 {
+		t.Errorf("expected 3 results for maxSize=1GB, got %d", len(result))
+		for _, p := range result {
+			t.Logf("  got: %s (%d bytes)", p.GetFilename(), p.GetSize())
+		}
+	}
+
+	// Filter by invalid size string → returns all
+	result = filterByMaxSize(packs, "invalid")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for invalid maxSize, got %d", len(result))
+	}
+
+	// Filter by empty string → returns all
+	result = filterByMaxSize(packs, "")
+	if len(result) != 4 {
+		t.Errorf("expected 4 results for empty maxSize, got %d", len(result))
+	}
+}
+
+func TestFilterByMaxSize_WithUnknownSizes(t *testing.T) {
+	packs := []*entities.XDCCPack{
+		mkPack("unknown.mkv", 0, "Bot"),
+	}
+	result := filterByMaxSize(packs, "100MB")
+	if len(result) != 1 {
+		t.Errorf("expected 1 result (unknown size passes), got %d", len(result))
+	}
 }

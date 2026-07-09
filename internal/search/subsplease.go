@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"xdcc-go/internal/entities"
+	"xdcc_server/internal/entities"
 )
 
 // SubsPleaseEngine searches for XDCC packs on subsplease.org.

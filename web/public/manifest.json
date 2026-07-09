@@ -1,6 +1,6 @@
 {
   "name": "XDCC Download Manager",
-  "short_name": "XDCC-Go",
+  "short_name": "XDCC_Server",
   "description": "Web interface for XDCC download management",
   "start_url": "/",
   "display": "standalone",

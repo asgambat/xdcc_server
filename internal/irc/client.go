@@ -14,8 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"xdcc_server/internal/entities"
+
 	"github.com/lrstanley/girc"
-	"xdcc-go/internal/entities"
 )
 
 // Internal constants
@@ -28,6 +29,13 @@ const (
 	// is established. Without this buffer, fast connections would time out
 	// while waiting for post-CONNECT server responses.
 	connectGracePeriod = 30 * time.Second
+
+	// defaultChannelJoinDelayMin and defaultChannelJoinDelayRange define the
+	// random channel-join delay when ChannelJoinDelay is < 0 (random mode).
+	// The delay is randN(range) + min, giving a uniform [min, min+range-1]
+	// interval. Current values produce a random 5-10 second delay.
+	defaultChannelJoinDelayMin   = 5
+	defaultChannelJoinDelayRange = 6
 )
 
 // ---------------------------------------------------------------------------
@@ -62,13 +70,61 @@ type packState struct {
 	packFilename  string // discovered from bot notice before DCC SEND
 	packSize      int64  // discovered from bot notice before DCC SEND
 
-	// --- Lifecycle atomics (per-pack) ---
-	messageSent        atomic.Bool // true after XDCC request has been sent
-	whoisFoundChannels atomic.Bool // WHOIS found at least one channel
-	needsJoin          atomic.Bool // we sent a JOIN and must wait for confirmation
+	// --- Lifecycle flags (per-pack, protected by mu) ---
+	messageSent        bool // true after XDCC request has been sent
+	whoisFoundChannels bool // WHOIS found at least one channel
+	needsJoin          bool // we sent a JOIN and must wait for confirmation
 
 	// --- Stall detection ---
 	lastActivity atomic.Int64 // unix nanoseconds of last received byte
+}
+
+type packDecisionSnapshot struct {
+	messageSent        bool
+	whoisFoundChannels bool
+	needsJoin          bool
+}
+
+// snapshotDecisionFlags reads all decision flags under one lock so callers
+// can branch on a coherent per-pack snapshot.
+func (ps *packState) snapshotDecisionFlags() packDecisionSnapshot {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return packDecisionSnapshot{
+		messageSent:        ps.messageSent,
+		whoisFoundChannels: ps.whoisFoundChannels,
+		needsJoin:          ps.needsJoin,
+	}
+}
+
+func (ps *packState) setWhoisFoundChannels(found bool) {
+	ps.mu.Lock()
+	ps.whoisFoundChannels = found
+	ps.mu.Unlock()
+}
+
+func (ps *packState) setNeedsJoin(needsJoin bool) {
+	ps.mu.Lock()
+	ps.needsJoin = needsJoin
+	ps.mu.Unlock()
+}
+
+func (ps *packState) isMessageSent() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.messageSent
+}
+
+// markMessageSent returns true when the message was already marked as sent.
+// Otherwise it marks it as sent and returns false.
+func (ps *packState) markMessageSent() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.messageSent {
+		return true
+	}
+	ps.messageSent = true
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +136,9 @@ type packState struct {
 // packs; they represent the persistent connection lifecycle.
 type Connection struct {
 	irc                  *girc.Client
-	ircErrCh             chan error      // receives error from irc.Connect() goroutine
-	connectedCh          chan struct{}   // closed on CONNECTED event
+	ircErrCh             chan error    // receives error from irc.Connect() goroutine
+	connectedCh          chan struct{} // closed on CONNECTED event
+	joinedChannelsMu     sync.RWMutex
 	joinedChannels       map[string]bool // channels joined in this connection (cleared on reconnect)
 	handlersRegisteredOn *girc.Client    // which girc.Client handlers are currently bound to
 	connectTime          time.Time
@@ -100,6 +157,10 @@ type Connection struct {
 	// Instead of spawning a new timer (via time.After) on each WHOIS response
 	// — which can accumulate goroutines in burst scenarios — we reuse a single
 	// timer per Connection. The timer is stopped and drained in resetForPack().
+	// timerMu protects whoisFallbackTimer against concurrent access from the
+	// girc handler goroutine (RPL_ENDOFWHOIS, JOIN) and the download goroutine
+	// (resetForPack). Always hold timerMu when reading or writing whoisFallbackTimer.
+	timerMu            sync.Mutex
 	whoisFallbackTimer *time.Timer
 }
 
@@ -127,7 +188,7 @@ type Client struct {
 	packIdxVal atomic.Int32
 
 	// Per-pack state (replaced via resetForPack between packs)
-	ps *packState
+	ps atomic.Pointer[packState]
 }
 
 // ---------------------------------------------------------------------------
@@ -137,9 +198,12 @@ type Client struct {
 // NewClient creates a new XDCC Client that will download all packs in order.
 // packs must all belong to the same IRC server.
 // verbosity: -1=quiet, 0=normal, 1=verbose (-v), 2=debug (-vv).
-func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOptions, verbosity int) *Client {
+func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOptions, verbosity int) (*Client, error) {
+	if len(packs) == 0 {
+		return nil, fmt.Errorf("irc.NewClient: packs must not be empty")
+	}
 	if opts.ChannelJoinDelay < 0 {
-		opts.ChannelJoinDelay = randN(6) + 5
+		opts.ChannelJoinDelay = randN(defaultChannelJoinDelayRange) + defaultChannelJoinDelayMin
 	}
 	if opts.ConnectTimeout <= 0 {
 		opts.ConnectTimeout = 120
@@ -154,15 +218,16 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 	if logger == nil {
 		logger = defaultLogger()
 	}
-	return &Client{
+	c := &Client{
 		ctx:       ctx,
 		packs:     packs,
 		opts:      opts,
 		verbosity: verbosity,
 		logger:    logger,
 		conn:      &Connection{},
-		ps:        &packState{}, // non-nil so methods like SetAlreadyJoinedChannels are safe before resetForPack
 	}
+	c.ps.Store(&packState{}) // non-nil so methods like SetAlreadyJoinedChannels are safe before resetForPack
+	return c, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -177,17 +242,20 @@ func NewClient(ctx context.Context, packs []*entities.XDCCPack, opts DownloadOpt
 // Must be called before DownloadAll().
 func (c *Client) SetExistingClient(irc *girc.Client) {
 	c.conn.usingExistingConn = true
-	c.conn.irc = irc
-	c.conn.connectedCh = make(chan struct{})
-	c.conn.joinedChannels = make(map[string]bool)
-	c.conn.ircErrCh = make(chan error, 1)
 
-	// Always remove previously registered handlers before registering new ones,
-	// even when reusing the same girc.Client. This prevents accumulation of
-	// duplicate handlers across multiple downloads on persistent connections.
+	// Remove old handlers BEFORE reassigning c.conn.irc so that
+	// removeHandlers() operates on handlersRegisteredOn (the old client),
+	// not the new one where the CUIDs don't exist.
 	if c.conn.handlersRegisteredOn != nil {
 		c.removeHandlers()
 	}
+
+	c.conn.irc = irc
+	c.conn.connectedCh = make(chan struct{})
+	c.conn.joinedChannelsMu.Lock()
+	c.conn.joinedChannels = make(map[string]bool)
+	c.conn.joinedChannelsMu.Unlock()
+	c.conn.ircErrCh = make(chan error, 1)
 
 	c.registerHandlers()
 	c.conn.handlersRegisteredOn = irc
@@ -201,15 +269,19 @@ func (c *Client) SetExistingClient(irc *girc.Client) {
 //
 // Must be called after SetExistingClient and before DownloadAll().
 func (c *Client) SetAlreadyJoinedChannels(channels []string) {
-	// No lock needed: called before DownloadAll() starts any goroutines.
+	c.conn.joinedChannelsMu.Lock()
 	for _, ch := range channels {
 		c.conn.joinedChannels[strings.ToLower(ch)] = true
 	}
+	c.conn.joinedChannelsMu.Unlock()
 }
 
 // DownloadAll downloads all packs sequentially, reusing the IRC connection
 // for packs on the same server. Returns one PackResult per pack.
 func (c *Client) DownloadAll() []PackResult {
+	if len(c.packs) == 0 {
+		return nil
+	}
 	c.logf("=== Starting XDCC download session ===")
 	c.logf("Server: %s:%d", c.packs[0].Server.Address, c.packs[0].Server.Port)
 	c.logf("Total packs to download: %d", len(c.packs))
@@ -299,9 +371,20 @@ func (c *Client) DownloadAll() []PackResult {
 // LastBotNotice returns the last NOTICE received from the bot for the
 // current pack. Safe to call after DownloadAll returns.
 func (c *Client) LastBotNotice() string {
-	c.ps.mu.Lock()
-	defer c.ps.mu.Unlock()
-	return c.ps.lastBotNotice
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.lastBotNotice
+}
+
+// Cleanup removes all handlers registered by this Client from the girc.Client.
+// Must be called after DownloadAll() when using a persistent connection
+// (SetExistingClient), to prevent handler accumulation across multiple
+// downloads on the same girc.Client. Each call to registerHandlers() adds
+// new handlers without removing old ones; Cleanup removes them so the next
+// download starts with a clean handler slate.
+func (c *Client) Cleanup() {
+	c.removeHandlers()
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +422,9 @@ func (c *Client) connect() error {
 		}
 
 		c.conn.connectedCh = make(chan struct{})
+		c.conn.joinedChannelsMu.Lock()
 		c.conn.joinedChannels = make(map[string]bool)
+		c.conn.joinedChannelsMu.Unlock()
 		c.conn.ircErrCh = make(chan error, 1)
 
 		c.conn.irc = girc.New(girc.Config{
@@ -411,12 +496,20 @@ func (c *Client) reconnect() error {
 				if newClient == c.conn.handlersRegisteredOn {
 					c.infof("Persistent connection still alive, reusing existing handlers")
 					c.conn.irc = newClient
+					c.conn.joinedChannelsMu.Lock()
 					c.conn.joinedChannels = make(map[string]bool)
+					c.conn.joinedChannelsMu.Unlock()
 					return nil
 				}
 				c.infof("Persistent connection re-established, re-binding handlers")
+				// Remove old handlers from the old client before switching
+				// to the new one, otherwise they accumulate on the persistent
+				// connection across reconnects.
+				c.removeHandlers()
 				c.conn.irc = newClient
+				c.conn.joinedChannelsMu.Lock()
 				c.conn.joinedChannels = make(map[string]bool)
+				c.conn.joinedChannelsMu.Unlock()
 				c.registerHandlers()
 				c.conn.handlersRegisteredOn = newClient
 				return nil
@@ -445,14 +538,16 @@ func (c *Client) reconnect() error {
 // ---------------------------------------------------------------------------
 
 func (c *Client) currentPack() *entities.XDCCPack {
-	return c.packs[c.packIdxVal.Load()]
+	idx := c.packIdxVal.Load()
+	if int(idx) >= len(c.packs) {
+		panic(fmt.Sprintf("irc.Client: packIdxVal %d out of range (len=%d)", idx, len(c.packs)))
+	}
+	return c.packs[idx]
 }
 
-// stopWhoisFallbackTimer safely stops the reusable WHOIS fallback timer and
-// drains its channel so the next reset does not immediately read a stale value.
-// This is safe to call even if the timer has never been created or has already
-// fired. It is called from resetForPack() between packs.
-func (c *Client) stopWhoisFallbackTimer() {
+// stopWhoisFallbackTimerUnlocked stops and drains the reusable WHOIS fallback
+// timer. Callers MUST hold c.conn.timerMu before calling this method.
+func (c *Client) stopWhoisFallbackTimerUnlocked() {
 	if c.conn.whoisFallbackTimer == nil {
 		return
 	}
@@ -468,38 +563,41 @@ func (c *Client) resetForPack() {
 	// Close the previous pack's state before creating a new one.
 	// This unblocks any goroutines still reading from the old channels
 	// (e.g. ackSender, progressPrinter, stallWatcher).
-	if c.ps != nil {
-		c.ps.mu.Lock()
-		if c.ps.dccConn != nil {
-			c.ps.dccConn.Close()
-			c.ps.dccConn = nil
+	oldPs := c.ps.Load()
+	if oldPs != nil {
+		oldPs.mu.Lock()
+		if oldPs.dccConn != nil {
+			oldPs.dccConn.Close()
+			oldPs.dccConn = nil
 		}
-		if c.ps.dccFile != nil {
-			c.ps.dccFile.Close()
-			c.ps.dccFile = nil
+		if oldPs.dccFile != nil {
+			oldPs.dccFile.Close()
+			oldPs.dccFile = nil
 		}
-		c.ps.mu.Unlock()
+		oldPs.mu.Unlock()
 
-		if c.ps.downloadDone != nil && c.ps.downloadDoneOnce != nil {
-			c.ps.downloadDoneOnce.Do(func() {
-				close(c.ps.downloadDone)
+		if oldPs.downloadDone != nil && oldPs.downloadDoneOnce != nil {
+			oldPs.downloadDoneOnce.Do(func() {
+				close(oldPs.downloadDone)
 			})
 		}
 	}
 
 	// Stop the WHOIS fallback timer from the previous pack and drain its
 	// channel so it can be safely reused in the next pack.
-	c.stopWhoisFallbackTimer()
+	c.conn.timerMu.Lock()
+	c.stopWhoisFallbackTimerUnlocked()
+	c.conn.timerMu.Unlock()
 
 	// Allocate a fresh packState per pack so that sync.Once instances are
 	// independent and no stale values leak between packs.
-	c.ps = &packState{
+	c.ps.Store(&packState{
 		downloadDone:        make(chan struct{}),
 		downloadDoneOnce:    &sync.Once{},
 		downloadStarted:     make(chan struct{}),
 		downloadStartedOnce: &sync.Once{},
 		ackQueue:            make(chan []byte, ackQueueBufSize),
-	}
+	})
 }
 
 func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
@@ -516,7 +614,7 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	c.resetForPack()
 	pack := c.currentPack()
 
-	c.infof("--- Starting pack download: %s (pack #%d) from bot %s ---", pack.Filename, pack.PackNumber, pack.Bot)
+	c.infof("--- Starting pack download: %s (pack #%d) from bot %s ---", pack.GetFilename(), pack.PackNumber, pack.Bot)
 
 	// Channel-join delay only on first connection (not between packs).
 	// 0 = no delay, -1 = random 5-10s, >0 = that many seconds.
@@ -536,10 +634,28 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	if err == nil {
 		// Return discovered filename and size (may be empty/0 if not yet known).
 		// Read under lock to avoid data race with the NOTICE handler.
-		c.ps.mu.Lock()
-		filename := c.ps.packFilename
-		filesize := c.ps.packSize
-		c.ps.mu.Unlock()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		filename := ps.packFilename
+		filesize := ps.packSize
+		ps.mu.Unlock()
+		return PackResult{
+			FilePath: pack.GetFilepath(),
+			Filename: filename,
+			FileSize: filesize,
+		}
+	}
+
+	// ErrAlreadyDownloaded means the file already exists in tmp with the
+	// correct size. This is a success — the caller should move it to the
+	// destination directory.
+	if errors.Is(err, ErrAlreadyDownloaded) {
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		filename := ps.packFilename
+		filesize := ps.packSize
+		ps.mu.Unlock()
+		c.infof("File already downloaded (retry) — reporting as success for move from temp to dest")
 		return PackResult{
 			FilePath: pack.GetFilepath(),
 			Filename: filename,
@@ -569,9 +685,10 @@ func (c *Client) downloadPackAtIndex(idx, retryCount int) PackResult {
 	}
 
 	c.noticef("Giving up on pack #%d (bot %s) after error: %v", pack.PackNumber, pack.Bot, err)
-	c.ps.mu.Lock()
-	notice := c.ps.lastBotNotice
-	c.ps.mu.Unlock()
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	notice := ps.lastBotNotice
+	ps.mu.Unlock()
 	return PackResult{Error: err, LastBotNotice: notice}
 }
 
@@ -583,12 +700,13 @@ func (c *Client) waitForCurrentPack() error {
 	c.infof("Waiting up to %v for DCC transfer to start (bot=%s, pack=%d)", connectTimeout, pack.Bot, pack.PackNumber)
 
 	select {
-	case <-c.ps.downloadStarted:
+	case <-c.ps.Load().downloadStarted:
 		c.infof("DCC transfer started for bot %s", pack.Bot)
-	case <-c.ps.downloadDone:
-		c.ps.mu.Lock()
-		downloadErr := c.ps.downloadError
-		c.ps.mu.Unlock()
+	case <-c.ps.Load().downloadDone:
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		downloadErr := ps.downloadError
+		ps.mu.Unlock()
 		c.infof("Download finished with error for bot %s: %v", pack.Bot, downloadErr)
 		return downloadErr
 	case <-c.ctx.Done():
@@ -599,9 +717,10 @@ func (c *Client) waitForCurrentPack() error {
 		// IRC connection died before transfer started; treat as timeout so
 		// downloadPackAtIndex will reconnect and retry.
 		c.infof("IRC connection lost while waiting for DCC from bot %s: %v", pack.Bot, err)
-		c.ps.mu.Lock()
-		downloadErr := c.ps.downloadError
-		c.ps.mu.Unlock()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		downloadErr := ps.downloadError
+		ps.mu.Unlock()
 		if err != nil && downloadErr == nil {
 			if isConnectError(err) {
 				return fmt.Errorf("%w: %v", ErrServerUnreachable, err)
@@ -622,18 +741,20 @@ func (c *Client) waitForCurrentPack() error {
 		go c.stallWatcher()
 	}
 	select {
-	case <-c.ps.downloadDone:
+	case <-c.ps.Load().downloadDone:
 	case <-c.ctx.Done():
-		c.ps.mu.Lock()
-		if c.ps.dccConn != nil {
-			c.ps.dccConn.Close()
+		ps := c.ps.Load()
+		ps.mu.Lock()
+		if ps.dccConn != nil {
+			ps.dccConn.Close()
 		}
-		c.ps.mu.Unlock()
+		ps.mu.Unlock()
 		c.finishWithError(ErrCancelled)
 	}
-	c.ps.mu.Lock()
-	downloadErr := c.ps.downloadError
-	c.ps.mu.Unlock()
+	ps := c.ps.Load()
+	ps.mu.Lock()
+	downloadErr := ps.downloadError
+	ps.mu.Unlock()
 	return downloadErr
 }
 
@@ -641,40 +762,39 @@ func (c *Client) waitForCurrentPack() error {
 // Finish helpers
 // ---------------------------------------------------------------------------
 
-// finishSuccess records a successful download. Does NOT close the IRC
-// connection so subsequent packs can reuse it.
-func (c *Client) finishSuccess() {
-	elapsed := time.Since(c.ps.downStartTime)
-	speedStr := formatSpeed(float64(c.ps.filesize) / elapsed.Seconds())
-	fmt.Printf("\nFile %s downloaded successfully in %s at %s\n",
-		c.currentPack().Filename,
-		formatDuration(elapsed),
-		speedStr)
-	c.ps.downloadDoneOnce.Do(func() {
-		close(c.ps.downloadDone)
-	})
+// finishWithNotice stores a bot notice and then calls finishWithErrorPS.
+// Callers from IRC handler goroutines MUST pass their locally captured
+// packState to avoid a data race with resetForPack().
+func (c *Client) finishWithNotice(ps *packState, err error, notice string) {
+	ps.mu.Lock()
+	ps.lastBotNotice = notice
+	ps.mu.Unlock()
+	c.finishWithErrorPS(ps, err)
 }
 
-// finishWithNotice stores a bot notice and then calls finishWithError.
-func (c *Client) finishWithNotice(err error, notice string) {
-	c.ps.mu.Lock()
-	c.ps.lastBotNotice = notice
-	c.ps.mu.Unlock()
-	c.finishWithError(err)
-}
-
-// finishWithError records a download error. Does NOT close the IRC
-// connection so the session can retry or continue with the next pack.
-// The first error wins: subsequent calls are ignored (sync.Once guards the channel close).
-func (c *Client) finishWithError(err error) {
-	c.ps.mu.Lock()
-	if c.ps.downloadError == nil {
-		c.ps.downloadError = err
+// finishWithErrorPS records a download error on the specified packState.
+// Does NOT close the IRC connection so the session can retry or continue
+// with the next pack. The first error wins: subsequent calls are ignored
+// (sync.Once guards the channel close).
+//
+// Callers from IRC handler goroutines MUST pass their locally captured
+// packState to avoid a data race with resetForPack(), which replaces c.ps.
+func (c *Client) finishWithErrorPS(ps *packState, err error) {
+	ps.mu.Lock()
+	if ps.downloadError == nil {
+		ps.downloadError = err
 	}
-	c.ps.mu.Unlock()
-	c.ps.downloadDoneOnce.Do(func() {
-		close(c.ps.downloadDone)
+	ps.mu.Unlock()
+	ps.downloadDoneOnce.Do(func() {
+		close(ps.downloadDone)
 	})
+}
+
+// finishWithError records a download error on the current packState.
+// Safe to call from the download goroutine (sequential with resetForPack).
+// IRC handler goroutines MUST use finishWithErrorPS with a captured packState.
+func (c *Client) finishWithError(err error) {
+	c.finishWithErrorPS(c.ps.Load(), err)
 }
 
 // ---------------------------------------------------------------------------
