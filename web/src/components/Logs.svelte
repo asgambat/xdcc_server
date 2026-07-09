@@ -46,10 +46,17 @@
     return d.toLocaleTimeString('it-IT', { hour12: false });
   }
 
+  function logKey(entry) {
+    return `${entry.timestamp}|${entry.level}|${entry.message}`;
+  }
+
   function addLog(entry) {
-    // Deduplicate: skip if we've already added a log with the same timestamp
-    if (seenTimestamps.has(entry.timestamp)) return;
-    seenTimestamps.add(entry.timestamp);
+    // Deduplicate: skip if we've already added a log with the same composite key
+    // (timestamp + level + message). Using only the timestamp would wrongly
+    // collapse two distinct log lines emitted within the same second.
+    const key = logKey(entry);
+    if (seenTimestamps.has(key)) return;
+    seenTimestamps.add(key);
     // Keep set bounded
     if (seenTimestamps.size > MAX_LINES) {
       // Evict oldest ~10% when set grows too large
@@ -113,7 +120,7 @@
         logCount = logs.length;
         // Reset dedup set and populate from fetched entries to prevent
         // SSE replay from creating duplicates after a manual fetch.
-        seenTimestamps = new Set(logs.map(e => e.timestamp));
+        seenTimestamps = new Set(logs.map(e => logKey(e)));
         scrollToBottom();
       }
     } catch (e) {

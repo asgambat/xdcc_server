@@ -469,7 +469,7 @@ func (s *SQLiteStore) MarkDownloadCompleted(ctx context.Context, id int64, filen
 		 progress_bytes=COALESCE(NULLIF(?, ''), progress_bytes),
 		 file_size=CASE WHEN ? > 0 THEN ? ELSE file_size END,
 		 avg_speed_bps=CASE
-		   WHEN started_at IS NOT NULL AND ? > 0 THEN
+		   WHEN started_at IS NOT NULL AND ? > 0 AND (julianday('now') - julianday(started_at)) > 0 THEN
 		     CAST(? AS REAL) / (julianday('now') - julianday(started_at)) / 86400.0
 		   ELSE avg_speed_bps
 		 END

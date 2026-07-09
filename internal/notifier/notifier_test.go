@@ -487,6 +487,36 @@ func TestNewManagerWarnsWhenEmptyEventsListAndBaseURLEmpty(t *testing.T) {
 	}
 }
 
+func TestNewManagerNoWarningWhenNotifierConstructionFails(t *testing.T) {
+	// Regression: if the notifier constructor returns nil (e.g. empty endpoint),
+	// the operator should NOT see a misleading base_url warning, since no provider
+	// is actually configured to send anything.
+	var buf bytes.Buffer
+	logger := logging.New(logging.LevelDebug, "", 0)
+	logger.AddWriter(&buf)
+
+	cfgs := []config.NotificationConfig{
+		{
+			Type:         "ntfy",
+			NtfyEndpoint: "", // empty → NewNtfyNotifier returns nil
+			Events:       []string{"watchlist_new_results"},
+		},
+		{
+			Type:            "webhook",
+			WebhookEndpoint: "", // empty → NewWebhookNotifier returns nil
+			Events:          []string{"watchlist_new_results"},
+		},
+	}
+	mgr := NewManager(cfgs, "", logger)
+
+	if len(mgr.Notifiers()) != 0 {
+		t.Errorf("expected 0 notifiers (constructors returned nil); got %d", len(mgr.Notifiers()))
+	}
+	if strings.Contains(buf.String(), "http.base_url is empty") {
+		t.Errorf("did not expect base_url warning when no notifier was constructed; got:\n%s", buf.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Run drain events test (smoke test: drains without blocking)
 // ---------------------------------------------------------------------------

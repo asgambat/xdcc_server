@@ -241,6 +241,9 @@
   <div class="stat-card">
     <div class="stat-label">Download Speed</div>
     <div class="stat-value" bind:this={pulseRefSpeed}>{formatSpeed(s.average_speed_bps || 0)}</div>
+    <div class="stat-sub" class:stat-sub-live={$activeDownloads.length > 0}>
+      {$activeDownloads.length > 0 ? 'live' : 'media storica'}
+    </div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Server Uptime</div>

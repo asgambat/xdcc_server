@@ -723,9 +723,10 @@ var validEvents = map[string]bool{
 // baseURL is the public-facing URL used to construct search links in notifications.
 func NewManager(cfgs []config.NotificationConfig, baseURL string, logger *logging.Logger) *Manager {
 	var notifiers []Notifier
-	// Track whether any provider covers watchlist_new_results so we can warn
-	// at startup if base_url is empty (links would not be sent).
-	// Empty cfg.Events means "all events" — mirrors eventsFilter/interested semantics.
+	// Tracks whether any *successfully constructed* provider covers
+	// watchlist_new_results — used to warn at startup when base_url is empty.
+	// Updated strictly inside each case arm after append, so a constructor
+	// returning nil (e.g. empty endpoint) does not trigger a misleading warn.
 	var watchlistProviderEnabled bool
 
 	for _, cfg := range cfgs {
@@ -742,42 +743,41 @@ func NewManager(cfgs []config.NotificationConfig, baseURL string, logger *loggin
 			}
 		}
 
-		coversWatchlist := len(cfg.Events) == 0
-		if !coversWatchlist {
-			for _, e := range cfg.Events {
-				if e == string(EventWatchlistNewResults) {
-					coversWatchlist = true
-					break
-				}
-			}
-		}
-		if coversWatchlist {
-			watchlistProviderEnabled = true
-		}
-
 		switch cfg.Type {
 		case "webhook":
 			n := NewWebhookNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added webhook (%d events) → %s", len(cfg.Events), cfg.WebhookEndpoint)
 			}
 		case "ntfy":
 			n := NewNtfyNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added ntfy (%d events) → %s", len(cfg.Events), cfg.NtfyEndpoint)
 			}
 		case "pushover":
 			n := NewPushoverNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added pushover (%d events) → user=%s", len(cfg.Events), cfg.PushoverUser)
 			}
 		case "email":
 			n := NewEmailNotifier(cfg)
 			if n != nil {
 				notifiers = append(notifiers, n)
+				if interested(eventsFilter(cfg.Events), EventWatchlistNewResults) {
+					watchlistProviderEnabled = true
+				}
 				logger.Infof("notifier: added email (%d events) → %s", len(cfg.Events), cfg.SMTPFrom)
 			}
 		default:

@@ -46,6 +46,7 @@
   - [REST API Highlights](#rest-api-highlights)
   - [CLI Tools](#cli-tools)
 - [Configuration](#configuration)
+- [Notifications](#-notifications)
 - [Documentation](#documentation)
   - [xdcc-server](#xdcc-server)
 - [xdcc-dl](#xdcc-dl)
@@ -656,6 +657,7 @@ Settings are loaded in the following order (later overrides earlier):
 |----------|---------|-------------|
 | `XDCC_HTTP_PORT` | `8080` | HTTP server port |
 | `XDCC_HTTP_BIND_ADDRESS` | `127.0.0.1` | HTTP server bind address (use `0.0.0.0` for Docker/external access) |
+| `XDCC_HTTP_BASE_URL` | *(empty)* | Public URL of the server used to build search-result links inside watchlist notifications. Required for the `Cerca: <url>` line / ntfy `Click` header / Pushover `url` field. See [Notifications](#-notifications) for the full setup walkthrough. |
 | `XDCC_IRC_NICKNAME` | `xdcc-user` | Base IRC nickname (random suffix added) |
 | `XDCC_DOWNLOAD_TEMP_DIR` | `./downloads/tmp` | Temporary directory for in-progress downloads |
 | `XDCC_DOWNLOAD_DEST_DIR` | `./downloads/complete` | Destination for completed downloads |
@@ -749,6 +751,144 @@ See `config.yaml` in the repository for the complete configuration reference.
 ### CLI Configuration
 
 All CLI tools support configuration via flags. For a complete list of available flags with defaults and descriptions, see the [xdcc-dl Flags](#flags-1) section.
+
+---
+
+## 🔔 Notifications
+
+The server can send external notifications for **download** and **watchlist** events using four providers: **webhook**, **ntfy**, **pushover**, and **email**. Each provider can be configured independently and supports an `events` filter to limit which events trigger a notification.
+
+### Supported Events
+
+| Event | Description |
+|-------|-------------|
+| `download_completed` | A download finished successfully |
+| `download_failed` | A download failed after all retries |
+| `watchlist_new_results` | A watchlist found new matching packs |
+
+If `events` is omitted, the provider reacts to **all** events listed above. Each provider can be disabled independently with `enabled: false` (default: `true`).
+
+### Watchlist Notifications with Direct Search Links
+
+When a `watchlist_new_results` event fires, the notification includes a deep link back to the web UI's Search page, pre‑filled with the watchlist's query string. This requires `http.base_url` to be set to the public URL of the server; otherwise the notification only contains the title and pack count (no clickable link).
+
+**Practical example.** Suppose `config.yaml` has:
+
+```yaml
+http:
+  base_url: "https://xs.lan.asga.uk"
+
+notifications:
+  - type: ntfy
+    ntfy_endpoint: "https://ntfy.sh/my-topic"
+    events: [watchlist_new_results]
+```
+
+…and a watchlist named `ubuntu-releases` with `Query: "ubuntu 24.04"`. When the watchlist finds new packs, the ntfy notification payload contains:
+
+```
+Title:   Watchlist aggiornata
+Message: Watchlist "ubuntu-releases": 3 nuovi pacchetti
+         Cerca: https://xs.lan.asga.uk/#search?q=ubuntu+24.04
+```
+
+plus an HTTP `Click` header set to that URL, so on the ntfy mobile app tapping the notification opens the web UI directly on a pre-filled Search screen.
+
+The `Cerca: <url>` line is also added to **email** bodies, **pushover** messages (`url` + `url_title` fields), and **webhook** payloads (`search_url` JSON field), so the same link appears regardless of provider.
+
+> **If `http.base_url` is empty** the link is silently omitted and the warning below is logged at startup:
+> ```
+> WARN notifier: http.base_url is empty; watchlist notifications will fire
+> but will NOT include direct search links. Set http.base_url in config.yaml
+> or XDCC_HTTP_BASE_URL env var to enable them.
+> ```
+> This is by design: the link is a public permalink, so the operator must opt in by declaring the public-facing URL.
+
+### Provisioning a Notification Provider
+
+The full commented-out configuration is at the bottom of `config.yaml` in the repository. Uncomment the entries you need and edit them:
+
+```yaml
+http:
+  # Public URL of the server, used to build links inside notifications.
+  # REQUIRED for watchlist search-result links to work.
+  base_url: "https://xs.lan.asga.uk"
+
+notifications:
+  # Generic webhook (Telegram bot, Slack, IFTTT, Zapier, …)
+  - type: webhook
+    enabled: true
+    webhook_endpoint: "https://hooks.example.com/notify"
+    webhook_token: "tk_optional_bearer"            # omit for unauthenticated endpoints
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # ntfy.sh (https://ntfy.sh) or any self-hosted ntfy server
+  - type: ntfy
+    enabled: true
+    ntfy_endpoint: "https://ntfy.sh/my-topic"
+    ntfy_token: "tk_optional_bearer"                # omit for public/anonymous topics
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # Pushover (https://pushover.net) — iOS/Android/desktop push
+  - type: pushover
+    enabled: true
+    pushover_token: "APP_TOKEN"
+    pushover_user: "USER_KEY"
+    pushover_endpoint: "https://api.pushover.net/1/messages.json"  # default, can be omitted
+    events: [download_completed, download_failed, watchlist_new_results]
+
+  # Email (SMTP)
+  - type: email
+    enabled: true
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587                                 # default 587 (STARTTLS)
+    smtp_username: "you@gmail.com"
+    smtp_password: "app-password"                  # use an App Password for Gmail
+    smtp_from: "you@gmail.com"
+    smtp_to: "alerts@example.com"                  # comma-separated for multiple recipients
+    smtp_tls: "starttls"                           # starttls | ssl | none
+    smtp_skip_verify: false                        # set true for self-signed certs
+    events: [download_failed]
+```
+
+### Provider-Specific Behaviour
+
+| Provider | Watchlist link delivery |
+|----------|------------------------|
+| **webhook** | Adds `search_url` field next to `data` in the JSON payload: `{"data":"<msg>", "search_url":"<url>"}`. Bearer auth via `webhook_token` (optional). |
+| **ntfy** | Adds HTTP `Click` header → opens the URL on tap in the ntfy mobile/web client. Plus `Cerca: <url>` in the body. |
+| **pushover** | Sets `url` and `url_title="Apri ricerca"` fields → one-tap navigation from the Pushover app. Plus `Cerca: <url>` in the body. |
+| **email** | Plain-text body that already includes the `Cerca: <url>` line. |
+
+### Environment Variables
+
+Two env vars are the most relevant for the search-link feature:
+
+| Variable | Example | Purpose |
+|----------|---------|---------|
+| `XDCC_HTTP_BASE_URL` | `https://xs.lan.asga.uk` | **Required** for watchlist notification links. Trailing `/` is trimmed. |
+| `XDCC_HTTP_BIND_ADDRESS` | `0.0.0.0` | If behind a reverse proxy, set this so the server is reachable. |
+
+Per-provider fields (`XDCC_*_NOTIFICATION_*`) and the existing notification env overrides are documented in `docs/CONFIG_UPDATE_PATTERN.md` and the `config.yaml` reference at the repo root. To override a single provider without editing YAML, you also typically need to set `XDCC_NOTIFICATIONS_N_TYPE` etc., but the YAML form is clearer for multi-provider setups.
+
+### Quick-Start: Watchlist Notifications via ntfy
+
+1. **Expose your server publicly** behind a reverse proxy on a known URL (e.g. `https://xs.lan.asga.uk`).
+2. **Set** `http.base_url` in `config.yaml` to that URL.
+3. **Create** an ntfy topic on `https://ntfy.sh` (or point at a self-hosted ntfy server).
+4. **Add** the provider to `config.yaml`:
+   ```yaml
+   notifications:
+     - type: ntfy
+       ntfy_endpoint: "https://ntfy.sh/your-topic"
+       events: [watchlist_new_results]
+   ```
+5. **Restart** the server. In the startup logs verify:
+   - `notifier: added ntfy (1 events) → https://ntfy.sh/your-topic` — provider loaded.
+   - `notifier: base URL for notification links: https://xs.lan.asga.uk` — URL configured.
+   - **No** warning containing `http.base_url is empty` — links will be sent.
+6. **Subscribe** to the topic from the ntfy mobile/desktop app.
+7. **Create** a watchlist in the web UI (page *Watchlists*). When it finds new packs you'll get a notification that deep-links straight to the Search page for that query.
 
 ---
 
@@ -1208,6 +1348,37 @@ Use `--server` to override auto-detection or bypass blocked DNS.
    ```bash
    df -h /path/to/downloads
    ```
+
+</details>
+
+<details>
+<summary><strong>❌ Watchlist notifications don't include the search-result link</strong></summary>
+
+**Symptoms:**
+- A watchlist correctly detects new packs and fires a notification, but the body only shows `Watchlist "<name>": N nuovi pacchetti` without the `Cerca: <url>` line.
+- ntfy notifications don't open a search page when tapped, Pushover messages are missing the `url` field, and webhooks don't include `search_url` in the JSON payload.
+- On startup you see:
+  ```
+  WARN notifier: http.base_url is empty; watchlist notifications will fire but will NOT include direct search links…
+  ```
+
+**Solutions:**
+1. **Set `http.base_url`** to the server's public URL — the link is a public permalink, so the server must opt-in by declaring the URL it is reachable at. Empty `base_url` is the default.
+   ```yaml
+   http:
+     base_url: "https://xs.lan.asga.uk"   # swap for your URL
+   ```
+2. **Or use the env var** `XDCC_HTTP_BASE_URL=https://your-public-url` (handy in Docker / systemd deployments).
+3. **Restart** the server and verify the startup log shows:
+   ```
+   notifier: base URL for notification links: https://your-public-url
+   ```
+   and that the `WARN http.base_url is empty` line is gone.
+4. Confirm the provider handling `watchlist_new_results` actually constructed (non-empty endpoint/token/user). A provider whose constructor returned nil is silently skipped and won't ever fire the notification, regardless of `base_url`.
+
+Once `base_url` is set, ntfy gets the URL in its `Click` HTTP header, pushover receives `url` + `url_title="Apri ricerca"`, webhooks get a `search_url` field next to `data`, and email bodies gain the `Cerca: <url>` line.
+
+See [Notifications → Watchlist Notifications with Direct Search Links](#-notifications) for the full setup walkthrough.
 
 </details>
 

@@ -310,6 +310,14 @@ tr:hover td { background: var(--bg-hover); }
 }
 .stat-card-clickable:hover .stat-label-hint { opacity: 0.8; }
 .stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1.2; }
+.stat-sub {
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.stat-sub-live { color: var(--success); }
 .stat-value.success { color: var(--success); }
 .stat-value.warning { color: var(--warning); }
 .stat-value.danger { color: var(--danger); }
