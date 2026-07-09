@@ -193,7 +193,7 @@ func runServer(configPath, dbPath string, pprof bool) error {
 	}
 
 	// ── Notifications (ntfy, pushover, webhook) ───────────────────────────
-	notifMgr := notifier.NewManager(cfg.Notifications, srvLogger)
+	notifMgr := notifier.NewManager(cfg.Notifications, cfg.GetBaseURL(), srvLogger)
 	var notifWg sync.WaitGroup
 	if notifMgr != nil && len(notifMgr.Notifiers()) > 0 {
 		queueChForNotif := queueMgr.Subscribe()

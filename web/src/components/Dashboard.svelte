@@ -146,10 +146,58 @@
   let st = $derived($status || {});
   let connectedCount = $derived($servers.filter(s => s.status === 'connected').length);
   let serverTotal = $derived($servers.length);
-  let completedToday = $derived($downloads.filter(d =>
-    d.status === 'completed' && d.completed_at &&
-    new Date(d.completed_at) > new Date(Date.now() - 86400000)
-  ).length);
+
+  // Completed card: rotates through day / week / month / year on click
+  const PERIODS = [
+    { key: 'day',   label: 'Completed Today',   ms: 86400000 },
+    { key: 'week',  label: 'Completed This Week',  ms: 7 * 86400000 },
+    { key: 'month', label: 'Completed This Month', ms: 30 * 86400000 },
+    { key: 'year',  label: 'Completed This Year',  ms: 365 * 86400000 },
+  ];
+  let completedPeriodIdx = $state(0);
+
+  function toggleCompletedPeriod() {
+    completedPeriodIdx = (completedPeriodIdx + 1) % PERIODS.length;
+  }
+
+  let completedCount = $derived.by(() => {
+    const cutoff = Date.now() - PERIODS[completedPeriodIdx].ms;
+    return $downloads.filter(d =>
+      d.status === 'completed' && d.completed_at &&
+      new Date(d.completed_at).getTime() > cutoff
+    ).length;
+  });
+
+  // -----------------------------------------------------------------------
+  // Pulse animation helpers: trigger a brief scale pulse when values change
+  // -----------------------------------------------------------------------
+
+  // Refs for each stat-value element
+  let pulseRefServers = $state(null);
+  let pulseRefActive = $state(null);
+  let pulseRefQueued = $state(null);
+  let pulseRefCompleted = $state(null);
+  let pulseRefBytes = $state(null);
+  let pulseRefSpeed = $state(null);
+  let pulseRefUptime = $state(null);
+  let pulseRefDisk = $state(null);
+
+  function triggerPulse(el) {
+    if (!el) return;
+    el.classList.remove('stat-value-pulse');
+    // Force reflow to restart the animation
+    void el.offsetWidth;
+    el.classList.add('stat-value-pulse');
+  }
+
+  $effect(() => { triggerPulse(pulseRefServers); connectedCount; serverTotal; });
+  $effect(() => { triggerPulse(pulseRefActive); $activeDownloads.length; });
+  $effect(() => { triggerPulse(pulseRefQueued); $downloads.filter(d => d.status === 'queued').length; });
+  $effect(() => { triggerPulse(pulseRefCompleted); completedCount; });
+  $effect(() => { triggerPulse(pulseRefBytes); s.total_downloaded_bytes; });
+  $effect(() => { triggerPulse(pulseRefSpeed); s.average_speed_bps; });
+  $effect(() => { triggerPulse(pulseRefUptime); s.uptime_seconds; st.uptime_seconds; });
+  $effect(() => { triggerPulse(pulseRefDisk); s.disk_free_bytes; st.disk_free_bytes; });
 </script>
 
 <div style="display:flex; align-items:center; justify-content:flex-end; margin-bottom:1rem">
@@ -161,40 +209,46 @@
 <div class="stats-grid">
   <div class="stat-card">
     <div class="stat-label">Servers Online</div>
-    <div class="stat-value" class:success={connectedCount > 0} class:warning={connectedCount === 0}>
+    <div class="stat-value" class:success={connectedCount > 0} class:warning={connectedCount === 0} bind:this={pulseRefServers}>
       {connectedCount}/{serverTotal}
     </div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Active Downloads</div>
-    <div class="stat-value info">{$activeDownloads.length}</div>
+    <div class="stat-value info" bind:this={pulseRefActive}>{$activeDownloads.length}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Queued</div>
-    <div class="stat-value warning">{Math.max(0, $downloads.filter(d => d.status === 'queued').length)}</div>
+    <div class="stat-value warning" bind:this={pulseRefQueued}>{Math.max(0, $downloads.filter(d => d.status === 'queued').length)}</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-label">Completed Today</div>
-    <div class="stat-value success">{completedToday}</div>
+  <div class="stat-card stat-card-clickable" role="button" tabindex="0"
+       onclick={toggleCompletedPeriod}
+       onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCompletedPeriod(); } }}
+       title="Click to cycle: Today → Week → Month → Year">
+    <div class="stat-label">
+      {PERIODS[completedPeriodIdx].label}
+      <span class="stat-label-hint">↻</span>
+    </div>
+    <div class="stat-value success" bind:this={pulseRefCompleted}>{completedCount}</div>
   </div>
 </div>
 
 <div class="stats-grid">
   <div class="stat-card">
     <div class="stat-label">Total Downloaded</div>
-    <div class="stat-value">{formatBytes(s.total_downloaded_bytes || 0)}</div>
+    <div class="stat-value" bind:this={pulseRefBytes}>{formatBytes(s.total_downloaded_bytes || 0)}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Download Speed</div>
-    <div class="stat-value">{formatSpeed(s.average_speed_bps || 0)}</div>
+    <div class="stat-value" bind:this={pulseRefSpeed}>{formatSpeed(s.average_speed_bps || 0)}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Server Uptime</div>
-    <div class="stat-value">{formatUptime(s.uptime_seconds || st.uptime_seconds || 0)}</div>
+    <div class="stat-value" bind:this={pulseRefUptime}>{formatUptime(s.uptime_seconds || st.uptime_seconds || 0)}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Disk Free</div>
-    <div class="stat-value">{formatBytes(s.disk_free_bytes || st.disk_free_bytes || 0)}</div>
+    <div class="stat-value" bind:this={pulseRefDisk}>{formatBytes(s.disk_free_bytes || st.disk_free_bytes || 0)}</div>
   </div>
 </div>
 

@@ -35,6 +35,9 @@
   // History selection
   let selectedHistoryIDs = $state(new Set());
 
+  // Delete all confirmation
+  let showDeleteAllConfirm = $state(false);
+
   // Debounced history filter loader (300ms)
   const debouncedLoadHistory = debounce(() => loadHistoryPage(1), 300);
 
@@ -139,6 +142,15 @@
       addToast(`Deleted ${success}/${ids.length} items`, 'success');
       selectedHistoryIDs = new Set();
       await loadHistoryPage(historyData.page);
+    } catch (e) { addToast(e.message, 'error'); }
+  }
+
+  async function deleteAllHistory() {
+    showDeleteAllConfirm = false;
+    try {
+      const resp = await DownloadsAPI.deleteAllHistory();
+      addToast(`Deleted ${resp.deleted || 0} history items`, 'success');
+      await loadHistoryPage(1);
     } catch (e) { addToast(e.message, 'error'); }
   }
 
@@ -341,6 +353,7 @@
     <div class="card">
       <div class="card-header" style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
         <span class="card-title">📜 Download History ({historyData.total})</span>
+        <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick={() => showDeleteAllConfirm = true} title="Delete all history">🗑️ Delete All</button>
         {#if selectedHistoryIDs.size > 0}
           <div class="flex gap-1" style="align-items:center; margin-left:auto;">
             <span class="text-sm">{selectedHistoryIDs.size} selected</span>
@@ -441,6 +454,24 @@
     </div>
   {/if}
 {/if}
+
+<!-- Delete All History Confirmation Modal -->
+<Modal title="🗑️ Delete All History" visible={showDeleteAllConfirm} on:close={() => showDeleteAllConfirm = false}>
+  <div style="display:flex; flex-direction:column; gap:1rem;">
+    <p class="text-sm" style="margin:0; line-height:1.5;">
+      Are you sure you want to delete <strong>all</strong> download history?
+      This will permanently remove all completed, failed, and skipped downloads.
+      Active downloads (queued, downloading, paused) will not be affected.
+    </p>
+    <p class="text-sm" style="margin:0; color:var(--text-error);">
+      This action cannot be undone.
+    </p>
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-ghost" onclick={() => showDeleteAllConfirm = false}>Cancel</button>
+    <button class="btn btn-danger" onclick={deleteAllHistory}>🗑️ Delete All</button>
+  </div>
+</Modal>
 
 <!-- Manual Download Modal -->
 <Modal title="📥 Manual XDCC Download" visible={showManualModal} on:close={closeManualModal}>

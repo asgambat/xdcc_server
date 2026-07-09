@@ -26,6 +26,7 @@ import (
 const (
 	defaultConnectionTimeout  = 30 * time.Second       // timeout for connections to establish
 	waitConnectedPollInterval = 200 * time.Millisecond // polling interval when waiting for connection
+	maxReconnectRetries       = 10                     // max reconnection attempts before giving up
 )
 
 // ---------------------------------------------------------------------------
@@ -1050,9 +1051,12 @@ func (mc *managedConnection) run() {
 				ServerAddr: mc.address,
 			})
 			if !mc.reconnectBackoff() {
-				// Context was cancelled during backoff — caller expects
-				// the DB status to reflect reality.
-				disconnectCleanup()
+				// If context was cancelled (user disconnected), clean up as disconnected.
+				// If context is still alive, max retries were exceeded — status is
+				// already "failed" in DB, just return without overwriting it.
+				if mc.ctx.Err() != nil {
+					disconnectCleanup()
+				}
 				return
 			}
 		}
@@ -1353,7 +1357,7 @@ func (mc *managedConnection) connect() connectResult {
 }
 
 // reconnectBackoff implements exponential backoff (Fase 3.4).
-// Returns false if the context was cancelled.
+// Returns false if the context was cancelled or max retries exceeded.
 func (mc *managedConnection) reconnectBackoff() bool {
 	mc.mu.Lock()
 	mc.status = "reconnecting"
@@ -1362,7 +1366,20 @@ func (mc *managedConnection) reconnectBackoff() bool {
 	if idx < 5 {
 		mc.backoffIdx++
 	}
+	retries := mc.retryCount
 	mc.mu.Unlock()
+
+	// Check max retries before scheduling
+	if retries > maxReconnectRetries {
+		mc.manager.logger.Errorf("max reconnection attempts (%d) exceeded for %s — giving up", maxReconnectRetries, mc.address)
+		mc.setStatus("failed")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := mc.manager.store.SetServerStatus(shutdownCtx, mc.id, "failed"); err != nil {
+			mc.manager.logger.Warnf("set server %d status=failed in DB failed: %v", mc.id, err)
+		}
+		cancel()
+		return false
+	}
 
 	// Notify the manager to update DB
 	if err := mc.manager.store.SetServerStatus(mc.ctx, mc.id, "reconnecting"); err != nil {
@@ -1384,7 +1401,7 @@ func (mc *managedConnection) reconnectBackoff() bool {
 		delay = 1 * time.Hour // after 5 failures, retry every hour
 	}
 
-	mc.manager.logger.Infof("reconnecting to %s in %v (attempt %d)", mc.address, delay, mc.retryCount)
+	mc.manager.logger.Infof("reconnecting to %s in %v (attempt %d)", mc.address, delay, retries)
 
 	select {
 	case <-mc.ctx.Done():

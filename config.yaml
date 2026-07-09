@@ -48,6 +48,10 @@ http:
   bind_address: "127.0.0.1"
   # Allowed CORS origins (empty = same-origin only; for dev add "http://localhost:5173")
   cors_origins: []
+  # Public-facing base URL used for notification links (e.g., watchlist search results).
+  # When empty, links are omitted from notifications.
+  # Example: "https://xs.lan.asga.uk"
+  base_url: ""
   # Whether to trust X-Forwarded-For header for client IP extraction.
   # Default: false. Only enable when behind a trusted reverse proxy that
   # strips/overwrites X-Forwarded-For from external clients.

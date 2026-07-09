@@ -52,8 +52,8 @@ type Aggregator struct {
 	statsFlushDone chan struct{}
 
 	// onWatchlistResults is called when a watchlist finds new packs.
-	// Arguments: watchlist name, new packs count, enqueued count.
-	onWatchlistResults func(name string, newPacks, enqueued int)
+	// Arguments: watchlist name, new packs count, enqueued count, search query.
+	onWatchlistResults func(name string, newPacks, enqueued int, query string)
 
 	// watchlistInFlight tracks which watchlist IDs are currently being
 	// executed, preventing concurrent runs of the same watchlist.
@@ -85,8 +85,8 @@ func (a *Aggregator) SetMetrics(met *metrics.Collector) {
 }
 
 // SetOnWatchlistResults sets a callback invoked when a watchlist finds new packs.
-// The callback receives (watchlistName string, newPacksCount, enqueuedCount int).
-func (a *Aggregator) SetOnWatchlistResults(fn func(name string, newPacks, enqueued int)) {
+// The callback receives (watchlistName string, newPacksCount, enqueuedCount int, query string).
+func (a *Aggregator) SetOnWatchlistResults(fn func(name string, newPacks, enqueued int, query string)) {
 	a.onWatchlistResults = fn
 }
 

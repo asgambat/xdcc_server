@@ -102,6 +102,7 @@ export const DownloadsAPI = {
   retry(id)       { return api.post(`/downloads/${id}/retry`); },
   position(id, p) { return api.patch(`/downloads/${id}/position`, { priority: p }); },
   bulk(ids, action) { return api.post('/downloads/bulk', { ids, action }); },
+  deleteAllHistory() { return api.del('/downloads/history', { adminToken: getAdminToken() }); },
 };
 
 // ---- Search API ----

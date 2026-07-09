@@ -367,7 +367,7 @@ func (s *SQLiteStore) EnqueueDownload(ctx context.Context, d DownloadRecord) (in
 func (s *SQLiteStore) GetDownload(ctx context.Context, id int64) (*DownloadRecord, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE id = ?`, id,
 	)
@@ -377,7 +377,7 @@ func (s *SQLiteStore) GetDownload(ctx context.Context, id int64) (*DownloadRecor
 func (s *SQLiteStore) GetQueue(ctx context.Context) ([]DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE status IN ('queued', 'downloading', 'paused')
 		 ORDER BY priority ASC, created_at ASC`,
@@ -392,7 +392,7 @@ func (s *SQLiteStore) GetQueue(ctx context.Context) ([]DownloadRecord, error) {
 func (s *SQLiteStore) GetQueueByChannel(ctx context.Context, channel string) ([]DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE channel = ? AND status IN ('queued', 'downloading', 'paused')
 		 ORDER BY priority ASC, created_at ASC`, channel,
@@ -407,7 +407,7 @@ func (s *SQLiteStore) GetQueueByChannel(ctx context.Context, channel string) ([]
 func (s *SQLiteStore) GetActiveDownloads(ctx context.Context) ([]DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE status = 'downloading'
 		 ORDER BY priority ASC, created_at ASC`,
@@ -422,7 +422,7 @@ func (s *SQLiteStore) GetActiveDownloads(ctx context.Context) ([]DownloadRecord,
 func (s *SQLiteStore) GetPendingByChannel(ctx context.Context, channel string) ([]DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE channel = ? AND status = 'queued'
 		 ORDER BY priority ASC, created_at ASC`, channel,
@@ -459,14 +459,22 @@ func (s *SQLiteStore) MarkDownloadStarted(ctx context.Context, id int64) error {
 // MarkDownloadCompleted marks a download as completed and updates filename/file_size
 // with values discovered during download (e.g. from bot notice). Pass empty string
 // and 0 if no metadata was discovered.
+// The average speed is computed as file_size / duration from started_at to now.
 func (s *SQLiteStore) MarkDownloadCompleted(ctx context.Context, id int64, filename string, fileSize int64) error {
+	// Compute average speed: final file size divided by download duration.
+	// The SQL expression computes it inline using the started_at timestamp.
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE downloads SET status='completed', completed_at=datetime('now'),
 		 filename=COALESCE(NULLIF(?, ''), filename),
 		 progress_bytes=COALESCE(NULLIF(?, ''), progress_bytes),
-		 file_size=CASE WHEN ? > 0 THEN ? ELSE file_size END
+		 file_size=CASE WHEN ? > 0 THEN ? ELSE file_size END,
+		 avg_speed_bps=CASE
+		   WHEN started_at IS NOT NULL AND ? > 0 THEN
+		     CAST(? AS REAL) / (julianday('now') - julianday(started_at)) / 86400.0
+		   ELSE avg_speed_bps
+		 END
 		 WHERE id=?`,
-		filename, fileSize, fileSize, fileSize, id,
+		filename, fileSize, fileSize, fileSize, fileSize, fileSize, id,
 	)
 	return err
 }
@@ -504,6 +512,36 @@ func (s *SQLiteStore) MarkDownloadRetry(ctx context.Context, id int64, newStatus
 func (s *SQLiteStore) DeleteDownload(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE id=?`, id)
 	return err
+}
+
+// DeleteAllHistory removes all completed, failed, and skipped downloads from
+// the history, keeping active downloads (queued, downloading, paused) intact.
+// Returns the number of rows deleted.
+func (s *SQLiteStore) DeleteAllHistory(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM downloads WHERE status IN ('completed', 'failed', 'skipped_existing')`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("deleting all download history: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
+// GetHistoricalAvgSpeed returns the average download speed across all
+// completed downloads that have a recorded speed, or 0 if none exist.
+func (s *SQLiteStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) {
+	var avg sql.NullFloat64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT AVG(avg_speed_bps) FROM downloads WHERE status='completed' AND avg_speed_bps > 0`,
+	).Scan(&avg)
+	if err != nil {
+		return 0, fmt.Errorf("querying historical avg speed: %w", err)
+	}
+	if avg.Valid {
+		return avg.Float64, nil
+	}
+	return 0, nil
 }
 
 func (s *SQLiteStore) RetryDownload(ctx context.Context, id int64) error {
@@ -618,7 +656,7 @@ func (s *SQLiteStore) GetDownloadHistory(ctx context.Context, page, pageSize int
 	offset := (page - 1) * pageSize
 	//nolint:gosec // whereSQL is built from trusted internal constants only (not user input), safe
 	querySQL := `SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-	        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+	        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 	        created_at, started_at, completed_at
 	 FROM downloads WHERE ` + whereSQL + `
 	 ORDER BY completed_at DESC, created_at DESC
@@ -670,7 +708,7 @@ func (s *SQLiteStore) FindDuplicateDownload(ctx context.Context, bot, serverAddr
 	packExact := fmt.Sprintf("xdcc send #%d", packNumber)
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads
 		 WHERE bot = ? AND server_address = ? AND (pack_message = ? OR pack_message = ?)
@@ -743,7 +781,7 @@ func (s *SQLiteStore) FilenamesExist(ctx context.Context, filenames []string) (m
 func (s *SQLiteStore) GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*DownloadRecord, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, pack_message, bot, server_address, channel, filename, file_size,
-		        status, progress_bytes, speed_bps, error_message, retry_count, priority,
+		        status, progress_bytes, speed_bps, avg_speed_bps, error_message, retry_count, priority,
 		        created_at, started_at, completed_at
 		 FROM downloads WHERE bot = ? AND pack_message = ?
 		 ORDER BY created_at DESC LIMIT 1`,
@@ -1177,7 +1215,7 @@ func scanDownload(row interface{ Scan(...any) error }) (*DownloadRecord, error) 
 	var startedAt, completedAt, createdAt nullTime
 	err := row.Scan(&d.ID, &d.PackMessage, &d.Bot, &d.ServerAddress, &d.Channel,
 		&d.Filename, &d.FileSize, &d.Status, &d.ProgressBytes, &d.SpeedBPS,
-		&d.ErrorMessage, &d.RetryCount, &d.Priority, &createdAt, &startedAt, &completedAt)
+		&d.AvgSpeedBPS, &d.ErrorMessage, &d.RetryCount, &d.Priority, &createdAt, &startedAt, &completedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1221,7 +1259,7 @@ func (s *SQLiteStore) scanDownloadFromRows(rows *sql.Rows) (*DownloadRecord, err
 	var startedAt, completedAt, createdAt nullTime
 	if err := rows.Scan(&d.ID, &d.PackMessage, &d.Bot, &d.ServerAddress, &d.Channel,
 		&d.Filename, &d.FileSize, &d.Status, &d.ProgressBytes, &d.SpeedBPS,
-		&d.ErrorMessage, &d.RetryCount, &d.Priority, &createdAt, &startedAt, &completedAt); err != nil {
+		&d.AvgSpeedBPS, &d.ErrorMessage, &d.RetryCount, &d.Priority, &createdAt, &startedAt, &completedAt); err != nil {
 		// Defensive: if progress_bytes contains a string (corrupted data from old bug),
 		// skip this row instead of failing the entire history query.
 		if s.log != nil {

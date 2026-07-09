@@ -231,6 +231,9 @@ func (m *mockStore) RecoverDownloadsOnStartup(ctx context.Context) ([]store.Down
 	return nil, nil
 }
 
+func (m *mockStore) DeleteAllHistory(ctx context.Context) (int64, error)        { return 0, nil }
+func (m *mockStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) { return 0, nil }
+
 func (m *mockStore) RequeueDownload(ctx context.Context, id int64) error {
 	return m.RetryDownload(ctx, id)
 }

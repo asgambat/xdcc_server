@@ -146,6 +146,21 @@ func (a *API) handleEnqueueDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // =========================================================================
+// DELETE /api/downloads/history
+// =========================================================================
+
+func (a *API) handleDeleteAllHistory(w http.ResponseWriter, r *http.Request) {
+	deleted, err := a.Store.DeleteAllHistory(r.Context())
+	if err != nil {
+		a.logAndError(w, http.StatusInternalServerError, "DELETE_HISTORY_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": deleted,
+	})
+}
+
+// =========================================================================
 // GET /api/downloads/history
 // =========================================================================
 

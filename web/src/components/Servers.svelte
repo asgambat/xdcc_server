@@ -377,7 +377,7 @@
           {#if connectingServers.has(srv.id)}
             <button class="btn btn-sm btn-success" disabled>Connecting...</button>
           {:else if srv.status === 'reconnecting'}
-            <button class="btn btn-sm btn-warning" disabled>Reconnecting...</button>
+            <button class="btn btn-sm btn-danger" onclick={() => disconnectServer(srv.id)}>Cancel reconnect</button>
           {:else if srv.status !== 'connected'}
             <button class="btn btn-sm btn-success" onclick={() => connectServer(srv.id)}>Connect</button>
           {:else}

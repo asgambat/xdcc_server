@@ -62,6 +62,8 @@ type DownloadStore interface {
 	GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*DownloadRecord, error)
 	FilenamesExist(ctx context.Context, filenames []string) (map[string]bool, error)
 	UpdateChannelAvgSpeed(ctx context.Context, serverAddress, channelName string, lastSpeedBPS float64) error
+	DeleteAllHistory(ctx context.Context) (int64, error)
+	GetHistoricalAvgSpeed(ctx context.Context) (float64, error)
 }
 
 // SearchCacheStore covers search result caching in SQLite.

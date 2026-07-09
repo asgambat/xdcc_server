@@ -133,6 +133,9 @@ func (a *API) Router() http.Handler {
 		// Logs
 		r.Get("/api/logs", a.handleLogs)
 
+		// Download history (destructive operations)
+		r.Delete("/api/downloads/history", a.handleDeleteAllHistory)
+
 		// Configuration
 		r.Get("/api/config", a.handleGetConfig)
 		r.Put("/api/config", a.handleUpdateConfig)

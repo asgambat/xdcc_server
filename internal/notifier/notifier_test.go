@@ -1,7 +1,9 @@
 package notifier
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -151,6 +153,20 @@ func TestFormatWatchlistMessageWithEnqueue(t *testing.T) {
 	expected := `Watchlist "my-watchlist": 5 nuovi pacchetti (3 in coda)`
 	if nm.Message != expected {
 		t.Errorf("unexpected message: %q", nm.Message)
+	}
+}
+
+func TestFormatWatchlistMessageWithSearchURL(t *testing.T) {
+	evt := WatchlistEvent{
+		WatchlistName: "my-watchlist",
+		NewPacksCount: 5,
+		EnqueuedCount: 3,
+		SearchURL:     "https://example.com/#search?q=test+query",
+	}
+	nm := formatWatchlistMessage(evt)
+	expected := "Watchlist \"my-watchlist\": 5 nuovi pacchetti (3 in coda)\nCerca: https://example.com/#search?q=test+query"
+	if nm.Message != expected {
+		t.Errorf("unexpected message:\n got:  %q\n want: %q", nm.Message, expected)
 	}
 }
 
@@ -306,9 +322,10 @@ func TestManagerNotifyWatchlistResults(t *testing.T) {
 	mgr := &Manager{
 		notifiers: []Notifier{mock},
 		logger:    logger,
+		baseURL:   "https://example.com",
 	}
 
-	mgr.NotifyWatchlistResults("test-wl", 10, 5)
+	mgr.NotifyWatchlistResults("test-wl", 10, 5, "my query")
 
 	if mock.watchlistCount() != 1 {
 		t.Fatalf("expected 1 watchlist call, got %d", mock.watchlistCount())
@@ -326,6 +343,12 @@ func TestManagerNotifyWatchlistResults(t *testing.T) {
 	if call.Timestamp == "" {
 		t.Error("expected non-empty timestamp")
 	}
+	if call.Query != "my query" {
+		t.Errorf("expected query 'my query', got %q", call.Query)
+	}
+	if call.SearchURL != "https://example.com/#search?q=my+query" {
+		t.Errorf("expected search URL, got %q", call.SearchURL)
+	}
 }
 
 func TestManagerNotifyWatchlistResultsNoNotifiers(t *testing.T) {
@@ -335,7 +358,7 @@ func TestManagerNotifyWatchlistResultsNoNotifiers(t *testing.T) {
 		logger:    logger,
 	}
 
-	mgr.NotifyWatchlistResults("test", 1, 0) // should not panic
+	mgr.NotifyWatchlistResults("test", 1, 0, "") // should not panic
 }
 
 func TestManagerNotifiers(t *testing.T) {
@@ -357,7 +380,7 @@ func TestManagerNotifiers(t *testing.T) {
 
 func TestNewManagerEmptyConfig(t *testing.T) {
 	logger := logging.New(logging.LevelDebug, "", 0)
-	mgr := NewManager(nil, logger)
+	mgr := NewManager(nil, "", logger)
 	if mgr == nil {
 		t.Fatal("NewManager returned nil")
 	}
@@ -375,9 +398,92 @@ func TestNewManagerDisabledProvider(t *testing.T) {
 		},
 	}
 	logger := logging.New(logging.LevelDebug, "", 0)
-	mgr := NewManager(cfgs, logger)
+	mgr := NewManager(cfgs, "", logger)
 	if len(mgr.Notifiers()) != 0 {
 		t.Errorf("expected 0 notifiers for disabled provider, got %d", len(mgr.Notifiers()))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Startup warning: empty base_url with watchlist provider configured
+// ---------------------------------------------------------------------------
+
+func TestNewManagerWarnsWhenBaseURLEmptyAndWatchlistEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(logging.LevelDebug, "", 0)
+	logger.AddWriter(&buf)
+
+	cfgs := []config.NotificationConfig{
+		{
+			Type:         "ntfy",
+			NtfyEndpoint: "https://ntfy.sh/test",
+			Events:       []string{"watchlist_new_results"},
+		},
+	}
+	NewManager(cfgs, "", logger)
+
+	if !strings.Contains(buf.String(), "http.base_url is empty") {
+		t.Errorf("expected startup warning about empty base_url when watchlist provider is configured; got:\n%s", buf.String())
+	}
+}
+
+func TestNewManagerNoWarningWhenBaseURLIsSetAndWatchlistEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(logging.LevelDebug, "", 0)
+	logger.AddWriter(&buf)
+
+	cfgs := []config.NotificationConfig{
+		{
+			Type:         "ntfy",
+			NtfyEndpoint: "https://ntfy.sh/test",
+			Events:       []string{"watchlist_new_results"},
+		},
+	}
+	NewManager(cfgs, "https://example.com", logger)
+
+	if strings.Contains(buf.String(), "http.base_url is empty") {
+		t.Errorf("did not expect empty-base_url warning when baseURL is set; got:\n%s", buf.String())
+	}
+}
+
+func TestNewManagerNoWarningWhenNoWatchlistProvider(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(logging.LevelDebug, "", 0)
+	logger.AddWriter(&buf)
+
+	cfgs := []config.NotificationConfig{
+		{
+			Type:            "webhook",
+			WebhookEndpoint: "https://example.com/wh",
+			Events:          []string{"download_completed", "download_failed"},
+		},
+	}
+	NewManager(cfgs, "", logger)
+
+	if strings.Contains(buf.String(), "http.base_url is empty") {
+		t.Errorf("did not expect empty-base_url warning when no watchlist provider configured; got:\n%s", buf.String())
+	}
+}
+
+func TestNewManagerWarnsWhenEmptyEventsListAndBaseURLEmpty(t *testing.T) {
+	// Empty events list means "all events" (including watchlist_new_results).
+	// If base_url is empty, the operator should still be warned that watchlist
+	// links won't be included.
+	var buf bytes.Buffer
+	logger := logging.New(logging.LevelDebug, "", 0)
+	logger.AddWriter(&buf)
+
+	cfgs := []config.NotificationConfig{
+		{
+			Type:         "ntfy",
+			NtfyEndpoint: "https://ntfy.sh/test",
+			// Events omitted → all events
+		},
+	}
+	NewManager(cfgs, "", logger)
+
+	if !strings.Contains(buf.String(), "http.base_url is empty") {
+		t.Errorf("expected startup warning when empty events list implies watchlist coverage; got:\n%s", buf.String())
 	}
 }
 

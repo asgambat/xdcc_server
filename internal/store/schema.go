@@ -15,7 +15,7 @@ import (
 // Schema version management
 // ---------------------------------------------------------------------------
 
-const currentSchemaVersion = 9
+const currentSchemaVersion = 10
 
 // migration represents a single schema migration step.
 type migration struct {
@@ -75,6 +75,11 @@ CREATE INDEX IF NOT EXISTS idx_downloads_bot ON downloads(bot);
 CREATE INDEX IF NOT EXISTS idx_downloads_completed_at ON downloads(completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_downloads_lower_filename ON downloads(LOWER(filename));
 `,
+	},
+	{
+		version:     10,
+		description: "Add avg_speed_bps column to downloads for historical average speed calculation",
+		up:          `ALTER TABLE downloads ADD COLUMN avg_speed_bps REAL NOT NULL DEFAULT 0;`,
 	},
 }
 

@@ -390,6 +390,15 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	uptimeSeconds := int64(time.Since(a.StartTime).Seconds())
 
+	// Use live speed when downloads are active, otherwise fall back to
+	// the historical average across all completed downloads.
+	averageSpeedBPS := totalSpeedBPS
+	if averageSpeedBPS == 0 {
+		if histAvg, err := a.Store.GetHistoricalAvgSpeed(r.Context()); err == nil {
+			averageSpeedBPS = int64(histAvg)
+		}
+	}
+
 	// Get disk info
 	di, err := getDiskInfo(a.Config.GetDestDir())
 	diskFreeBytes := int64(0)
@@ -405,7 +414,7 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"total_completed":        totalHistory,
 		"connected_servers":      serverCount,
 		"total_downloaded_bytes": totalDownloadedBytes,
-		"average_speed_bps":      totalSpeedBPS,
+		"average_speed_bps":      averageSpeedBPS,
 		"uptime_seconds":         uptimeSeconds,
 		"disk_free_bytes":        diskFreeBytes,
 		"disk_total_bytes":       diskTotalBytes,

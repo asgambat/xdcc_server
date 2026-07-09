@@ -159,7 +159,7 @@ func (a *Aggregator) RunWatchlist(ctx context.Context, w store.Watchlist) (*Watc
 	// rather than in runWatchlistSafely to avoid double-calling.
 	// Respect the per-watchlist notify_enabled flag from the UI settings.
 	if a.onWatchlistResults != nil && w.NotifyEnabled && wr.HasChanges && len(wr.NewPacks) > 0 {
-		a.onWatchlistResults(w.Name, len(wr.NewPacks), wr.Enqueued)
+		a.onWatchlistResults(w.Name, len(wr.NewPacks), wr.Enqueued, w.Query)
 	}
 
 	return wr, nil

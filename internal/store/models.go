@@ -62,6 +62,7 @@ type DownloadRecord struct {
 	Status        string     `json:"status"` // queued, downloading, completed, failed, paused, skipped_existing
 	ProgressBytes int64      `json:"progress_bytes"`
 	SpeedBPS      int64      `json:"speed_bps,omitempty"`
+	AvgSpeedBPS   float64    `json:"avg_speed_bps,omitempty"` // average speed over the whole download (file_size/duration)
 	ErrorMessage  string     `json:"error_message,omitempty"`
 	RetryCount    int        `json:"retry_count"` // number of auto-retry attempts
 	CreatedAt     time.Time  `json:"created_at"`

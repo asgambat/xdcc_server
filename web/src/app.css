@@ -292,6 +292,8 @@ tr:hover td { background: var(--bg-hover); }
   transition: all var(--transition);
 }
 .stat-card:hover { border-color: var(--accent); box-shadow: 0 0 20px var(--accent-glow); }
+.stat-card-clickable { cursor: pointer; user-select: none; }
+.stat-card-clickable:active { transform: scale(0.97); }
 .stat-label {
   font-size: 0.8rem;
   color: var(--text-muted);
@@ -299,6 +301,14 @@ tr:hover td { background: var(--bg-hover); }
   letter-spacing: 0.05em;
   margin-bottom: 0.5rem;
 }
+.stat-label-hint {
+  display: inline-block;
+  margin-left: 0.4rem;
+  font-size: 0.7rem;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+.stat-card-clickable:hover .stat-label-hint { opacity: 0.8; }
 .stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1.2; }
 .stat-value.success { color: var(--success); }
 .stat-value.warning { color: var(--warning); }
@@ -366,18 +376,14 @@ tr:hover td { background: var(--bg-hover); }
 @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes cardPulse {
-  0%   { box-shadow: 0 0 0 0 var(--accent-glow); border-color: var(--border-color); }
-  15%  { box-shadow: 0 0 24px 6px rgba(124, 58, 237, 0.45); border-color: var(--accent); }
-  30%  { box-shadow: 0 0 8px 2px var(--accent-glow); border-color: var(--border-color); }
-  50%  { box-shadow: 0 0 24px 6px rgba(124, 58, 237, 0.35); border-color: var(--accent); }
-  70%  { box-shadow: 0 0 4px 1px var(--accent-glow); border-color: var(--border-color); }
-  100% { box-shadow: 0 0 0 0 transparent; border-color: var(--border-color); }
+@keyframes valuePulse {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.12); color: var(--accent-light); }
+  100% { transform: scale(1); }
 }
-.card-highlight {
-  animation: cardPulse 1.2s ease-out;
+.stat-value-pulse {
+  animation: valuePulse 0.35s ease-out;
 }
-
 /* --- Toasts --- */
 .toast-container { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 300; display: flex; flex-direction: column; gap: 0.5rem; max-width: 380px; }
 .toast {

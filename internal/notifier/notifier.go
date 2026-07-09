@@ -86,6 +86,8 @@ type WatchlistEvent struct {
 	NewPacksCount int    `json:"new_packs_count"`
 	EnqueuedCount int    `json:"enqueued_count"`
 	Timestamp     string `json:"timestamp"`
+	Query         string `json:"query"`
+	SearchURL     string `json:"search_url"`
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,9 @@ func formatWatchlistMessage(event WatchlistEvent) notifyMessage {
 	msg := fmt.Sprintf("Watchlist %q: %d nuovi pacchetti", event.WatchlistName, event.NewPacksCount)
 	if event.EnqueuedCount > 0 {
 		msg += fmt.Sprintf(" (%d in coda)", event.EnqueuedCount)
+	}
+	if event.SearchURL != "" {
+		msg += fmt.Sprintf("\nCerca: %s", event.SearchURL)
 	}
 	return notifyMessage{
 		Title:   "Watchlist aggiornata",
@@ -222,12 +227,13 @@ func NewWebhookNotifier(cfg config.NotificationConfig) *WebhookNotifier {
 
 // webhookData is the JSON body sent to the webhook endpoint.
 type webhookData struct {
-	Data string `json:"data"`
+	Data      string `json:"data"`
+	SearchURL string `json:"search_url,omitempty"`
 }
 
 // send delivers a notification to the webhook endpoint.
-func (w *WebhookNotifier) send(ctx context.Context, message string) error {
-	body, err := json.Marshal(webhookData{Data: message})
+func (w *WebhookNotifier) send(ctx context.Context, message, searchURL string) error {
+	body, err := json.Marshal(webhookData{Data: message, SearchURL: searchURL})
 	if err != nil {
 		return fmt.Errorf("webhook: marshal payload: %w", err)
 	}
@@ -264,7 +270,7 @@ func (w *WebhookNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return w.send(ctx, nm.Message)
+	return w.send(ctx, nm.Message, "")
 }
 
 // NotifyWatchlistResults sends a webhook notification for a watchlist event.
@@ -276,7 +282,7 @@ func (w *WebhookNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return w.send(ctx, nm.Message)
+	return w.send(ctx, nm.Message, event.SearchURL)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +310,7 @@ func NewNtfyNotifier(cfg config.NotificationConfig) *NtfyNotifier {
 }
 
 // publish sends a message to the ntfy endpoint with Bearer auth and priority header.
-func (n *NtfyNotifier) publish(ctx context.Context, message string) error {
+func (n *NtfyNotifier) publish(ctx context.Context, message, clickURL string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.endpoint, bytes.NewReader([]byte(message)))
 	if err != nil {
 		return fmt.Errorf("ntfy: create request: %w", err)
@@ -315,6 +321,9 @@ func (n *NtfyNotifier) publish(ctx context.Context, message string) error {
 	req.Header.Set("Priority", "4")
 	if n.token != "" {
 		req.Header.Set("Authorization", "Bearer "+n.token)
+	}
+	if clickURL != "" {
+		req.Header.Set("Click", clickURL)
 	}
 
 	resp, err := defaultHTTPClient.Do(req)
@@ -339,7 +348,7 @@ func (n *NtfyNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return n.publish(ctx, nm.Message)
+	return n.publish(ctx, nm.Message, "")
 }
 
 // NotifyWatchlistResults sends a ntfy notification for a watchlist event.
@@ -351,7 +360,7 @@ func (n *NtfyNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return n.publish(ctx, nm.Message)
+	return n.publish(ctx, nm.Message, event.SearchURL)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +394,7 @@ func NewPushoverNotifier(cfg config.NotificationConfig) *PushoverNotifier {
 }
 
 // send delivers a notification to the Pushover API.
-func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage) error {
+func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage, urlStr, urlTitle string) error {
 	data := map[string]string{
 		"token":   p.token,
 		"user":    p.user,
@@ -393,6 +402,12 @@ func (p *PushoverNotifier) send(ctx context.Context, nm notifyMessage) error {
 	}
 	if nm.Title != "" {
 		data["title"] = nm.Title
+	}
+	if urlStr != "" {
+		data["url"] = urlStr
+		if urlTitle != "" {
+			data["url_title"] = urlTitle
+		}
 	}
 	return sendFormPOST(ctx, p.endpoint, data)
 }
@@ -407,7 +422,7 @@ func (p *PushoverNotifier) Notify(evt queue.Event) error {
 	nm := formatDownloadMessage(evt)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return p.send(ctx, nm)
+	return p.send(ctx, nm, "", "")
 }
 
 // NotifyWatchlistResults sends a Pushover notification for a watchlist event.
@@ -419,7 +434,7 @@ func (p *PushoverNotifier) NotifyWatchlistResults(event WatchlistEvent) error {
 	nm := formatWatchlistMessage(event)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return p.send(ctx, nm)
+	return p.send(ctx, nm, event.SearchURL, "Apri ricerca")
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +701,7 @@ func mapQueueEvent(evtType queue.EventType) EventType {
 type Manager struct {
 	notifiers []Notifier
 	logger    *logging.Logger
+	baseURL   string
 }
 
 // isEnabled returns true if the notification config is enabled.
@@ -704,8 +720,13 @@ var validEvents = map[string]bool{
 // NewManager creates a Manager from notification configs.
 // Config entries with unsupported types are silently skipped.
 // Config entries with enabled=false are skipped.
-func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manager {
+// baseURL is the public-facing URL used to construct search links in notifications.
+func NewManager(cfgs []config.NotificationConfig, baseURL string, logger *logging.Logger) *Manager {
 	var notifiers []Notifier
+	// Track whether any provider covers watchlist_new_results so we can warn
+	// at startup if base_url is empty (links would not be sent).
+	// Empty cfg.Events means "all events" — mirrors eventsFilter/interested semantics.
+	var watchlistProviderEnabled bool
 
 	for _, cfg := range cfgs {
 		// Skip if explicitly disabled
@@ -719,6 +740,19 @@ func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manag
 			if !validEvents[e] {
 				logger.Warnf("notifier: %q provider has unknown event %q, will be ignored", cfg.Type, e)
 			}
+		}
+
+		coversWatchlist := len(cfg.Events) == 0
+		if !coversWatchlist {
+			for _, e := range cfg.Events {
+				if e == string(EventWatchlistNewResults) {
+					coversWatchlist = true
+					break
+				}
+			}
+		}
+		if coversWatchlist {
+			watchlistProviderEnabled = true
 		}
 
 		switch cfg.Type {
@@ -751,9 +785,16 @@ func NewManager(cfgs []config.NotificationConfig, logger *logging.Logger) *Manag
 		}
 	}
 
+	if baseURL != "" {
+		logger.Infof("notifier: base URL for notification links: %s", baseURL)
+	} else if watchlistProviderEnabled {
+		logger.Warnf("notifier: http.base_url is empty; watchlist notifications will fire but will NOT include direct search links (the \"Cerca: <url>\" line). Set http.base_url in config.yaml or XDCC_HTTP_BASE_URL env var to enable them.")
+	}
+
 	return &Manager{
 		notifiers: notifiers,
 		logger:    logger,
+		baseURL:   baseURL,
 	}
 }
 
@@ -815,10 +856,16 @@ func (m *Manager) drainEvents(ch <-chan queue.Event) {
 }
 
 // NotifyWatchlistResults sends a watchlist notification to all notifiers
-// and waits for all to complete before returning.
-func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
+// and waits for all to complete before returning. The query parameter is used
+// to construct a search URL linking back to the web UI.
+func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int, query string) {
 	if len(m.notifiers) == 0 {
 		return
+	}
+
+	var searchURL string
+	if m.baseURL != "" && query != "" {
+		searchURL = fmt.Sprintf("%s/#search?q=%s", m.baseURL, url.QueryEscape(query))
 	}
 
 	event := WatchlistEvent{
@@ -826,6 +873,8 @@ func (m *Manager) NotifyWatchlistResults(name string, newPacks, enqueued int) {
 		NewPacksCount: newPacks,
 		EnqueuedCount: enqueued,
 		Timestamp:     time.Now().Format(time.RFC3339),
+		Query:         query,
+		SearchURL:     searchURL,
 	}
 
 	var wg sync.WaitGroup

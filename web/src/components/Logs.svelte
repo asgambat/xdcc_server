@@ -11,6 +11,21 @@
   let logCount = $state(0);
   let seenTimestamps = new Set(); // deduplicate SSE replay vs REST fetch
 
+  // ---- Filter & count ----
+  let filterText = $state('');
+  let requestCount = $state(100);
+
+  // ---- Derived: filtered logs ----
+  let displayedLogs = $derived(
+    filterText.trim() === ''
+      ? logs
+      : logs.filter(entry => {
+          const lower = filterText.toLowerCase();
+          return entry.message.toLowerCase().includes(lower)
+              || entry.level.toLowerCase().includes(lower);
+        })
+  );
+
   // ---- Auto-scroll state ----
   let containerEl;
   let autoScroll = $state(true);
@@ -85,31 +100,35 @@
     logCount = 0;
   }
 
-  onMount(async () => {
-    // Fetch last 100 log entries before subscribing to SSE
+  async function fetchLogs(count) {
     try {
-      const resp = await SystemAPI.logs(100);
+      const resp = await SystemAPI.logs(count);
       if (resp.logs && resp.logs.length > 0) {
-        // Batch-insert initial logs to avoid 100 individual re-renders
-        const initial = resp.logs.map(e => ({
+        // Replace current buffer with fetched logs
+        logs = resp.logs.map(e => ({
           timestamp: e.timestamp,
           level:     e.level || 'INFO',
           message:   e.message || '',
         }));
-        for (const entry of initial) {
-          logs.push(entry);
-          logCount++;
-        }
-        // Evict oldest if over limit
-        while (logs.length > MAX_LINES) {
-          logs.shift();
-        }
-        // Scroll to bottom after loading initial logs
+        logCount = logs.length;
+        // Reset dedup set and populate from fetched entries to prevent
+        // SSE replay from creating duplicates after a manual fetch.
+        seenTimestamps = new Set(logs.map(e => e.timestamp));
         scrollToBottom();
       }
     } catch (e) {
-      console.warn('Failed to load initial logs:', e);
+      console.warn('Failed to fetch logs:', e);
     }
+  }
+
+  function handleRequestCountSubmit(e) {
+    e.preventDefault();
+    fetchLogs(requestCount);
+  }
+
+  onMount(async () => {
+    // Fetch initial log entries
+    await fetchLogs(requestCount);
 
     // Subscribe to log_entry SSE events for live updates
     unsubLogEntry = sseClient.on('log_entry', (data) => {
@@ -137,6 +156,29 @@
       <span class="log-title">📜 Server Logs</span>
       <span class="log-count">{logCount.toLocaleString()} lines</span>
     </div>
+    <div class="log-toolbar-center">
+      <input
+        type="text"
+        class="log-filter-input"
+        placeholder="Filter logs..."
+        bind:value={filterText}
+      />
+      {#if filterText}
+        <span class="log-filter-count">{displayedLogs.length}/{logCount}</span>
+      {/if}
+      <form class="log-fetch-form" onsubmit={handleRequestCountSubmit}>
+        <input
+          type="number"
+          class="log-count-input"
+          min="10"
+          max="2000"
+          step="10"
+          bind:value={requestCount}
+          title="Number of log lines to fetch"
+        />
+        <button type="submit" class="btn btn-sm btn-ghost" title="Fetch latest N log lines">↻ Fetch</button>
+      </form>
+    </div>
     <div class="log-toolbar-right">
       <button class="btn btn-sm" class:btn-warning={paused} class:btn-ghost={!paused}
               onclick={togglePause} title={paused ? 'Resume auto-scroll' : 'Pause auto-scroll'}>
@@ -157,8 +199,10 @@
   >
     {#if logs.length === 0}
       <div class="log-empty">Waiting for log entries...</div>
+    {:else if displayedLogs.length === 0}
+      <div class="log-empty">No log entries match filter "{filterText}"</div>
     {:else}
-      {#each logs as entry, i (i)}
+      {#each displayedLogs as entry, i (i)}
         <div class="log-line">
           <span class="log-time">{formatTime(entry.timestamp)}</span>
           <span class="log-level" style={levelStyles[entry.level] || ''}>[{entry.level}]</span>
@@ -207,6 +251,70 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
+  }
+
+  .log-toolbar-center {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .log-filter-input {
+    width: 180px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .log-filter-input:focus {
+    border-color: var(--accent);
+  }
+
+  .log-filter-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .log-filter-count {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .log-fetch-form {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .log-count-input {
+    width: 60px;
+    padding: 0.25rem 0.35rem;
+    font-size: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+    text-align: center;
+    transition: border-color 0.15s;
+    /* Hide spinner for cleaner look */
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .log-count-input::-webkit-inner-spin-button,
+  .log-count-input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .log-count-input:focus {
+    border-color: var(--accent);
   }
 
   .log-toolbar-right {

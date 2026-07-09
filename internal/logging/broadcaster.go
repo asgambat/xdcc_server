@@ -13,8 +13,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // MaxLogBufferLines is the max number of log lines kept in the ring buffer
-// for SSE replay (sent to clients on initial connect).
-const MaxLogBufferLines = 200
+// for SSE replay (sent to clients on initial connect or via the /api/logs endpoint).
+const MaxLogBufferLines = 2000
 
 // LogEntry represents a single log line sent via SSE.
 type LogEntry struct {

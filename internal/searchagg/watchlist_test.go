@@ -101,6 +101,10 @@ func (m *mockDownloadStore) FindDuplicateDownload(ctx context.Context, bot, serv
 func (m *mockDownloadStore) GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*store.DownloadRecord, error) {
 	return nil, nil
 }
+func (m *mockDownloadStore) DeleteAllHistory(ctx context.Context) (int64, error) { return 0, nil }
+func (m *mockDownloadStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) {
+	return 0, nil
+}
 
 // ===========================================================================
 // computeFingerprint
@@ -446,6 +450,10 @@ func (m *trackedWatchlistStore) FindDuplicateDownload(ctx context.Context, bot, 
 func (m *trackedWatchlistStore) GetDownloadByBotMessage(ctx context.Context, bot, packMessage string) (*store.DownloadRecord, error) {
 	return nil, nil
 }
+func (m *trackedWatchlistStore) DeleteAllHistory(ctx context.Context) (int64, error) { return 0, nil }
+func (m *trackedWatchlistStore) GetHistoricalAvgSpeed(ctx context.Context) (float64, error) {
+	return 0, nil
+}
 func (m *trackedWatchlistStore) FilenamesExist(ctx context.Context, filenames []string) (map[string]bool, error) {
 	return nil, nil
 }
@@ -587,7 +595,7 @@ func TestRunWatchlist_NotifyDisabledSkipsCallback(t *testing.T) {
 	agg := newTestAggregator(ms)
 
 	var callbackCount int32
-	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int) {
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int, query string) {
 		atomic.AddInt32(&callbackCount, 1)
 	})
 
@@ -619,7 +627,7 @@ func TestRunWatchlist_NotifyEnabledNoNewPacks(t *testing.T) {
 	agg := newTestAggregator(ms)
 
 	var callbackCount int32
-	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int) {
+	agg.SetOnWatchlistResults(func(name string, newCount, enqueued int, query string) {
 		atomic.AddInt32(&callbackCount, 1)
 	})
 

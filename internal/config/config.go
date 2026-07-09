@@ -177,6 +177,10 @@ type HTTPConfig struct {
 	// WARNING: enabling this on a publicly exposed instance allows clients
 	// to spoof their IP and bypass per-IP rate limiting.
 	TrustProxy bool `yaml:"trust_proxy"   env:"XDCC_HTTP_TRUST_PROXY"   json:"trust_proxy"`
+	// BaseURL is the public-facing URL of the server, used to construct links
+	// in external notifications (e.g., watchlist search results). When empty,
+	// notification URLs are omitted. Example: "https://xs.lan.asga.uk"
+	BaseURL string `yaml:"base_url"       env:"XDCC_HTTP_BASE_URL"       json:"base_url"`
 }
 
 type DownloadConfig struct {
@@ -487,6 +491,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("XDCC_HTTP_TRUST_PROXY"); v != "" {
 		c.HTTP.TrustProxy = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("XDCC_HTTP_BASE_URL"); v != "" {
+		c.HTTP.BaseURL = strings.TrimRight(v, "/")
 	}
 	if v := os.Getenv("XDCC_SECURITY_ADMIN_TOKEN"); v != "" {
 		c.Security.AdminToken = v
@@ -964,6 +971,13 @@ func (c *Config) GetDownloadConfig() DownloadConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.Download
+}
+
+// GetBaseURL returns the public-facing base URL for constructing notification links.
+func (c *Config) GetBaseURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.HTTP.BaseURL
 }
 
 // GetTokenTTLMinutes returns the security token TTL.
