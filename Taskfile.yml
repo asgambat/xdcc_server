@@ -3,7 +3,15 @@ version: '3'
 vars:
   # Go configuration
   GO_CMD: go
-  GO_BUILD_FLAGS: -ldflags="-s -w" -p 2
+  GO_BUILD_FLAGS: -p 2
+  # Base ldflags for binaries that don't expose a version
+  LDFLAGS_BASE: -s -w
+  # Version is injected from the single source of truth (.version) at build time.
+  VERSION:
+    sh: cat .version 2>/dev/null || echo dev
+  # Server build ldflags: strip debug info and embed the version from .version.
+  LDFLAGS_SERVER:
+    sh: printf '%s -w -X main.Version=%s' -s "$(cat .version 2>/dev/null || echo dev)"
   GO_TEST_FLAGS: -race -cover -p 2
 
   # Binary output
@@ -52,11 +60,12 @@ tasks:
     deps: [frontend:build, frontend:check]
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -o {{.BIN_DIR}}/xdcc-server{{exeExt}} ./cmd/xdcc-server"
+      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -ldflags=\"{{.LDFLAGS_SERVER}}\" -o {{.BIN_DIR}}/xdcc-server{{exeExt}} ./cmd/xdcc-server"
     sources:
       - cmd/xdcc-server/**/*.go
       - internal/**/*.go
       - web/dist/**/*
+      - .version
     generates:
       - "{{.BIN_DIR}}/xdcc-server{{exeExt}}"
 
@@ -64,7 +73,7 @@ tasks:
     desc: Build xdcc-dl binary
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -o {{.BIN_DIR}}/xdcc-dl{{exeExt}} ./cmd/xdcc-dl"
+      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -ldflags=\"{{.LDFLAGS_BASE}}\" -o {{.BIN_DIR}}/xdcc-dl{{exeExt}} ./cmd/xdcc-dl"
     sources:
       - cmd/xdcc-dl/**/*.go
       - internal/**/*.go
@@ -75,7 +84,7 @@ tasks:
     desc: Build xdcc-search binary
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -o {{.BIN_DIR}}/xdcc-search{{exeExt}} ./cmd/xdcc-search"
+      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -ldflags=\"{{.LDFLAGS_BASE}}\" -o {{.BIN_DIR}}/xdcc-search{{exeExt}} ./cmd/xdcc-search"
     sources:
       - cmd/xdcc-search/**/*.go
       - internal/**/*.go
@@ -86,7 +95,7 @@ tasks:
     desc: Build xdcc-browse binary
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -o {{.BIN_DIR}}/xdcc-browse{{exeExt}} ./cmd/xdcc-browse"
+      - "{{.GO_CMD}} build {{.GO_BUILD_FLAGS}} -ldflags=\"{{.LDFLAGS_BASE}}\" -o {{.BIN_DIR}}/xdcc-browse{{exeExt}} ./cmd/xdcc-browse"
     sources:
       - cmd/xdcc-browse/**/*.go
       - internal/**/*.go
@@ -312,12 +321,12 @@ tasks:
   docker:build:
     desc: Build Docker image
     cmds:
-      - docker build -t {{.DOCKER_IMAGE}}:{{.DOCKER_TAG}} .
+      - docker build --build-arg VERSION={{.VERSION}} -t {{.DOCKER_IMAGE}}:{{.DOCKER_TAG}} .
 
   docker:build:multiarch:
     desc: Build multi-architecture Docker image
     cmds:
-      - docker buildx build --platform=linux/amd64,linux/arm64 -t {{.DOCKER_IMAGE}}:{{.DOCKER_TAG}} .
+      - docker buildx build --build-arg VERSION={{.VERSION}} --platform=linux/amd64,linux/arm64 -t {{.DOCKER_IMAGE}}:{{.DOCKER_TAG}} .
 
   docker:run:
     desc: Run Docker container
@@ -387,3 +396,21 @@ tasks:
     cmds:
       - git tag v{{.CLI_ARGS}}
       - git push origin v{{.CLI_ARGS}}
+
+  # ============================================================
+  # Version management
+  # ============================================================
+
+  version:show:
+    desc: "Show the current version (source of truth: .version file)"
+    cmds:
+      - cmd: cat .version
+        silent: true
+
+  version:bump:
+    desc: 'Bump version, commit, and tag (usage: task version:bump -- 0.0.11)'
+    cmds:
+      - bash scripts/version_bump.sh "{{.CLI_ARGS}}"
+    preconditions:
+      - sh: '[ -n "{{.CLI_ARGS}}" ]'
+        msg: "Usage: task version:bump -- <new-version>  (e.g. task version:bump -- 0.0.11)"

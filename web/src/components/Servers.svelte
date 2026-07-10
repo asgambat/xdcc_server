@@ -391,19 +391,19 @@
         {#if $channels[srv.id]?.length}
           <div class="table-container">
             <table>
-              <thead><tr><th>Channel</th><th>Speed</th><th>Topic</th><th>Joined</th><th>Auto-join</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Channel</th><th class="hide-mobile">Speed</th><th class="hide-mobile">Topic</th><th>Joined</th><th>Auto-join</th><th>Actions</th></tr></thead>
               <tbody>
                 {#each $channels[srv.id] as ch}
                   <tr>
                     <td><strong>{ch.name}</strong></td>
-                    <td class="text-sm text-muted">
+                    <td class="text-sm text-muted hide-mobile">
                       {#if ch.avg_speed_bps > 0}
                         {(ch.avg_speed_bps / 1024 / 1024).toFixed(2)} MB/s
                       {:else}
                         —
                       {/if}
                     </td>
-                    <td class="text-muted truncate" style="max-width:300px;cursor:pointer" onclick={() => openTopicModal(ch.topic, ch.name)} title="Click to view full topic">{ch.topic || '—'}</td>
+                    <td class="text-muted truncate hide-mobile" style="max-width:300px;cursor:pointer" onclick={() => openTopicModal(ch.topic, ch.name)} title="Click to view full topic">{ch.topic || '—'}</td>
                     <td>
                       <span class="badge" class:badge-ok={ch.joined} class:badge-info={!ch.joined}>
                         {ch.joined ? 'Yes' : 'No'}
@@ -466,3 +466,11 @@
     </div>
   {/each}
 {/if}
+
+<style>
+  @media (max-width: 768px) {
+    .hide-mobile {
+      display: none;
+    }
+  }
+</style>

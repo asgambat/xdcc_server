@@ -1,9 +1,10 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { searchResults, pendingSearchQuery } from '../lib/stores.js';
   import { SearchAPI, DownloadsAPI, ProvidersAPI, PresetsAPI } from '../lib/api.js';
   import { formatBytes, statusBadge, escapeHtml, normalizeSize } from '../lib/utils.js';
   import { addToast } from '../lib/stores.js';
+  import { SEARCH_COL_WIDTHS } from '../lib/columnDefaults.js';
   import Modal from './Modal.svelte';
 
   // --- Query history ---
@@ -201,6 +202,128 @@
     if (sortColumn !== column) return '↕';
     return sortDirection === 'asc' ? '▲' : '▼';
   }
+
+  // --- Column visibility / resizable widths (persisted to localStorage) ---
+  const SEARCH_COL_VIS_KEY = 'xdcc-search-columns';
+  const SEARCH_COL_WIDTHS_KEY = 'xdcc-search-column-widths';
+  const SEARCH_MIN_COL_WIDTH = 50;
+  const SEARCH_COL_ORDER = ['file', 'bot', 'channel', 'size', 'server', 'actions'];
+  const SEARCH_COL_LABELS = { file: 'File', bot: 'Bot', channel: 'Channel', size: 'Size', server: 'Server', actions: 'Actions' };
+  let searchColumnVis = $state({ file: true, bot: true, channel: true, size: true, server: true, actions: true });
+  let searchShowColumnPicker = $state(false);
+  let searchColumnWidths = $state({ ...SEARCH_COL_WIDTHS });
+  let searchResizing = $state(null);
+  let searchDragIndicator = $state(null);
+  let searchTable = $state();
+
+  function loadSearchColumnVis() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SEARCH_COL_VIS_KEY));
+      if (saved && typeof saved === 'object') { searchColumnVis = { ...searchColumnVis, ...saved }; }
+    } catch {}
+  }
+
+  function toggleSearchColumn(col) {
+    searchColumnVis = { ...searchColumnVis, [col]: !searchColumnVis[col] };
+  }
+
+  function loadSearchColumnWidths() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SEARCH_COL_WIDTHS_KEY));
+      if (saved && typeof saved === 'object') { searchColumnWidths = { ...searchColumnWidths, ...saved }; }
+    } catch {}
+  }
+
+  function searchGetVisibleColIndex(col) {
+    let idx = 0;
+    for (const c of SEARCH_COL_ORDER) {
+      if (c === col) return idx;
+      if (searchColumnVis[c]) idx++;
+    }
+    return -1;
+  }
+
+  function endSearchResize() {
+    if (searchResizing) {
+      searchResizing = null;
+      searchDragIndicator = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+  }
+
+  function searchStartResize(e, col) {
+    e.preventDefault();
+    e.stopPropagation();
+    searchResizing = { col, startX: e.clientX, startWidth: searchColumnWidths[col] };
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const container = e.target.closest('.table-container');
+    if (container) {
+      const r = container.getBoundingClientRect();
+      searchDragIndicator = { x: e.clientX, top: r.top, height: r.height };
+    }
+  }
+
+  function searchAutoFitColumn(e, col) {
+    const colIdx = searchGetVisibleColIndex(col);
+    if (colIdx < 0) return;
+    const table = e?.target?.closest?.('table') || searchTable;
+    if (!table) return;
+    const m = document.createElement('span');
+    m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;';
+    document.body.appendChild(m);
+    let maxW = SEARCH_MIN_COL_WIDTH;
+    m.style.fontWeight = '600';
+    m.style.fontSize = '0.8rem';
+    m.textContent = SEARCH_COL_LABELS[col] || col;
+    maxW = Math.max(maxW, m.offsetWidth + 30);
+    m.style.fontWeight = 'normal';
+    m.style.fontSize = '0.88rem';
+    for (const row of table.querySelectorAll('tbody tr')) {
+      const cell = /** @type {HTMLTableRowElement} */ (row).cells[colIdx];
+      if (!cell) continue;
+      m.textContent = cell.textContent.trim();
+      const w = m.offsetWidth + 30;
+      if (w > maxW) maxW = w;
+    }
+    document.body.removeChild(m);
+    searchColumnWidths[col] = Math.max(SEARCH_MIN_COL_WIDTH, Math.ceil(maxW));
+  }
+
+  function searchAutoFitAllColumns(e) {
+    for (const col of Object.keys(searchColumnVis)) {
+      if (searchColumnVis[col]) searchAutoFitColumn(e, col);
+    }
+  }
+
+  function searchResetColumnWidths() {
+    searchColumnWidths = { ...SEARCH_COL_WIDTHS };
+  }
+
+  // Persist column visibility to localStorage
+  $effect(() => {
+    const vis = searchColumnVis;
+    try { localStorage.setItem(SEARCH_COL_VIS_KEY, JSON.stringify(vis)); } catch {}
+  });
+
+  // Persist column widths to localStorage
+  $effect(() => {
+    const w = searchColumnWidths;
+    try { localStorage.setItem(SEARCH_COL_WIDTHS_KEY, JSON.stringify(w)); } catch {}
+  });
+
+  loadSearchColumnVis();
+  loadSearchColumnWidths();
+
+  onDestroy(() => {
+    if (searchResizing) {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+    searchResizing = null;
+    searchDragIndicator = null;
+  });
 
   // Parse query params from URL hash (e.g., #search?q=ubuntu&min=100MB)
   function loadFromHash() {
@@ -484,6 +607,23 @@
 
 </script>
 
+<svelte:window
+  onmousemove={(e) => {
+    if (searchResizing) {
+      const delta = e.clientX - searchResizing.startX;
+      searchColumnWidths[searchResizing.col] = Math.max(SEARCH_MIN_COL_WIDTH, searchResizing.startWidth + delta);
+      if (searchDragIndicator) searchDragIndicator.x = e.clientX;
+    }
+  }}
+  onmouseup={endSearchResize}
+  onpointerup={endSearchResize}
+  onpointercancel={endSearchResize}
+/>
+
+{#if searchDragIndicator}
+  <div class="drag-guide-line" style="left:{searchDragIndicator.x}px;top:{searchDragIndicator.top}px;height:{searchDragIndicator.height}px"></div>
+{/if}
+
 <div class="card mb-2">
   <div class="filters-bar">
     <div class="form-group" style="flex:1;min-width:250px;position:relative">
@@ -592,6 +732,23 @@
     <div class="card-header">
       <span class="card-title">Results</span>
       <span class="text-sm text-muted">{results.total_results || results.packs?.length || 0} packs found</span>
+      <div style="position:relative">
+        <button class="btn btn-sm btn-ghost" onclick={(e) => { e.stopPropagation(); searchShowColumnPicker = !searchShowColumnPicker; }}>⚙️ Columns</button>
+        {#if searchShowColumnPicker}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="column-picker" role="menu" tabindex="-1" style="right:0;min-width:160px" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') searchShowColumnPicker = false; }}>
+            {#each SEARCH_COL_ORDER as col}
+              <label class="column-picker-item">
+                <input type="checkbox" checked={searchColumnVis[col]} onchange={() => toggleSearchColumn(col)} />
+                <span>{SEARCH_COL_LABELS[col] || col}</span>
+              </label>
+            {/each}
+            <div class="column-picker-separator"></div>
+            <button class="column-picker-item column-picker-action" onclick={(e) => { searchAutoFitAllColumns(e); searchShowColumnPicker = false; }}>📐 Auto-fit all</button>
+            <button class="column-picker-item column-picker-action" onclick={() => { searchResetColumnWidths(); searchShowColumnPicker = false; }}>↺ Reset defaults</button>
+          </div>
+        {/if}
+      </div>
       <button class="btn btn-sm btn-primary" onclick={() => { presetName = query.trim(); showSavePresetModal = true; }}>💾 Save as preset</button>
     </div>
     {#if results.packs?.length > 0}
@@ -629,38 +786,52 @@
 
       {#if sortedPacks.length > 0}
       <div class="table-container">
-        <table>
+        <table style="table-layout:fixed;width:100%" bind:this={searchTable}>
           <thead>
             <tr>
-              <th class="sortable" onclick={() => toggleSort('filename')}>
-                File <span class="sort-icon">{sortIcon('filename')}</span>
-              </th>
-              <th class="sortable" onclick={() => toggleSort('bot')}>
-                Bot <span class="sort-icon">{sortIcon('bot')}</span>
-              </th>
-              <th class="sortable" onclick={() => toggleSort('channel')}>
-                Channel <span class="sort-icon">{sortIcon('channel')}</span>
-              </th>
-              <th class="sortable" onclick={() => toggleSort('size')}>
-                Size <span class="sort-icon">{sortIcon('size')}</span>
-              </th>
-              <th class="sortable" onclick={() => toggleSort('server')}>
-                Server <span class="sort-icon">{sortIcon('server')}</span>
-              </th>
-              <th>Actions</th>
+              {#if searchColumnVis.file}<th class="sortable" role="button" tabindex="0" onclick={() => toggleSort('filename')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('filename'); }} style="cursor:pointer;user-select:none;width:{searchColumnWidths.file}px;position:relative">File <span class="sort-icon">{sortIcon('filename')}</span>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'file')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'file'); }}></div>
+              </th>{/if}
+              {#if searchColumnVis.bot}<th class="sortable" role="button" tabindex="0" onclick={() => toggleSort('bot')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('bot'); }} style="cursor:pointer;user-select:none;width:{searchColumnWidths.bot}px;position:relative">Bot <span class="sort-icon">{sortIcon('bot')}</span>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'bot')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'bot'); }}></div>
+              </th>{/if}
+              {#if searchColumnVis.channel}<th class="sortable" role="button" tabindex="0" onclick={() => toggleSort('channel')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('channel'); }} style="cursor:pointer;user-select:none;width:{searchColumnWidths.channel}px;position:relative">Channel <span class="sort-icon">{sortIcon('channel')}</span>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'channel')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'channel'); }}></div>
+              </th>{/if}
+              {#if searchColumnVis.size}<th class="sortable" role="button" tabindex="0" onclick={() => toggleSort('size')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('size'); }} style="cursor:pointer;user-select:none;width:{searchColumnWidths.size}px;position:relative">Size <span class="sort-icon">{sortIcon('size')}</span>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'size')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'size'); }}></div>
+              </th>{/if}
+              {#if searchColumnVis.server}<th class="sortable" role="button" tabindex="0" onclick={() => toggleSort('server')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('server'); }} style="cursor:pointer;user-select:none;width:{searchColumnWidths.server}px;position:relative">Server <span class="sort-icon">{sortIcon('server')}</span>
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'server')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'server'); }}></div>
+              </th>{/if}
+              {#if searchColumnVis.actions}<th style="width:{searchColumnWidths.actions}px;position:relative">Actions
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="resize-handle" role="separator" onmousedown={(e) => searchStartResize(e, 'actions')} ondblclick={(e) => { e.stopPropagation(); searchAutoFitColumn(e, 'actions'); }}></div>
+              </th>{/if}
             </tr>
           </thead>
           <tbody>
             {#each sortedPacks as pack}
               <tr>
-                <td class="truncate" style="max-width:250px" title={pack.filename}>{pack.filename || 'Unknown'}</td>
-                <td>{pack.bot || '—'}</td>
-                <td>{pack.channel || '—'}</td>
-                <td class="text-sm">{formatBytes(pack.size)}</td>
-                <td><span class="badge badge-info">{pack.server?.address || '?'}</span></td>
-                <td>
-                  <button class="btn btn-sm btn-primary" onclick={() => downloadPack(pack)}>⬇️ Download</button>
-                </td>
+                {#if searchColumnVis.file}<td class="truncate" title={pack.filename}>{pack.filename || 'Unknown'}</td>{/if}
+                {#if searchColumnVis.bot}<td>{pack.bot || '—'}</td>{/if}
+                {#if searchColumnVis.channel}<td>{pack.channel || '—'}</td>{/if}
+                {#if searchColumnVis.size}<td class="text-sm">{formatBytes(pack.size)}</td>{/if}
+                {#if searchColumnVis.server}<td><span class="badge badge-info">{pack.server?.address || '?'}</span></td>{/if}
+                {#if searchColumnVis.actions}<td>
+                  <button class="btn btn-sm btn-primary" onclick={() => downloadPack(pack)}>⬇️ <span class="hide-mobile">Download</span></button>
+                </td>{/if}
               </tr>
             {/each}
           </tbody>

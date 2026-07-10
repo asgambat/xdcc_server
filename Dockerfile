@@ -29,6 +29,10 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
+# Version injected from .version (single source of truth). Override at build
+# time via --build-arg VERSION=x.y.z; falls back to .version, then "dev".
+ARG VERSION=
+
 WORKDIR /app
 
 # Re-declare ARGs for this stage (required after FROM)
@@ -53,7 +57,7 @@ COPY --from=frontend-builder /app/web/dist ./web/dist
 # Use BuildKit cache mount to speed up iterative rebuilds
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/xdcc-server ./cmd/xdcc-server
+    go build -ldflags="-s -w -X main.Version=${VERSION:-$(cat .version 2>/dev/null || echo dev)}" -o /out/xdcc-server ./cmd/xdcc-server
 
 # ── Create non-root user and runtime directories ─────────────────
 # The /data and /var/lib/xdcc-server directories are created here so

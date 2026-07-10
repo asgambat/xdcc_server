@@ -1,8 +1,9 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { watchlists, addToast, navigateToSearch } from '../lib/stores.js';
   import { WatchlistsAPI, DownloadsAPI } from '../lib/api.js';
   import { escapeHtml, createEditFormFocuser } from '../lib/utils.js';
+  import { MAIN_WATCHLIST_COL_WIDTHS } from '../lib/columnDefaults.js';
   import Modal from './Modal.svelte';
 
   let loading = $state(true);
@@ -86,7 +87,134 @@
     });
   });
 
+  // --- Column visibility for main watchlist table (persisted to localStorage) ---
+  const MAIN_COL_VIS_KEY = 'xdcc-watchlist-main-columns';
+  let mainColumnVis = $state({ name: true, query: true, interval: true, last_run: true, new: true, actions: true });
+  let mainShowColumnPicker = $state(false);
+
+  // --- Resizable column widths for main table (persisted to localStorage) ---
+  const MAIN_COL_WIDTHS_KEY = 'xdcc-watchlist-main-column-widths';
+  const MAIN_MIN_COL_WIDTH = 50;
+  const MAIN_COL_LABELS = { name: 'Name', query: 'Query', interval: 'Interval', last_run: 'Last Run', new: 'New', actions: 'Actions' };
+  const MAIN_COL_ORDER = ['name', 'query', 'interval', 'last_run', 'new', 'actions'];
+  let mainColumnWidths = $state({ name: 180, query: 200, interval: 80, last_run: 150, new: 60, actions: 140 });
+  let mainResizing = $state(null);
+  let mainDragIndicator = $state(null);
+  let mainTable = $state();
+
+  function loadMainColumnVis() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(MAIN_COL_VIS_KEY));
+      if (saved && typeof saved === 'object') { mainColumnVis = { ...mainColumnVis, ...saved }; }
+    } catch {}
+  }
+
+  function toggleMainColumn(col) {
+    mainColumnVis = { ...mainColumnVis, [col]: !mainColumnVis[col] };
+  }
+
+  function loadMainColumnWidths() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(MAIN_COL_WIDTHS_KEY));
+      if (saved && typeof saved === 'object') { mainColumnWidths = { ...mainColumnWidths, ...saved }; }
+    } catch {}
+  }
+
+  function mainGetVisibleColIndex(col) {
+    let idx = 0;
+    for (const c of MAIN_COL_ORDER) {
+      if (c === col) return idx;
+      if (mainColumnVis[c]) idx++;
+    }
+    return -1;
+  }
+
+  function endMainResize() {
+    if (mainResizing) {
+      mainResizing = null;
+      mainDragIndicator = null;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+  }
+
+  function mainStartResize(e, col) {
+    e.preventDefault();
+    e.stopPropagation();
+    mainResizing = { col, startX: e.clientX, startWidth: mainColumnWidths[col] };
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const container = e.target.closest('.table-container');
+    if (container) {
+      const r = container.getBoundingClientRect();
+      mainDragIndicator = { x: e.clientX, top: r.top, height: r.height };
+    }
+  }
+
+  function mainAutoFitColumn(e, col) {
+    const colIdx = mainGetVisibleColIndex(col);
+    if (colIdx < 0) return;
+    const table = e?.target?.closest?.('table') || mainTable;
+    if (!table) return;
+    const m = document.createElement('span');
+    m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;';
+    document.body.appendChild(m);
+    let maxW = MAIN_MIN_COL_WIDTH;
+    m.style.fontWeight = '600';
+    m.style.fontSize = '0.8rem';
+    m.textContent = MAIN_COL_LABELS[col] || col;
+    maxW = Math.max(maxW, m.offsetWidth + 30);
+    m.style.fontWeight = 'normal';
+    m.style.fontSize = '0.88rem';
+    for (const row of table.querySelectorAll('tbody tr')) {
+      const cell = /** @type {HTMLTableRowElement} */ (row).cells[colIdx];
+      if (!cell) continue;
+      m.textContent = cell.textContent.trim();
+      const w = m.offsetWidth + 30;
+      if (w > maxW) maxW = w;
+    }
+    document.body.removeChild(m);
+    mainColumnWidths[col] = Math.max(MAIN_MIN_COL_WIDTH, Math.ceil(maxW));
+  }
+
+  function mainAutoFitAllColumns(e) {
+    for (const col of Object.keys(mainColumnVis)) {
+      if (mainColumnVis[col]) {
+        mainAutoFitColumn(e, col);
+      }
+    }
+  }
+
+  function mainResetColumnWidths() {
+    mainColumnWidths = { ...MAIN_WATCHLIST_COL_WIDTHS };
+  }
+
+  // Persist main column visibility to localStorage
+  $effect(() => {
+    const vis = mainColumnVis;
+    try { localStorage.setItem(MAIN_COL_VIS_KEY, JSON.stringify(vis)); } catch {}
+  });
+
+  // Persist main column widths to localStorage
+  $effect(() => {
+    const w = mainColumnWidths;
+    try { localStorage.setItem(MAIN_COL_WIDTHS_KEY, JSON.stringify(w)); } catch {}
+  });
+
+  // Init main column visibility and widths from localStorage
+  loadMainColumnVis();
+  loadMainColumnWidths();
+
   onMount(async () => { await load(); loading = false; });
+
+  onDestroy(() => {
+    if (mainResizing) {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+    mainResizing = null;
+    mainDragIndicator = null;
+  });
 
   async function load() {
     try { watchlists.set(await WatchlistsAPI.list()); } catch {}
@@ -194,6 +322,24 @@
   }
 </script>
 
+<svelte:window
+  onclick={() => { if (mainShowColumnPicker) mainShowColumnPicker = false; }}
+  onmousemove={(e) => {
+    if (mainResizing) {
+      const delta = e.clientX - mainResizing.startX;
+      mainColumnWidths[mainResizing.col] = Math.max(MAIN_MIN_COL_WIDTH, mainResizing.startWidth + delta);
+      if (mainDragIndicator) mainDragIndicator.x = e.clientX;
+    }
+  }}
+  onmouseup={endMainResize}
+  onpointerup={endMainResize}
+  onpointercancel={endMainResize}
+/>
+
+{#if mainDragIndicator}
+  <div class="drag-guide-line" style="left:{mainDragIndicator.x}px;top:{mainDragIndicator.top}px;height:{mainDragIndicator.height}px"></div>
+{/if}
+
 <Modal title={`Watchlist: ${resultsWatchlist?.name || ''} (${filteredResults.length} / ${resultsItems.length} results)`} visible={showResultsModal} on:close={() => showResultsModal = false}>
   <div class="wl-filters" style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
     <input class="form-input" style="flex:1" placeholder="Filter by filename…" bind:value={resultsFilterFilename} />
@@ -271,27 +417,69 @@
   </div>
 
   <div class="card">
-    <div class="card-header"><span class="card-title">Active Watchlists ({$watchlists.length})</span></div>
+    <div class="card-header"><span class="card-title">Active Watchlists ({$watchlists.length})</span>
+      <div style="position:relative">
+        <button class="btn btn-sm btn-ghost" onclick={(e) => { e.stopPropagation(); mainShowColumnPicker = !mainShowColumnPicker; }}>⚙️ Columns</button>
+        {#if mainShowColumnPicker}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="column-picker" role="menu" tabindex="-1" style="right:0;min-width:160px" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') mainShowColumnPicker = false; }}>
+            {#each Object.keys(mainColumnVis) as col}
+              <label class="column-picker-item">
+                <input type="checkbox" checked={mainColumnVis[col]} onchange={() => toggleMainColumn(col)} />
+                <span>{MAIN_COL_LABELS[col] || col}</span>
+              </label>
+            {/each}
+            <div class="column-picker-separator"></div>
+            <button class="column-picker-item column-picker-action" onclick={(e) => { mainAutoFitAllColumns(e); mainShowColumnPicker = false; }}>📐 Auto-fit all</button>
+            <button class="column-picker-item column-picker-action" onclick={() => { mainResetColumnWidths(); mainShowColumnPicker = false; }}>↺ Reset defaults</button>
+          </div>
+        {/if}
+      </div>
+    </div>
     {#if $watchlists.length > 0}
       <div class="table-container">
-        <table>
+        <table style="table-layout:fixed;width:100%" bind:this={mainTable}>
           <thead><tr>
-            <th role="button" tabindex="0" onclick={() => toggleSort('name')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('name'); }} style="cursor:pointer;user-select:none">Name{sortArrow('name')}</th>
-            <th role="button" tabindex="0" onclick={() => toggleSort('query')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('query'); }} style="cursor:pointer;user-select:none">Query{sortArrow('query')}</th>
-            <th role="button" tabindex="0" onclick={() => toggleSort('interval')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('interval'); }} style="cursor:pointer;user-select:none">Interval{sortArrow('interval')}</th>
-            <th role="button" tabindex="0" onclick={() => toggleSort('last_run')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('last_run'); }} style="cursor:pointer;user-select:none">Last Run{sortArrow('last_run')}</th>
-            <th role="button" tabindex="0" onclick={() => toggleSort('new')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('new'); }} style="cursor:pointer;user-select:none">New{sortArrow('new')}</th>
-            <th>Actions</th>
+            {#if mainColumnVis.name}<th role="button" tabindex="0" onclick={() => toggleSort('name')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('name'); }} style="cursor:pointer;user-select:none;width:{mainColumnWidths.name}px;position:relative">Name{sortArrow('name')}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'name')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'name'); }}></div>
+            </th>{/if}
+            {#if mainColumnVis.query}<th role="button" tabindex="0" onclick={() => toggleSort('query')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('query'); }} style="cursor:pointer;user-select:none;width:{mainColumnWidths.query}px;position:relative">Query{sortArrow('query')}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'query')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'query'); }}></div>
+            </th>{/if}
+            {#if mainColumnVis.interval}<th role="button" tabindex="0" onclick={() => toggleSort('interval')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('interval'); }} style="cursor:pointer;user-select:none;width:{mainColumnWidths.interval}px;position:relative">Interval{sortArrow('interval')}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'interval')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'interval'); }}></div>
+            </th>{/if}
+            {#if mainColumnVis.last_run}<th role="button" tabindex="0" onclick={() => toggleSort('last_run')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('last_run'); }} style="cursor:pointer;user-select:none;width:{mainColumnWidths.last_run}px;position:relative">Last Run{sortArrow('last_run')}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'last_run')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'last_run'); }}></div>
+            </th>{/if}
+            {#if mainColumnVis.new}<th role="button" tabindex="0" onclick={() => toggleSort('new')} onkeydown={(e) => { if (e.key === 'Enter') toggleSort('new'); }} style="cursor:pointer;user-select:none;width:{mainColumnWidths.new}px;position:relative">New{sortArrow('new')}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'new')} onclick={(e) => e.stopPropagation()} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'new'); }}></div>
+            </th>{/if}
+            {#if mainColumnVis.actions}<th style="width:{mainColumnWidths.actions}px;position:relative">Actions
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="resize-handle" role="separator" onmousedown={(e) => mainStartResize(e, 'actions')} ondblclick={(e) => { e.stopPropagation(); mainAutoFitColumn(e, 'actions'); }}></div>
+            </th>{/if}
           </tr></thead>
           <tbody>
             {#each sortedWatchlists as w}
               <tr>
-                <td><strong>{w.name}</strong></td>
-                <td><span class="text-sm" role="button" tabindex="0" onclick={() => goToSearch(w)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToSearch(w); } }} style="font-family:monospace;background:var(--bg-tertiary);padding:0.1rem 0.3rem;border-radius:4px;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px" title="Click to search">{w.query}</span></td>
-                <td class="text-sm">{w.interval_minutes || 60}m</td>
-                <td class="text-sm text-muted">{w.last_checked_at ? new Date(w.last_checked_at).toLocaleString() : 'never'}</td>
-                <td class="text-sm" role="button" tabindex="0" onclick={() => (w.last_results?.length || 0) > 0 && openResultsModal(w)} onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && (w.last_results?.length || 0) > 0) { e.preventDefault(); openResultsModal(w); } }} style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px" title="Click to view results">{w.last_results?.length || 0}</td>
-                <td>
+                {#if mainColumnVis.name}<td><strong>{w.name}</strong></td>{/if}
+                {#if mainColumnVis.query}<td><span class="text-sm" role="button" tabindex="0" onclick={() => goToSearch(w)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goToSearch(w); } }} style="font-family:monospace;background:var(--bg-tertiary);padding:0.1rem 0.3rem;border-radius:4px;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px" title="Click to search">{w.query}</span></td>{/if}
+                {#if mainColumnVis.interval}<td class="text-sm">{w.interval_minutes || 60}m</td>{/if}
+                {#if mainColumnVis.last_run}<td class="text-sm text-muted">{w.last_checked_at ? new Date(w.last_checked_at).toLocaleString() : 'never'}</td>{/if}
+                {#if mainColumnVis.new}<td class="text-sm" role="button" tabindex="0" onclick={() => (w.last_results?.length || 0) > 0 && openResultsModal(w)} onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && (w.last_results?.length || 0) > 0) { e.preventDefault(); openResultsModal(w); } }} style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px" title="Click to view results">{w.last_results?.length || 0}</td>{/if}
+                {#if mainColumnVis.actions}<td>
                   <div class="btn-group">
                     <button class="btn btn-sm btn-primary" onclick={() => runWatchlist(w.id)} title="Run now">▶️</button>
                     {#if (w.last_results?.length || 0) > 0}
@@ -300,7 +488,7 @@
                     <button class="btn btn-sm btn-ghost" onclick={() => startEdit(w)}>✏️</button>
                     <button class="btn btn-sm btn-ghost" onclick={() => remove(w.id)}>🗑️</button>
                   </div>
-                </td>
+                </td>{/if}
               </tr>
             {/each}
           </tbody>

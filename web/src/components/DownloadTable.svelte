@@ -102,7 +102,7 @@
       {#each items as item (item.id)}
         <div class="download-card">
           <div class="card-row">
-            <div style="display:flex; align-items:center; gap:0.5rem">
+            <div style="display:flex; align-items:center; gap:0.5rem; min-width:0; overflow:hidden">
               {#if showSelect}
                 <input type="checkbox" checked={selectedDownloads?.has(item.id)} onchange={() => toggleDownload(item.id)} />
               {/if}

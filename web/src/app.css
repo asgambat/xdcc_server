@@ -469,3 +469,78 @@ tr:hover td { background: var(--bg-hover); }
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--border-color);
 }
+
+/* --- Resizable column handle (shared by tables) --- */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+}
+.resize-handle:hover,
+.resize-handle:active {
+  background: var(--accent);
+  opacity: 0.4;
+}
+
+/* --- Column picker dropdown (shared by tables) --- */
+.column-picker {
+  position: absolute;
+  z-index: 200;
+  margin-top: 0.35rem;
+  padding: 0.35rem 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.column-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+.column-picker-item:hover {
+  background: var(--bg-hover);
+}
+.column-picker-item input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+.column-picker-separator {
+  height: 1px;
+  margin: 0.3rem 0;
+  background: var(--border-color);
+}
+.column-picker-action {
+  font-weight: 500;
+}
+
+/* --- Drag guide line while resizing columns --- */
+.drag-guide-line {
+  position: fixed;
+  z-index: 400;
+  width: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* --- Hide text content on mobile (keep icon) --- */
+@media (max-width: 640px) {
+  .hide-mobile { display: none !important; }
+}

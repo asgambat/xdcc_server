@@ -30,8 +30,10 @@ import (
 	"xdcc_server/internal/store"
 )
 
-// Version is set at build time via ldflags.
-var Version = "0.9.5"
+// Version is set at build time via ldflags (-X main.Version=<value read from .version>).
+// The real value is injected by the build; "dev" is the fallback for local builds
+// that skip ldflags. The single source of truth is the .version file.
+var Version = "dev"
 
 func main() {
 	var (

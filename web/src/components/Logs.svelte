@@ -252,6 +252,8 @@
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;
+    flex-wrap: wrap;
+    gap: 0.35rem;
   }
 
   .log-toolbar-left {
@@ -428,5 +430,22 @@
   .log-toolbar :global(.btn-sm) {
     font-size: 0.75rem;
     padding: 0.25rem 0.6rem;
+  }
+  @media (max-width: 600px) {
+    .log-toolbar-left,
+    .log-toolbar-center,
+    .log-toolbar-right {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .log-toolbar-right {
+      justify-content: flex-end;
+    }
+    .log-filter-input {
+      width: 120px;
+    }
+    .log-fetch-form {
+      flex-shrink: 0;
+    }
   }
 </style>

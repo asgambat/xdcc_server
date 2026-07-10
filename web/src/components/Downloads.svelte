@@ -187,6 +187,32 @@
   async function retryDownload(id) { try { await DownloadsAPI.retry(id); addToast('Retrying', 'info'); await refresh(); if (activeTab === 'history') await loadHistoryPage(historyData.page); } catch (e) { addToast(e.message, 'error'); } }
   async function removeDownload(id) { try { await DownloadsAPI.remove(id); addToast('Removed', 'info'); await refresh(); if (activeTab === 'history') await loadHistoryPage(historyData.page); } catch (e) { addToast(e.message, 'error'); } }
 
+  // --- Confirmation modal for pause / cancel in the Active tab ---
+  let confirmModal = $state(null); // { title, message, confirmLabel, onConfirm }
+
+  function openConfirmModal(opts) { confirmModal = opts; }
+  function closeConfirmModal() { confirmModal = null; }
+
+  function requestPause(id) {
+    openConfirmModal({
+      title: 'Pause download?',
+      message: 'This will pause the download. You can resume it later from the Active tab.',
+      confirmLabel: 'Pause',
+      confirmClass: 'btn-warning',
+      onConfirm: () => { closeConfirmModal(); pauseDownload(id); }
+    });
+  }
+
+  function requestRemove(id) {
+    openConfirmModal({
+      title: 'Cancel download?',
+      message: 'This will cancel and remove the download. This action cannot be undone.',
+      confirmLabel: 'Cancel download',
+      confirmClass: 'btn-danger',
+      onConfirm: () => { closeConfirmModal(); removeDownload(id); }
+    });
+  }
+
   async function pauseAll() {
     const ids = $downloads.filter(d => d.status === 'downloading' || d.status === 'queued').map(d => d.id);
     if (ids.length === 0) return addToast('No downloads to pause', 'warning');
@@ -319,7 +345,7 @@
         <div class="card-header"><span class="card-title">⬇️ Downloading ({active.length})</span></div>
         <DownloadTable items={active} selectedDownloads={$selectedDownloads} {toggleDownload} {toggleSelectAll}
           {formatBytes} {formatSpeed} {formatETA} {statusBadge}
-          onPause={pauseDownload} onResume={resumeDownload} onRetry={retryDownload} onRemove={removeDownload} onMoveUp={moveUp} onMoveDown={moveDown} />
+          onPause={requestPause} onResume={resumeDownload} onRetry={retryDownload} onRemove={requestRemove} onMoveUp={moveUp} onMoveDown={moveDown} />
       </div>
     {/if}
 
@@ -328,7 +354,7 @@
         <div class="card-header"><span class="card-title">⏸️ Paused ({paused.length})</span></div>
         <DownloadTable items={paused} selectedDownloads={$selectedDownloads} {toggleDownload} {toggleSelectAll}
           {formatBytes} {formatSpeed} {formatETA} {statusBadge}
-          onPause={pauseDownload} onResume={resumeDownload} onRetry={retryDownload} onRemove={removeDownload} onMoveUp={moveUp} onMoveDown={moveDown} />
+          onPause={requestPause} onResume={resumeDownload} onRetry={retryDownload} onRemove={requestRemove} onMoveUp={moveUp} onMoveDown={moveDown} />
       </div>
     {/if}
 
@@ -337,7 +363,7 @@
         <div class="card-header"><span class="card-title">📋 Queued ({queued.length})</span></div>
         <DownloadTable items={queued} selectedDownloads={$selectedDownloads} {toggleDownload} {toggleSelectAll}
           {formatBytes} {formatSpeed} {formatETA} {statusBadge}
-          onPause={pauseDownload} onResume={resumeDownload} onRetry={retryDownload} onRemove={removeDownload} onMoveUp={moveUp} onMoveDown={moveDown} />
+          onPause={requestPause} onResume={resumeDownload} onRetry={retryDownload} onRemove={requestRemove} onMoveUp={moveUp} onMoveDown={moveDown} />
       </div>
     {/if}
 
@@ -453,6 +479,17 @@
       {/if}
     </div>
   {/if}
+{/if}
+
+<!-- Pause / Cancel confirmation modal (Active tab) -->
+{#if confirmModal}
+  <Modal title={confirmModal.title} visible={true} on:close={closeConfirmModal}>
+    <p class="text-sm" style="margin:0; line-height:1.5;">{confirmModal.message}</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick={closeConfirmModal}>Cancel</button>
+      <button class="btn {confirmModal.confirmClass}" onclick={confirmModal.onConfirm}>{confirmModal.confirmLabel}</button>
+    </div>
+  </Modal>
 {/if}
 
 <!-- Delete All History Confirmation Modal -->

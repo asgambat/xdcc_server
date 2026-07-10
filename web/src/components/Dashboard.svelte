@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { stats, status, downloads, activeDownloads, servers, navigateTo } from '../lib/stores.js';
   import { ServersAPI, DownloadsAPI, sseClient } from '../lib/api.js';
-  import { formatBytes, formatSpeed, formatUptime, statusBadge } from '../lib/utils.js';
+  import { formatBytes, formatSpeed, formatUptime, formatETA, statusBadge } from '../lib/utils.js';
   import { addToast } from '../lib/stores.js';
 
   let connectingServers = $state(new Set());
@@ -202,7 +202,7 @@
 
 <div style="display:flex; align-items:center; justify-content:flex-end; margin-bottom:1rem">
     {#if $downloads.filter(d => d.status === 'downloading' || d.status === 'queued').length > 0 || $servers.filter(s => s.status === 'connected').length > 0}
-      <button class="btn btn-danger" onclick={stopAll}>🛑 Stop All</button>
+      <button class="btn btn-danger" onclick={stopAll}>Stop All</button>
     {/if}
   </div>
 
@@ -262,13 +262,13 @@
     </div>
     <div class="table-container">
       <table>
-        <thead><tr><th>File</th><th>Bot</th><th>Progress</th><th>Speed</th><th>ETA</th></tr></thead>
+        <thead><tr><th>File</th><th class="hide-mobile">Bot</th><th class="hide-mobile">Progress</th><th class="hide-mobile">Speed</th><th>ETA</th></tr></thead>
         <tbody>
-          {#each $activeDownloads as d}
+          {#each $activeDownloads as d (d.id)}
             <tr>
               <td class="truncate" style="max-width:250px">{d.filename || 'Unknown'}</td>
-              <td>{d.bot || '—'}</td>
-              <td style="min-width:140px">
+              <td class="hide-mobile">{d.bot || '—'}</td>
+              <td class="hide-mobile" style="min-width:140px">
                 <div class="text-sm" style="display:flex;justify-content:space-between">
                   <span>{formatBytes(d.progress_bytes)} / {formatBytes(d.file_size)}</span>
                   <span>{d.file_size > 0 ? Math.round((d.progress_bytes / d.file_size) * 100) : 0}%</span>
@@ -277,8 +277,8 @@
                   <div class="progress-fill" style="width:{d.file_size > 0 ? Math.min(100, (d.progress_bytes / d.file_size) * 100) : 0}%"></div>
                 </div>
               </td>
-              <td class="text-sm">{formatSpeed(d.speed_bps)}</td>
-              <td class="text-sm">{d.file_size ? formatBytes(d.file_size - d.progress_bytes) + ' left' : '—'}</td>
+              <td class="text-sm hide-mobile">{formatSpeed(d.speed_bps)}</td>
+              <td class="text-sm">{formatETA(d.file_size - d.progress_bytes, d.speed_bps)}</td>
             </tr>
           {/each}
         </tbody>
@@ -295,14 +295,14 @@
   {#if $servers.length > 0}
     <div class="table-container">
       <table>
-        <thead><tr><th>Server</th><th>Status</th><th>Channels</th><th>Uptime</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Server</th><th class="hide-mobile">Status</th><th class="hide-mobile">Channels</th><th class="hide-mobile">Uptime</th><th>Actions</th></tr></thead>
         <tbody>
           {#each $servers as srv}
             <tr>
               <td>{srv.address || srv.server_address}:{srv.port || 6667}</td>
-              <td><span class="badge badge-{statusBadge(srv.status).cls}"><span class="badge-dot"></span>{srv.status}</span></td>
-              <td>{srv.channel_count || 0}</td>
-              <td>{formatUptime(srv.uptime_seconds || 0)}</td>
+              <td class="hide-mobile"><span class="badge badge-{statusBadge(srv.status).cls}"><span class="badge-dot"></span>{srv.status}</span></td>
+              <td class="hide-mobile">{srv.channel_count || 0}</td>
+              <td class="hide-mobile">{formatUptime(srv.uptime_seconds || 0)}</td>
               <td>
                 {#if connectingServers.has(srv.id)}
                   <button class="btn btn-sm btn-success" disabled>Connecting...</button>
@@ -321,3 +321,11 @@
     <div class="empty-state"><div class="empty-state-text">No servers configured</div></div>
   {/if}
 </div>
+
+<style>
+  @media (max-width: 768px) {
+    .hide-mobile {
+      display: none;
+    }
+  }
+</style>
